@@ -116,7 +116,10 @@ void *kmalloc(size_t size) {
 
     expand_heap(size);
 
-    heap_header_t *new_block = (heap_header_t *)heap_current;
+    /* expand_heap advances heap_current past the new region.
+     * We must use the OLD heap_current (start of new region) as
+     * the new block's address, not the updated one. */
+    heap_header_t *new_block = (heap_header_t *)(heap_current - align_up(size + sizeof(heap_header_t), PAGE_SIZE));
     new_block->magic = HEAP_BLOCK_MAGIC;
     new_block->size = size;
     new_block->is_free = 0;
@@ -167,6 +170,10 @@ void kfree(void *ptr) {
 }
 
 void *kcalloc(size_t num, size_t size) {
+    /* Check for integer overflow in num * size */
+    if (num != 0 && size != 0 && num > (size_t)-1 / size) {
+        return NULL;
+    }
     size_t total = num * size;
     void *ptr = kmalloc(total);
     if (!ptr) return NULL;

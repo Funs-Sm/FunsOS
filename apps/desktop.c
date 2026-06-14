@@ -1,8 +1,8 @@
 #include "user_syscall.h"
 #include "string.h"
+#include "gui_common.h"
+#include "gfx_adapter.h"
 
-#define SCREEN_W 1024
-#define SCREEN_H 768
 #define TASKBAR_H 40
 #define ICON_W 64
 #define ICON_H 64
@@ -22,10 +22,6 @@
 #define COLOR_ICON_PAINT 0xFF4444
 #define COLOR_ICON_CALC 0x44CC44
 
-#define FB_IOCTL_GET_PTR 0x01
-#define MOUSE_IOCTL_READ 0x10
-#define KBD_IOCTL_READ   0x20
-
 typedef struct {
     int x, y;
     int w, h;
@@ -34,7 +30,6 @@ typedef struct {
     const char *path;
 } desktop_icon_t;
 
-static unsigned int *fb;
 static int fb_fd;
 static int mouse_fd;
 static int kbd_fd;
@@ -45,64 +40,26 @@ static int mouse_btn = 0;
 
 static desktop_icon_t icons[5];
 
-static void fb_draw_rect(int x, int y, int w, int h, unsigned int color)
-{
-    int i, j;
-    for (j = y; j < y + h && j < SCREEN_H; j++) {
-        for (i = x; i < x + w && i < SCREEN_W; i++) {
-            if (i >= 0 && j >= 0)
-                fb[j * SCREEN_W + i] = color;
-        }
-    }
-}
-
-static void fb_draw_char(int x, int y, char c, unsigned int fg)
-{
-    static const unsigned char font8x16[128][16] = {{0}};
-    int i, j;
-    if ((unsigned char)c > 127) return;
-    for (j = 0; j < 16; j++) {
-        unsigned char row = font8x16[(unsigned char)c][j];
-        for (i = 0; i < 8; i++) {
-            if (row & (0x80 >> i)) {
-                int px = x + i;
-                int py = y + j;
-                if (px >= 0 && px < SCREEN_W && py >= 0 && py < SCREEN_H)
-                    fb[py * SCREEN_W + px] = fg;
-            }
-        }
-    }
-}
-
-static void fb_draw_string(int x, int y, const char *s, unsigned int fg)
-{
-    while (*s) {
-        fb_draw_char(x, y, *s, fg);
-        x += 8;
-        s++;
-    }
-}
-
 static void draw_background(void)
 {
     int y;
-    for (y = 0; y < SCREEN_H - TASKBAR_H; y++) {
-        unsigned int r = ((COLOR_BG_TOP & 0xFF0000) >> 16) * (SCREEN_H - TASKBAR_H - y) / (SCREEN_H - TASKBAR_H)
-                       + ((COLOR_BG_BOT & 0xFF0000) >> 16) * y / (SCREEN_H - TASKBAR_H);
-        unsigned int g = ((COLOR_BG_TOP & 0x00FF00) >> 8) * (SCREEN_H - TASKBAR_H - y) / (SCREEN_H - TASKBAR_H)
-                       + ((COLOR_BG_BOT & 0x00FF00) >> 8) * y / (SCREEN_H - TASKBAR_H);
-        unsigned int b = (COLOR_BG_TOP & 0x0000FF) * (SCREEN_H - TASKBAR_H - y) / (SCREEN_H - TASKBAR_H)
-                       + (COLOR_BG_BOT & 0x0000FF) * y / (SCREEN_H - TASKBAR_H);
+    for (y = 0; y < SCREEN_HEIGHT - TASKBAR_H; y++) {
+        unsigned int r = ((COLOR_BG_TOP & 0xFF0000) >> 16) * (SCREEN_HEIGHT - TASKBAR_H - y) / (SCREEN_HEIGHT - TASKBAR_H)
+                       + ((COLOR_BG_BOT & 0xFF0000) >> 16) * y / (SCREEN_HEIGHT - TASKBAR_H);
+        unsigned int g = ((COLOR_BG_TOP & 0x00FF00) >> 8) * (SCREEN_HEIGHT - TASKBAR_H - y) / (SCREEN_HEIGHT - TASKBAR_H)
+                       + ((COLOR_BG_BOT & 0x00FF00) >> 8) * y / (SCREEN_HEIGHT - TASKBAR_H);
+        unsigned int b = (COLOR_BG_TOP & 0x0000FF) * (SCREEN_HEIGHT - TASKBAR_H - y) / (SCREEN_HEIGHT - TASKBAR_H)
+                       + (COLOR_BG_BOT & 0x0000FF) * y / (SCREEN_HEIGHT - TASKBAR_H);
         unsigned int color = (r << 16) | (g << 8) | b;
-        fb_draw_rect(0, y, SCREEN_W, 1, color);
+        fb_draw_rect(0, y, SCREEN_WIDTH, 1, color);
     }
 }
 
 static void draw_taskbar(void)
 {
-    fb_draw_rect(0, SCREEN_H - TASKBAR_H, SCREEN_W, TASKBAR_H, COLOR_TASKBAR);
-    fb_draw_rect(4, SCREEN_H - TASKBAR_H + 4, 80, 32, COLOR_STARTBTN);
-    fb_draw_string(12, SCREEN_H - TASKBAR_H + 12, "Start", COLOR_WHITE);
+    fb_draw_rect(0, SCREEN_HEIGHT - TASKBAR_H, SCREEN_WIDTH, TASKBAR_H, COLOR_TASKBAR);
+    fb_draw_rect(4, SCREEN_HEIGHT - TASKBAR_H + 4, 80, 32, COLOR_STARTBTN);
+    fb_draw_string_transparent(12, SCREEN_HEIGHT - TASKBAR_H + 12, "Start", COLOR_WHITE);
 }
 
 static void draw_clock(void)
@@ -123,7 +80,7 @@ static void draw_clock(void)
     buf[6] = '0' + sec / 10;
     buf[7] = '0' + sec % 10;
     buf[8] = '\0';
-    fb_draw_string(SCREEN_W - 80, SCREEN_H - TASKBAR_H + 12, buf, COLOR_CLOCK);
+    fb_draw_string_transparent(SCREEN_WIDTH - 80, SCREEN_HEIGHT - TASKBAR_H + 12, buf, COLOR_CLOCK);
 }
 
 static void init_icons(void)
@@ -179,7 +136,7 @@ static void draw_icons(void)
     for (i = 0; i < 5; i++) {
         fb_draw_rect(icons[i].x, icons[i].y, icons[i].w, icons[i].h, icons[i].color);
         fb_draw_rect(icons[i].x, icons[i].y, icons[i].w, icons[i].h, COLOR_WHITE);
-        fb_draw_string(icons[i].x, icons[i].y + icons[i].h + 2, icons[i].label, COLOR_WHITE);
+        fb_draw_string_transparent(icons[i].x, icons[i].y + icons[i].h + 2, icons[i].label, COLOR_WHITE);
     }
 }
 
@@ -198,9 +155,9 @@ static void read_mouse(void)
     mouse_x += (signed char)data[1];
     mouse_y += (signed char)data[2];
     if (mouse_x < 0) mouse_x = 0;
-    if (mouse_x >= SCREEN_W) mouse_x = SCREEN_W - 1;
+    if (mouse_x >= SCREEN_WIDTH) mouse_x = SCREEN_WIDTH - 1;
     if (mouse_y < 0) mouse_y = 0;
-    if (mouse_y >= SCREEN_H) mouse_y = SCREEN_H - 1;
+    if (mouse_y >= SCREEN_HEIGHT) mouse_y = SCREEN_HEIGHT - 1;
     mouse_btn = data[0] & 0x03;
 }
 
@@ -221,24 +178,26 @@ static void handle_click(void)
         }
     }
     if (mouse_x >= 4 && mouse_x < 84 &&
-        mouse_y >= SCREEN_H - TASKBAR_H + 4 && mouse_y < SCREEN_H - 4) {
+        mouse_y >= SCREEN_HEIGHT - TASKBAR_H + 4 && mouse_y < SCREEN_HEIGHT - 4) {
     }
 }
 
 static void init_devices(void)
 {
+    unsigned int *fb;
     fb_fd = sys_open("/dev/fb0", O_RDWR);
     if (fb_fd >= 0) {
         sys_ioctl(fb_fd, FB_IOCTL_GET_PTR, &fb);
     }
     mouse_fd = sys_open("/dev/mouse0", O_RDONLY);
     kbd_fd = sys_open("/dev/kbd0", O_RDONLY);
+    gfx_adapter_init(fb, SCREEN_WIDTH, SCREEN_HEIGHT);
 }
 
 int main(void)
 {
     init_devices();
-    if (!fb) {
+    if (!gfx_adapter_is_initialized()) {
         sys_exit(1);
     }
 

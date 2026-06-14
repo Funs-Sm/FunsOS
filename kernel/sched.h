@@ -38,6 +38,7 @@ typedef struct {
 } sched_state_t;
 
 void sched_init(void);
+void sched_create_idle_task(void);
 void sched_add(pcb_t *proc);
 void sched_remove(pcb_t *proc);
 void sched_tick(void);
@@ -53,6 +54,10 @@ pcb_t *sched_find_process(pid_t pid);
 int sched_set_policy(pcb_t *proc, uint32_t policy);
 uint32_t sched_get_tick_count(void);
 void sched_print_stats(void);
+
+/* Trampoline for newly created processes: enters user mode via iret.
+ * Called from context_switch when a new process is first scheduled. */
+void process_first_run(void);
 
 /* Block the currently running process.  Used by I/O waiters (TCP/UDP,
  * sockets, pipes) that need to suspend until a peer event wakes them. */

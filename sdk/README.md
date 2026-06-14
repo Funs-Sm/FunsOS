@@ -15,8 +15,8 @@
 
 ---
 
-**版权所有 (c) 2025-2026 Funs Liu. All Rights Reserved.**
-Copyright (c) 2025-2026 Funs Liu. All Rights Reserved.
+**Copyright (c) 2025-2026 Funs Liu. Licensed under the MIT License.**
+Copyright (c) 2025-2026 Funs Liu. Licensed under the MIT License.
 
 ---
 
@@ -27,7 +27,7 @@ Copyright (c) 2025-2026 Funs Liu. All Rights Reserved.
 SDK 采用**头文件 + 运行时库**的设计模式：
 - **头文件 (`include/`)** 提供 10 个公共 API 头文件，涵盖全部系统功能的声明与数据类型定义
 - **运行时库 (`lib/`)** 提供 CRT (C Runtime) 启动代码和系统调用胶水层 (syscall glue)，将高级 API 调用翻译为底层的 `int 0x80` 系统调用
-- **示例程序 (`examples/`)** 包含 20+ 个完整示例，覆盖 SDK 的每个功能领域
+- **示例程序 (`examples/`)** 包含 27+ 个完整示例，覆盖 SDK 的每个功能领域
 - **辅助工具 (`tools/`)** 提供 `funsdk-config` 配置工具和 `build_template.mk` 构建模板
 - **文档 (`docs/`)** 包含 API 参考手册、架构说明和快速入门指南
 
@@ -142,7 +142,7 @@ sdk/
 // 目标操作系统信息
 #define FUNSOS_OS_NAME       "FUNSOS"
 #define FUNSOS_KERNEL_NAME   "FunsCore"
-#define FUNSOS_KERNEL_VERSION "0.4"
+#define FUNSOS_KERNEL_VERSION "0.5"
 ```
 
 ---
@@ -601,6 +601,6 @@ int main(int argc, char **argv) {
 ---
 
 <p align="center">
-  <strong>FunsOS SDK v1.1.0 — FunsOS 应用程序开发工具包</strong><br/>
-  <em>FunsOS SDK v1.1.0 — Software Development Kit for FunsOS Applications</em>
+  <strong>FunsOS SDK v1.2.0 — FunsOS 应用程序开发工具包</strong><br/>
+  <em>FunsOS SDK v1.2.0 — Software Development Kit for FunsOS Applications</em>
 </p>

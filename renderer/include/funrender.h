@@ -103,4 +103,11 @@ void fr_set_font(fr_handle_t ctx, const char *font_name, int size);
 #include "fr_clipboard.h"
 #include "fr_widgets_extra.h"
 
+/* 新增模块 */
+#include "fr_particle.h"
+#include "fr_path.h"
+#include "fr_gradient.h"
+#include "fr_shape.h"
+#include "fr_texture.h"
+
 #endif /* FUNRENDER_H */

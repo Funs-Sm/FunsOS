@@ -1,11 +1,11 @@
 #include "user_syscall.h"
 #include "string.h"
+#include "gui_common.h"
+#include "gfx_adapter.h"
 
 #define GRID_SIZE 20
 #define GRID_W 30
 #define GRID_H 20
-#define SCREEN_W 1024
-#define SCREEN_H 768
 
 #define WIN_X 100
 #define WIN_Y 60
@@ -23,12 +23,6 @@
 #define COLOR_BLACK    0x000000
 #define COLOR_SCORE    0xFFFF00
 
-#define CHAR_W 8
-#define CHAR_H 16
-
-#define FB_IOCTL_GET_PTR 0x01
-#define KBD_IOCTL_READ   0x20
-
 #define DIR_UP    0
 #define DIR_DOWN  1
 #define DIR_LEFT  2
@@ -41,7 +35,6 @@ typedef struct {
     int y;
 } pos_t;
 
-static unsigned int *fb;
 static int fb_fd;
 static int kbd_fd;
 
@@ -53,42 +46,6 @@ static pos_t food;
 static int score = 0;
 static int game_over = 0;
 static int game_speed = 15;
-
-static void fb_draw_rect(int x, int y, int w, int h, unsigned int color)
-{
-    int i, j;
-    for (j = y; j < y + h; j++) {
-        for (i = x; i < x + w; i++) {
-            if (i >= 0 && i < SCREEN_W && j >= 0 && j < SCREEN_H)
-                fb[j * SCREEN_W + i] = color;
-        }
-    }
-}
-
-static void fb_draw_char(int x, int y, char c, unsigned int fg, unsigned int bg)
-{
-    static const unsigned char font8x16[128][16] = {{0}};
-    int i, j;
-    if ((unsigned char)c > 127) return;
-    for (j = 0; j < 16; j++) {
-        unsigned char row = font8x16[(unsigned char)c][j];
-        for (i = 0; i < 8; i++) {
-            int px = x + i;
-            int py = y + j;
-            if (px >= 0 && px < SCREEN_W && py >= 0 && py < SCREEN_H)
-                fb[py * SCREEN_W + px] = (row & (0x80 >> i)) ? fg : bg;
-        }
-    }
-}
-
-static void fb_draw_string(int x, int y, const char *s, unsigned int fg, unsigned int bg)
-{
-    while (*s) {
-        fb_draw_char(x, y, *s, fg, bg);
-        x += CHAR_W;
-        s++;
-    }
-}
 
 static void spawn_food(void)
 {
@@ -236,7 +193,7 @@ static void draw_game(void)
             }
         }
         score_buf[idx] = '\0';
-        fb_draw_string(WIN_X + WIN_W - idx * CHAR_W - 8, WIN_Y + 4, score_buf, COLOR_SCORE, COLOR_TITLEBAR);
+        fb_draw_string(WIN_X + WIN_W - idx * CHAR_WIDTH - 8, WIN_Y + 4, score_buf, COLOR_SCORE, COLOR_TITLEBAR);
     }
 
     if (game_over) {
@@ -276,17 +233,19 @@ static void handle_keyboard(void)
 
 static void init_devices(void)
 {
+    unsigned int *fb;
     fb_fd = sys_open("/dev/fb0", O_RDWR);
     if (fb_fd >= 0) {
         sys_ioctl(fb_fd, FB_IOCTL_GET_PTR, &fb);
     }
     kbd_fd = sys_open("/dev/kbd0", O_RDONLY);
+    gfx_adapter_init(fb, SCREEN_WIDTH, SCREEN_HEIGHT);
 }
 
 int main(void)
 {
     init_devices();
-    if (!fb) {
+    if (!gfx_adapter_is_initialized()) {
         sys_exit(1);
     }
 

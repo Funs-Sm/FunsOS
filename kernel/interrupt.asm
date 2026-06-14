@@ -338,17 +338,8 @@ irq_common_stub:
     CALL _irq_handler
     ADD ESP, 4
 
-    CMP DWORD [ESP + 32], 8
-    JL .slave_done
-
-    MOV DX, 0xA0
-    MOV AL, 0x20
-    OUT DX, AL
-
-.slave_done:
-    MOV DX, 0x20
-    MOV AL, 0x20
-    OUT DX, AL
+    ; EOI is handled by C irq_handler (pic_eoi), not here.
+    ; Double EOI causes spurious interrupts and lost interrupts.
 
     POP GS
     POP FS

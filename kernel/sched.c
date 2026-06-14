@@ -3,11 +3,39 @@
 #include "process.h"
 #include "timer.h"
 #include "sync.h"
+#include "spinlock.h"
 #include "kheap.h"
 #include "string.h"
 #include "stdio.h"
 #include "stddef.h"
 #include "fpu.h"
+
+/* Assembly context switch: saves callee-saved regs, switches ESP, restores */
+extern void context_switch(uint32_t *old_esp, uint32_t new_esp);
+
+/* Trampoline for newly created processes: enters user mode via iret */
+void process_first_run(void) {
+    pcb_t *proc = sched_get_current();
+    if (!proc) {
+        while (1) asm volatile("hlt");
+    }
+
+    asm volatile(
+        "cli\n\t"
+        "movw $0x23, %%ax\n\t"
+        "movw %%ax, %%ds\n\t"
+        "movw %%ax, %%es\n\t"
+        "movw %%ax, %%fs\n\t"
+        "movw %%ax, %%gs\n\t"
+        "pushl $0x23\n\t"        /* ss  */
+        "pushl %0\n\t"           /* useresp */
+        "pushl $0x202\n\t"       /* eflags (IF=1) */
+        "pushl $0x1B\n\t"        /* cs  */
+        "pushl %1\n\t"           /* eip */
+        "iret\n\t"
+        : : "r"(proc->user_stack), "r"(proc->entry_point) : "eax", "memory"
+    );
+}
 
 static sched_state_t sched;
 static pcb_t *process_list = NULL;
@@ -114,10 +142,26 @@ void sched_init(void) {
     sched.in_schedule = 0;
 }
 
+/* Idle task: runs when no other process is ready */
+static void idle_task_func(void) {
+    while (1) {
+        asm volatile("hlt");
+    }
+}
+
+void sched_create_idle_task(void) {
+    /* Create a minimal kernel-thread as the idle task */
+    extern pcb_t *process_create_kernel(const char *name, void (*entry)(void));
+    pcb_t *idle = process_create_kernel("idle", idle_task_func);
+    if (idle) {
+        sched.idle_task = idle;
+    }
+}
+
 void sched_add(pcb_t *proc) {
     if (!proc) return;
 
-    spinlock_lock(&sched.lock);
+    uint32_t flags = spinlock_irq_save(&sched.lock);
 
     proc->state = PROCESS_READY;
     proc->last_run_time = sched.tick_count;
@@ -135,13 +179,13 @@ void sched_add(pcb_t *proc) {
 
     add_to_queue(proc);
 
-    spinlock_unlock(&sched.lock);
+    spinlock_irq_restore(&sched.lock, flags);
 }
 
 void sched_remove(pcb_t *proc) {
     if (!proc) return;
 
-    spinlock_lock(&sched.lock);
+    uint32_t flags = spinlock_irq_save(&sched.lock);
 
     if (proc->sched_policy & PROCESS_REAL_TIME) {
         int rt_level = proc->priority / 50;
@@ -163,7 +207,7 @@ void sched_remove(pcb_t *proc) {
         process_list = proc->next;
     }
 
-    spinlock_unlock(&sched.lock);
+    spinlock_irq_restore(&sched.lock, flags);
 }
 
 void sched_tick(void) {
@@ -194,10 +238,10 @@ void sched_tick(void) {
 }
 
 void schedule(void) {
-    spinlock_lock(&sched.lock);
+    uint32_t flags = spinlock_irq_save(&sched.lock);
 
     if (sched.in_schedule) {
-        spinlock_unlock(&sched.lock);
+        spinlock_irq_restore(&sched.lock, flags);
         return;
     }
     sched.in_schedule = 1;
@@ -215,8 +259,13 @@ void schedule(void) {
     }
 
     if (!next) {
+        /* No process to run - restore prev or spin in kernel */
+        if (prev) {
+            prev->state = PROCESS_RUNNING;
+            sched.current = prev;
+        }
         sched.in_schedule = 0;
-        spinlock_unlock(&sched.lock);
+        spinlock_irq_restore(&sched.lock, flags);
         return;
     }
 
@@ -234,23 +283,37 @@ void schedule(void) {
         asm volatile("mov %0, %%cr3" : : "r"(next->page_dir) : "memory");
     }
 
-    sched.in_schedule = 0;
-    spinlock_unlock(&sched.lock);
+    /* Update TSS.esp0 so interrupts from user mode use the correct
+     * kernel stack. */
+    {
+        extern void gdt_set_tss(uint32_t ss0, uint32_t esp0);
+        if (next->kernel_stack) {
+            gdt_set_tss(0x10, next->kernel_stack);
+        }
+    }
 
-    if (prev != next) {
+    sched.in_schedule = 0;
+    spinlock_irq_restore(&sched.lock, flags);
+
+    if (prev && prev != next) {
+        /* Stack-based context switch: saves callee-saved registers
+         * on prev's stack, switches to next's stack, restores
+         * registers, and returns.  For a preempted process this
+         * resumes exactly where it left off (returning through the
+         * interrupt handler back to user mode).  For a new process
+         * the stack was set up so that RET jumps to
+         * process_first_run which enters user mode via iret. */
+        context_switch(&prev->kernel_esp, next->kernel_esp);
+    } else if (!prev && next) {
+        /* First ever context switch - no prev to save, just jump */
         asm volatile(
-            "mov %0, %%esp\n"
-            "pop %%edi\n"
-            "pop %%esi\n"
-            "pop %%ebp\n"
-            "add $4, %%esp\n"
-            "pop %%ebx\n"
-            "pop %%edx\n"
-            "pop %%ecx\n"
-            "pop %%eax\n"
-            "add $8, %%esp\n"
-            "iret\n"
-            : : "r"(&next->context) : "memory"
+            "mov %0, %%esp\n\t"
+            "pop %%edi\n\t"
+            "pop %%esi\n\t"
+            "pop %%ebx\n\t"
+            "pop %%ebp\n\t"
+            "ret\n\t"
+            : : "r"(next->kernel_esp) : "memory"
         );
     }
 }
@@ -258,12 +321,12 @@ void schedule(void) {
 void sched_block(pcb_t *proc, int reason) {
     if (!proc) return;
 
-    spinlock_lock(&sched.lock);
+    uint32_t flags = spinlock_irq_save(&sched.lock);
 
     if (proc->state == PROCESS_RUNNING) {
         proc->state = PROCESS_BLOCKED;
         proc->blocked_reason = reason;
-        spinlock_unlock(&sched.lock);
+        spinlock_irq_restore(&sched.lock, flags);
         schedule();
     } else if (proc->state == PROCESS_READY) {
         if (proc->sched_policy & PROCESS_REAL_TIME) {
@@ -277,22 +340,22 @@ void sched_block(pcb_t *proc, int reason) {
         }
         proc->state = PROCESS_BLOCKED;
         proc->blocked_reason = reason;
-        spinlock_unlock(&sched.lock);
+        spinlock_irq_restore(&sched.lock, flags);
     } else {
-        spinlock_unlock(&sched.lock);
+        spinlock_irq_restore(&sched.lock, flags);
     }
 }
 
 void sched_unblock(pcb_t *proc) {
     if (!proc || proc->state != PROCESS_BLOCKED) return;
 
-    spinlock_lock(&sched.lock);
+    uint32_t flags = spinlock_irq_save(&sched.lock);
 
     proc->state = PROCESS_READY;
     proc->blocked_reason = BLOCK_REASON_NONE;
     add_to_queue(proc);
 
-    spinlock_unlock(&sched.lock);
+    spinlock_irq_restore(&sched.lock, flags);
 }
 
 pcb_t *sched_get_current(void) {
@@ -305,7 +368,7 @@ int sched_set_priority(pcb_t *proc, uint32_t priority) {
         priority = SCHED_PRIORITY_MAX;
     }
 
-    spinlock_lock(&sched.lock);
+    uint32_t flags = spinlock_irq_save(&sched.lock);
 
     if (proc->state == PROCESS_READY) {
         if (proc->sched_policy & PROCESS_REAL_TIME) {
@@ -327,7 +390,7 @@ int sched_set_priority(pcb_t *proc, uint32_t priority) {
         add_to_queue(proc);
     }
 
-    spinlock_unlock(&sched.lock);
+    spinlock_irq_restore(&sched.lock, flags);
     return 0;
 }
 
@@ -350,41 +413,45 @@ void sched_sleep(uint32_t milliseconds) {
 }
 
 void sched_wakeup_sleepers(void) {
-    spinlock_lock(&sched.lock);
+    uint32_t flags = spinlock_irq_save(&sched.lock);
 
     pcb_t *proc = process_list;
     while (proc) {
         if (proc->state == PROCESS_BLOCKED &&
             proc->blocked_reason == BLOCK_REASON_SLEEP &&
             sched.tick_count >= proc->wake_time) {
-            sched_unblock(proc);
+            /* Inline sched_unblock logic to avoid deadlock
+             * (sched_unblock also tries to acquire sched.lock) */
+            proc->state = PROCESS_READY;
+            proc->blocked_reason = BLOCK_REASON_NONE;
+            add_to_queue(proc);
         }
         proc = proc->next;
     }
 
-    spinlock_unlock(&sched.lock);
+    spinlock_irq_restore(&sched.lock, flags);
 }
 
 pcb_t *sched_find_process(pid_t pid) {
-    spinlock_lock(&sched.lock);
+    uint32_t flags = spinlock_irq_save(&sched.lock);
 
     pcb_t *proc = process_list;
     while (proc) {
         if (proc->pid == pid) {
-            spinlock_unlock(&sched.lock);
-            return proc;
+            spinlock_irq_restore(&sched.lock, flags);
+        return proc;
         }
         proc = proc->next;
     }
 
-    spinlock_unlock(&sched.lock);
+    spinlock_irq_restore(&sched.lock, flags);
     return NULL;
 }
 
 int sched_set_policy(pcb_t *proc, uint32_t policy) {
     if (!proc) return -1;
 
-    spinlock_lock(&sched.lock);
+    uint32_t flags = spinlock_irq_save(&sched.lock);
 
     if (proc->state == PROCESS_READY) {
         if (proc->sched_policy & PROCESS_REAL_TIME) {
@@ -405,7 +472,7 @@ int sched_set_policy(pcb_t *proc, uint32_t policy) {
         add_to_queue(proc);
     }
 
-    spinlock_unlock(&sched.lock);
+    spinlock_irq_restore(&sched.lock, flags);
     return 0;
 }
 
@@ -414,7 +481,7 @@ uint32_t sched_get_tick_count(void) {
 }
 
 void sched_print_stats(void) {
-    spinlock_lock(&sched.lock);
+    uint32_t flags = spinlock_irq_save(&sched.lock);
 
     printf("=== Scheduler Statistics ===\n");
     printf("Tick count: %llu\n", sched.tick_count);
@@ -435,5 +502,5 @@ void sched_print_stats(void) {
     }
     printf("============================\n");
 
-    spinlock_unlock(&sched.lock);
+    spinlock_irq_restore(&sched.lock, flags);
 }

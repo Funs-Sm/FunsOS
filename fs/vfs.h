@@ -15,12 +15,13 @@
 #define FS_TYPE_TARFS  9   /* 补充遗漏的 TARFS 类型 */
 #define FS_TYPE_FUSE   10  /* FUSE 用户态文件系统 */
 
-#define FILE_MODE_READ  0x01
-#define FILE_MODE_WRITE 0x02
-#define FILE_MODE_EXEC  0x04
-#define FILE_MODE_DIR   0x08
-#define FILE_MODE_REG   0x10
-#define FILE_MODE_LNK   0x20
+#define FILE_MODE_READ   0x01
+#define FILE_MODE_WRITE  0x02
+#define FILE_MODE_EXEC   0x04
+#define FILE_MODE_DIR    0x08
+#define FILE_MODE_REG    0x10
+#define FILE_MODE_LNK    0x20
+#define FILE_MODE_CREATE 0x40
 
 #define DT_UNKNOWN 0
 #define DT_REG     FILE_MODE_REG

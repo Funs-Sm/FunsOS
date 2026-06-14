@@ -447,7 +447,7 @@ int sys_info_get(sys_info_t *info) {
     
     memset(info, 0, sizeof(sys_info_t));
     strcpy(info->os_name, "FunsOS");
-    strcpy(info->kernel_version, "0.4");
+    strcpy(info->kernel_version, "0.5");
     strcpy(info->hostname, system_hostname);
     
     extern uint64_t timer_get_ticks(void);

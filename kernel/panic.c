@@ -1,5 +1,6 @@
 #include "panic.h"
 #include "version.h"
+#include "serial.h"
 
 static volatile uint16_t *vga_buffer = (uint16_t *)0xB8000;
 static uint8_t current_color = 0x07;
@@ -129,6 +130,61 @@ void kernel_panic(const char *msg, const char *file, int line)
 {
     asm volatile("cli");
 
+    /* Output panic info to serial port (visible even in VESA mode) */
+    serial_print(COM1, "\n!!! KERNEL PANIC !!!\n");
+    serial_print(COM1, "Message: ");
+    serial_print(COM1, msg);
+    serial_print(COM1, "\nFile: ");
+    serial_print(COM1, file);
+    serial_print(COM1, ":");
+    {
+        char buf[12];
+        int i = 0, v = line;
+        if (v == 0) { buf[i++] = '0'; }
+        else { char rev[12]; int ri = 0;
+            if (v < 0) { serial_print(COM1, "-"); v = -v; }
+            while (v > 0) { rev[ri++] = '0' + (v % 10); v /= 10; }
+            while (ri > 0) buf[i++] = rev[--ri];
+        }
+        buf[i] = 0;
+        serial_print(COM1, buf);
+    }
+    serial_print(COM1, "\n");
+
+    /* Stack trace to serial */
+    {
+        uint32_t *ebp;
+        uint32_t depth = 0;
+        asm volatile("mov %%ebp, %0" : "=r"(ebp));
+        serial_print(COM1, "Stack trace:\n");
+        while (ebp && depth < 16) {
+            uint32_t ret_addr = *(ebp + 1);
+            serial_print(COM1, "  [");
+            {
+                char dbuf[12]; int di = 0; uint32_t dv = depth;
+                if (dv == 0) dbuf[di++] = '0';
+                else { char dr[12]; int dri = 0;
+                    while (dv > 0) { dr[dri++] = '0' + (dv % 10); dv /= 10; }
+                    while (dri > 0) dbuf[di++] = dr[--dri];
+                }
+                dbuf[di] = 0;
+                serial_print(COM1, dbuf);
+            }
+            serial_print(COM1, "] 0x");
+            {
+                char hbuf[9]; const char hex[] = "0123456789abcdef";
+                for (int hi = 7; hi >= 0; hi--) { hbuf[hi] = hex[ret_addr & 0xF]; ret_addr >>= 4; }
+                hbuf[8] = 0;
+                int start = 0; while (start < 7 && hbuf[start] == '0') start++;
+                serial_print(COM1, hbuf + start);
+            }
+            serial_print(COM1, "\n");
+            ebp = (uint32_t *)*ebp;
+            depth++;
+        }
+    }
+
+    /* Also try VGA text output (only visible if not in VESA mode) */
     vga_set_color(4, 15);
     vga_clear();
 
@@ -155,19 +211,19 @@ void kernel_panic(const char *msg, const char *file, int line)
     vga_set_color(0, 15);
     vga_print("Stack Trace:\n");
 
-    uint32_t *ebp;
-    uint32_t depth = 0;
-    asm volatile("mov %%ebp, %0" : "=r"(ebp));
+    uint32_t *ebp2;
+    uint32_t depth2 = 0;
+    asm volatile("mov %%ebp, %0" : "=r"(ebp2));
 
-    while (ebp && depth < 16) {
-        uint32_t ret_addr = *(ebp + 1);
+    while (ebp2 && depth2 < 16) {
+        uint32_t ret_addr = *(ebp2 + 1);
         vga_print("  [");
-        vga_print_dec(depth);
+        vga_print_dec(depth2);
         vga_print("] ");
         vga_print_hex(ret_addr);
         vga_putchar('\n');
-        ebp = (uint32_t *)*ebp;
-        depth++;
+        ebp2 = (uint32_t *)*ebp2;
+        depth2++;
     }
 
     vga_print("\nSystem halted.");

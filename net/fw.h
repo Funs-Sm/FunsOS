@@ -122,4 +122,125 @@ void fw_reset_stats(void);
 /* Convenience: render an IPv4 address into a static string buffer. */
 const char *fw_ip_to_str(ipv4_addr_t ip, char *out, uint32_t out_size);
 
+/* ---- Extended NAT: NAT44, NAT66, ALG ---- */
+
+/* IPv6 address type for NAT66 */
+typedef struct {
+    uint8_t addr[16];
+} ipv6_addr_nat_t;
+
+/* NAT table types */
+#define FW_NAT_TABLE_NAT44   0
+#define FW_NAT_TABLE_NAT66   1
+#define FW_NAT_TABLE_MAX     2
+
+/* NAT binding (maps external to internal for NAT44/NAT66) */
+typedef struct fw_nat_binding {
+    uint8_t      used;
+    uint8_t      type;            /* FW_NAT_SNAT / FW_NAT_DNAT */
+    uint8_t      proto;
+    uint32_t     ext_ip;          /* external IP (IPv4) or first 4 bytes of IPv6 */
+    uint16_t     ext_port;
+    uint32_t     int_ip;
+    uint16_t     int_port;
+    uint8_t      int_mac[6];      /* for full-cone NAT */
+    union {
+        struct { uint32_t lo, hi; } ipv6_ext;
+        uint8_t ext_addr6[16];
+    } ext;
+    union {
+        struct { uint32_t lo, hi; } ipv6_int;
+        uint8_t int_addr6[16];
+    } internal;
+    uint32_t     timeout_ms;
+    uint32_t     created_ms;
+    uint32_t     packets;
+    uint32_t     bytes;
+    struct fw_nat_binding *next;
+} fw_nat_binding_t;
+
+/* NAT66 prefix translation rule */
+typedef struct fw_nat66_prefix {
+    uint8_t  used;
+    uint8_t  prefix_len;              /* /48, /56, /64 etc. */
+    uint8_t  internal_prefix[8];      /* first 64 bits of internal prefix */
+    uint8_t  external_prefix[8];      /* first 64 bits of external prefix */
+    uint32_t counter;
+    char     comment[32];
+} fw_nat66_prefix_t;
+
+#define FW_NAT_BINDING_MAX  512
+#define FW_NAT_BINDING_HASH 128
+#define FW_NAT66_PREFIX_MAX 16
+
+/* NAT Application Layer Gateway (ALG) for FTP, SIP, H.323, etc. */
+#define FW_ALG_FTP   0
+#define FW_ALG_SIP   1
+#define FW_ALG_H323  2
+#define FW_ALG_TFTP  3
+#define FW_ALG_MAX   8
+
+typedef struct fw_alg {
+    uint8_t  used;
+    uint8_t  type;
+    uint8_t  proto;
+    uint16_t ctrl_port;       /* control channel port (e.g. FTP 21) */
+    uint32_t packets_processed;
+    int      (*handler)(struct fw_alg *alg, net_buffer_t *buf, int hook);
+    void     *private_data;
+} fw_alg_t;
+
+#define NAT_HELPER_FTP  1
+#define NAT_HELPER_SIP  2
+#define NAT_HELPER_H323 3
+
+/* ---- NAT extended API ---- */
+typedef struct {
+    uint32_t bindings_created;
+    uint32_t bindings_expired;
+    uint32_t bindings_lookup;
+    uint32_t nat44_translations;
+    uint32_t nat66_translations;
+    uint32_t alg_ftp_processed;
+    uint32_t alg_sip_processed;
+    uint32_t full_cone_entries;
+} fw_nat_ext_stats_t;
+
+int  fw_nat44_snat_add(ipv4_addr_t int_src, uint16_t int_port,
+                        ipv4_addr_t ext_src, uint16_t ext_port, uint8_t proto);
+int  fw_nat44_dnat_add(ipv4_addr_t ext_dst, uint16_t ext_port,
+                        ipv4_addr_t int_dst, uint16_t int_port, uint8_t proto);
+int  fw_nat44_full_cone_register(ipv4_addr_t int_ip, uint16_t int_port,
+                                  ipv4_addr_t ext_ip, uint16_t ext_port, uint8_t proto);
+fw_nat_binding_t *fw_nat_binding_lookup(uint8_t proto, uint32_t ip, uint16_t port, int dir);
+void fw_nat_binding_tick(uint32_t now_ms);
+void fw_nat_binding_flush(void);
+uint32_t fw_nat_binding_count(void);
+
+/* NAT66 */
+int  fw_nat66_prefix_add(uint8_t prefix_len,
+                          const uint8_t *internal_prefix,
+                          const uint8_t *external_prefix);
+int  fw_nat66_prefix_del(uint32_t idx);
+int  fw_nat66_apply(net_buffer_t *buf, const uint8_t *internal_prefix,
+                     const uint8_t *external_prefix, uint8_t prefix_len);
+void fw_nat66_flush(void);
+
+/* ALG */
+int  fw_alg_register(uint8_t type, uint8_t proto, uint16_t ctrl_port,
+                      int (*handler)(fw_alg_t *, net_buffer_t *, int));
+int  fw_alg_unregister(uint8_t type);
+int  fw_alg_run(net_buffer_t *buf, int hook);
+void fw_alg_init(void);
+int  fw_alg_ftp_handler(fw_alg_t *alg, net_buffer_t *buf, int hook);
+int  fw_alg_sip_handler(fw_alg_t *alg, net_buffer_t *buf, int hook);
+
+const fw_nat_ext_stats_t *fw_nat_ext_get_stats(void);
+
+/* ---- Port forwarding / hairpin NAT ---- */
+int  fw_hairpin_nat(net_buffer_t *buf);
+int  fw_port_forward_add(ipv4_addr_t ext_ip, uint16_t ext_port,
+                          ipv4_addr_t int_ip, uint16_t int_port, uint8_t proto);
+int  fw_port_forward_del(ipv4_addr_t ext_ip, uint16_t ext_port, uint8_t proto);
+
 #endif

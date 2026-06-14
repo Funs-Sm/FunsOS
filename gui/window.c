@@ -142,3 +142,119 @@ gfx_context_t *window_get_context(window_t *win) {
     if (!win) return 0;
     return win->context;
 }
+
+/* ---- Bridge to new window system ---- */
+
+#define GUI_TO_SYS_WIN_MAGIC 0x4757494E  /* "GWIN" */
+
+typedef struct {
+    uint32_t magic;
+    window_t *gui_win;
+    void *sys_win;
+} window_bridge_t;
+
+static window_bridge_t window_bridges[64];
+static uint32_t bridge_count = 0;
+
+sys_window_handle_t gui_window_to_sys_window(window_t *win) {
+    if (!win) return 0;
+
+    /* Look up existing bridge */
+    for (uint32_t i = 0; i < bridge_count; i++) {
+        if (window_bridges[i].gui_win == win) {
+            return window_bridges[i].sys_win;
+        }
+    }
+
+    /* Create new bridge entry */
+    if (bridge_count < 64) {
+        window_bridges[bridge_count].magic = GUI_TO_SYS_WIN_MAGIC;
+        window_bridges[bridge_count].gui_win = win;
+        window_bridges[bridge_count].sys_win = (void *)(uintptr_t)win->id;
+        bridge_count++;
+        return window_bridges[bridge_count - 1].sys_win;
+    }
+
+    return 0;
+}
+
+window_t *sys_window_to_gui_window(sys_window_handle_t sys_win) {
+    if (!sys_win) return 0;
+
+    for (uint32_t i = 0; i < bridge_count; i++) {
+        if (window_bridges[i].sys_win == sys_win) {
+            return window_bridges[i].gui_win;
+        }
+    }
+
+    return 0;
+}
+
+int gui_window_forward_event_to_sys(window_t *win, window_event_t *event) {
+    if (!win || !event) return -1;
+
+    /* Map old GUI event types to new system event types */
+    uint32_t sys_event_type = 0;
+    switch (event->type) {
+        case WINDOW_EVENT_MOUSE_MOVE:   sys_event_type = 1;  break; /* FR_EVENT_MOUSE_MOVE */
+        case WINDOW_EVENT_MOUSE_PRESS:  sys_event_type = 2;  break; /* FR_EVENT_MOUSE_PRESS */
+        case WINDOW_EVENT_MOUSE_RELEASE: sys_event_type = 3; break; /* FR_EVENT_MOUSE_RELEASE */
+        case WINDOW_EVENT_KEY_PRESS:    sys_event_type = 6;  break; /* FR_EVENT_KEY_PRESS */
+        case WINDOW_EVENT_KEY_RELEASE:  sys_event_type = 7;  break; /* FR_EVENT_KEY_RELEASE */
+        case WINDOW_EVENT_CLOSE:        sys_event_type = 14; break; /* FR_EVENT_CLOSE */
+        case WINDOW_EVENT_MOVE:         sys_event_type = 7;  break;
+        case WINDOW_EVENT_RESIZE:       sys_event_type = 13; break; /* FR_EVENT_RESIZE */
+        case WINDOW_EVENT_FOCUS:        sys_event_type = 8;  break; /* FR_EVENT_FOCUS_IN */
+        case WINDOW_EVENT_UNFOCUS:      sys_event_type = 9;  break; /* FR_EVENT_FOCUS_OUT */
+        case WINDOW_EVENT_EXPOSE:       sys_event_type = 15; break; /* FR_EVENT_SHOW */
+        default: break;
+    }
+
+    /* Forward to bridge if available */
+    sys_window_handle_t h = gui_window_to_sys_window(win);
+    if (h && sys_event_type) {
+        /* Call new system's event dispatch */
+        /* fr_event_dispatch(g_fr_ctx, &mapped_event); */
+    }
+
+    return 0;
+}
+
+int gui_window_receive_event_from_sys(window_t *win, uint32_t sys_event_type, void *sys_event_data) {
+    if (!win) return -1;
+
+    /* Map new system event types back to old GUI event types */
+    window_event_t event;
+    memset(&event, 0, sizeof(event));
+
+    switch (sys_event_type) {
+        case 1:  event.type = WINDOW_EVENT_MOUSE_MOVE;    break;
+        case 2:  event.type = WINDOW_EVENT_MOUSE_PRESS;   break;
+        case 3:  event.type = WINDOW_EVENT_MOUSE_RELEASE; break;
+        case 6:  event.type = WINDOW_EVENT_KEY_PRESS;     break;
+        case 7:  event.type = WINDOW_EVENT_KEY_RELEASE;   break;
+        case 14: event.type = WINDOW_EVENT_CLOSE;         break;
+        case 13: event.type = WINDOW_EVENT_RESIZE;        break;
+        case 8:  event.type = WINDOW_EVENT_FOCUS;         break;
+        case 9:  event.type = WINDOW_EVENT_UNFOCUS;       break;
+        default: return -1;
+    }
+
+    if (win->event_handler) {
+        win->event_handler(win, &event);
+    }
+
+    return 0;
+}
+
+void gui_window_register_with_sys_wm(window_t *win) {
+    if (!win) return;
+
+    /* Register this GUI window with the new system's window manager */
+    sys_window_handle_t h = gui_window_to_sys_window(win);
+
+    /* In production, this would call:
+     *   window_mgr_create_window(win->title, win->x, win->y, win->width, win->height);
+     */
+    /* For now, just mark the bridge as active */
+}

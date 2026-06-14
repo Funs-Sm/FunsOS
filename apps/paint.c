@@ -1,5 +1,7 @@
 #include "user_syscall.h"
 #include "string.h"
+#include "gui_common.h"
+#include "gfx_adapter.h"
 
 #define WIN_W 640
 #define WIN_H 500
@@ -7,8 +9,6 @@
 #define PALETTE_H 40
 #define CANVAS_Y (TITLE_H + 2)
 #define CANVAS_H (WIN_H - TITLE_H - PALETTE_H - 4)
-#define CHAR_W 8
-#define CHAR_H 16
 
 #define COLOR_WIN_BG   0x808080
 #define COLOR_BORDER   0x404040
@@ -16,10 +16,6 @@
 #define COLOR_WHITE    0xFFFFFF
 #define COLOR_BLACK    0x000000
 #define COLOR_CANVAS   0xFFFFFF
-
-#define FB_IOCTL_GET_PTR 0x01
-#define MOUSE_IOCTL_READ 0x10
-#define KBD_IOCTL_READ   0x20
 
 #define CANVAS_W 636
 #define CANVAS_H_ACTUAL 436
@@ -35,7 +31,6 @@ static unsigned int palette_colors[8] = {
     0xFFFFFF
 };
 
-static unsigned int *fb;
 static int fb_fd;
 static int mouse_fd;
 static int kbd_fd;
@@ -53,42 +48,6 @@ static int last_my = -1;
 static int mouse_x = 512;
 static int mouse_y = 384;
 static int mouse_btn = 0;
-
-static void fb_draw_rect(int x, int y, int w, int h, unsigned int color)
-{
-    int i, j;
-    for (j = y; j < y + h; j++) {
-        for (i = x; i < x + w; i++) {
-            if (i >= 0 && i < 1024 && j >= 0 && j < 768)
-                fb[j * 1024 + i] = color;
-        }
-    }
-}
-
-static void fb_draw_char(int x, int y, char c, unsigned int fg, unsigned int bg)
-{
-    static const unsigned char font8x16[128][16] = {{0}};
-    int i, j;
-    if ((unsigned char)c > 127) return;
-    for (j = 0; j < 16; j++) {
-        unsigned char row = font8x16[(unsigned char)c][j];
-        for (i = 0; i < 8; i++) {
-            int px = x + i;
-            int py = y + j;
-            if (px >= 0 && px < 1024 && py >= 0 && py < 768)
-                fb[py * 1024 + px] = (row & (0x80 >> i)) ? fg : bg;
-        }
-    }
-}
-
-static void fb_draw_string(int x, int y, const char *s, unsigned int fg, unsigned int bg)
-{
-    while (*s) {
-        fb_draw_char(x, y, *s, fg, bg);
-        x += CHAR_W;
-        s++;
-    }
-}
 
 static void canvas_set_pixel(int cx, int cy, unsigned int color)
 {
@@ -151,8 +110,8 @@ static void draw_window(void)
         for (i = 0; i < CANVAS_W; i++) {
             int sx = canvas_screen_x + i;
             int sy = canvas_screen_y + j;
-            if (sx >= 0 && sx < 1024 && sy >= 0 && sy < 768) {
-                fb[sy * 1024 + sx] = canvas[j * CANVAS_W + i];
+            if (sx >= 0 && sx < SCREEN_WIDTH && sy >= 0 && sy < SCREEN_HEIGHT) {
+                gfx_adapter_get_fb()[sy * SCREEN_WIDTH + sx] = canvas[j * CANVAS_W + i];
             }
         }
     }
@@ -288,18 +247,20 @@ static void handle_keyboard(void)
 
 static void init_devices(void)
 {
+    unsigned int *fb;
     fb_fd = sys_open("/dev/fb0", O_RDWR);
     if (fb_fd >= 0) {
         sys_ioctl(fb_fd, FB_IOCTL_GET_PTR, &fb);
     }
     mouse_fd = sys_open("/dev/mouse0", O_RDONLY);
     kbd_fd = sys_open("/dev/kbd0", O_RDONLY);
+    gfx_adapter_init(fb, SCREEN_WIDTH, SCREEN_HEIGHT);
 }
 
 int main(void)
 {
     init_devices();
-    if (!fb) {
+    if (!gfx_adapter_is_initialized()) {
         sys_exit(1);
     }
 

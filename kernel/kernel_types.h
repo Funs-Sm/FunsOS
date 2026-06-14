@@ -23,6 +23,14 @@ enum {
 };
 
 typedef struct __attribute__((packed)) {
+    /* Segment registers pushed by isr_common_stub / irq_common_stub
+     * AFTER PUSHAD but BEFORE calling the C handler.
+     * These MUST be first to match the stack layout. */
+    uint32_t gs;
+    uint32_t fs;
+    uint32_t es;
+    uint32_t ds;
+    /* General-purpose registers pushed by PUSHAD */
     uint32_t edi;
     uint32_t esi;
     uint32_t ebp;
@@ -31,8 +39,10 @@ typedef struct __attribute__((packed)) {
     uint32_t edx;
     uint32_t ecx;
     uint32_t eax;
+    /* Interrupt number and error code pushed by ISR stub */
     uint32_t int_no;
     uint32_t err_code;
+    /* Pushed by CPU during interrupt */
     uint32_t eip;
     uint32_t cs;
     uint32_t eflags;

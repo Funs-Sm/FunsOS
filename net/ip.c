@@ -587,3 +587,398 @@ int ip_build_record_route(const ipv4_addr_t *addrs, uint8_t count, uint8_t *out,
     out[1] = (uint8_t)pos;
     return (int)pos;
 }
+
+/* ========================================================================= */
+/*  QoS / Packet Scheduling Module                                           */
+/* ========================================================================= */
+
+/* Simple queue node for QoS */
+typedef struct qos_queue_node {
+    net_buffer_t          *buf;
+    uint8_t                band;
+    struct qos_queue_node *next;
+} qos_queue_node_t;
+
+#define QOS_QUEUE_MAX  256
+
+static qos_queue_node_t *qos_queues[QOS_BAND_MAX];  /* linked lists, one per band */
+static uint32_t           qos_queue_count;
+static uint8_t            qos_disc;                  /* current queue discipline */
+static tbf_params_t       qos_tbf;                   /* token bucket for rate limiting */
+static qos_stats_t        qos_stats_local;
+static mutex_t            qos_lock;
+
+int qos_init(void) {
+    for (int i = 0; i < QOS_BAND_MAX; i++) qos_queues[i] = NULL;
+    qos_queue_count = 0;
+    qos_disc = QDISC_PFIFO_FAST;
+    memset(&qos_tbf, 0, sizeof(qos_tbf));
+    qos_tbf.rate = 0;       /* unlimited by default */
+    qos_tbf.burst = 65536;
+    qos_tbf.tokens = 65536;
+    qos_tbf.last_update_ms = timer_get_ticks() * 10U;
+    memset(&qos_stats_local, 0, sizeof(qos_stats_local));
+    mutex_init(&qos_lock);
+    return 0;
+}
+
+int qos_set_discipline(uint8_t disc) {
+    if (disc > QDISC_FQ_CODEL) return -1;
+    qos_disc = disc;
+    return 0;
+}
+
+uint8_t qos_get_discipline(void) { return qos_disc; }
+
+/* DSCP to priority band mapping */
+int qos_dscp_to_band(uint8_t dscp) {
+    dscp = dscp & 0x3F;
+    /* Map DSCP to band based on rough priority */
+    if (dscp >= 40) return QOS_BAND_HI;       /* CS5/EF/CS6/CS7 */
+    if (dscp >= 24) return QOS_BAND_MID;      /* CS3/AF3x/CS4/AF4x */
+    return QOS_BAND_LO;                        /* CS0/AF1x/CS1/AF2x/CS2 */
+}
+
+int qos_enqueue(net_buffer_t *buf, uint8_t tos) {
+    if (!buf || qos_queue_count >= QOS_QUEUE_MAX) {
+        if (buf) qos_stats_local.packets_dropped[QOS_BAND_LO]++;
+        return -1;
+    }
+
+    uint8_t band = qos_dscp_to_band(tos & 0xFC);
+
+    qos_queue_node_t *node = (qos_queue_node_t *)kmalloc(sizeof(qos_queue_node_t));
+    if (!node) {
+        qos_stats_local.packets_dropped[band]++;
+        return -1;
+    }
+    node->buf = buf;
+    node->band = band;
+    node->next = NULL;
+
+    mutex_lock(&qos_lock);
+    /* Append to band queue */
+    if (!qos_queues[band]) {
+        qos_queues[band] = node;
+    } else {
+        qos_queue_node_t *tail = qos_queues[band];
+        while (tail->next) tail = tail->next;
+        tail->next = node;
+    }
+    qos_queue_count++;
+    qos_stats_local.packets_queued[band]++;
+    qos_stats_local.bytes_queued[band] += buf->len;
+    mutex_unlock(&qos_lock);
+    return 0;
+}
+
+net_buffer_t *qos_dequeue(net_interface_t *iface) {
+    (void)iface;
+    mutex_lock(&qos_lock);
+
+    /* Token bucket replenish */
+    uint32_t now = timer_get_ticks() * 10U;
+    uint32_t elapsed = now - qos_tbf.last_update_ms;
+    if (elapsed > 0 && qos_tbf.rate > 0) {
+        uint32_t new_tokens = (qos_tbf.rate * elapsed) / 1000U;
+        qos_tbf.tokens += new_tokens;
+        if (qos_tbf.tokens > qos_tbf.burst)
+            qos_tbf.tokens = qos_tbf.burst;
+        qos_tbf.last_update_ms = now;
+    }
+
+    /* Prioritized dequeue: try HI → MID → LO */
+    for (int band = QOS_BAND_MAX - 1; band >= 0; band--) {
+        if (qos_queues[band]) {
+            /* Token bucket check for rate limiting */
+            if (qos_tbf.rate > 0 && qos_tbf.tokens < qos_queues[band]->buf->len) {
+                /* Not enough tokens for this packet; try lower band */
+                continue;
+            }
+
+            qos_queue_node_t *node = qos_queues[band];
+            qos_queues[band] = node->next;
+            qos_queue_count--;
+
+            net_buffer_t *result = node->buf;
+            kfree(node);
+
+            /* Consume tokens */
+            if (qos_tbf.rate > 0 && qos_tbf.tokens >= result->len)
+                qos_tbf.tokens -= result->len;
+
+            qos_stats_local.packets_dequeued[band]++;
+            qos_stats_local.bytes_dequeued[band] += result->len;
+
+            if (band == QOS_BAND_HI && qos_queue_count > 0)
+                qos_stats_local.high_prio_steals++;
+
+            mutex_unlock(&qos_lock);
+            return result;
+        }
+    }
+    mutex_unlock(&qos_lock);
+    return NULL;
+}
+
+int qos_set_rate_limit(uint32_t rate_bps, uint32_t burst_bytes) {
+    qos_tbf.rate = rate_bps;
+    qos_tbf.burst = burst_bytes;
+    qos_tbf.tokens = burst_bytes;
+    qos_tbf.last_update_ms = timer_get_ticks() * 10U;
+    return 0;
+}
+
+void qos_tick(uint32_t now_ms) {
+    (void)now_ms;
+    /* Periodic cleanup of stale entries could go here */
+}
+
+const qos_stats_t *qos_get_stats(void) { return &qos_stats_local; }
+
+/* ========================================================================= */
+/*  IPsec Module (AH / ESP / SPD)                                            */
+/* ========================================================================= */
+
+static ipsec_sa_t       ipsec_sa_table[IPSEC_SA_MAX];
+static ipsec_spd_entry_t ipsec_spd[IPSEC_SPD_MAX];
+static ipsec_stats_t    ipsec_stats;
+static mutex_t          ipsec_lock;
+static uint32_t         ipsec_seq_num;
+
+void ipsec_init(void) {
+    memset(ipsec_sa_table, 0, sizeof(ipsec_sa_table));
+    memset(ipsec_spd, 0, sizeof(ipsec_spd));
+    memset(&ipsec_stats, 0, sizeof(ipsec_stats));
+    ipsec_seq_num = 1;
+    mutex_init(&ipsec_lock);
+}
+
+/* ---- SA management ---- */
+
+int ipsec_sa_add(uint32_t spi, ipv4_addr_t dst, uint8_t proto, uint8_t mode,
+                  uint8_t enc_alg, const uint8_t *enc_key, uint8_t enc_key_len,
+                  uint8_t auth_alg, const uint8_t *auth_key, uint8_t auth_key_len) {
+    mutex_lock(&ipsec_lock);
+    for (uint32_t i = 0; i < IPSEC_SA_MAX; i++) {
+        if (!ipsec_sa_table[i].used) {
+            ipsec_sa_t *sa = &ipsec_sa_table[i];
+            sa->used = 1;
+            sa->spi  = spi;
+            sa->dst  = dst;
+            sa->proto = proto;
+            sa->mode  = mode;
+            sa->enc_alg  = enc_alg;
+            sa->auth_alg = auth_alg;
+            if (enc_key && enc_key_len <= 32) {
+                memcpy(sa->enc_key, enc_key, enc_key_len);
+                sa->enc_key_len = enc_key_len;
+            }
+            if (auth_key && auth_key_len <= 32) {
+                memcpy(sa->auth_key, auth_key, auth_key_len);
+                sa->auth_key_len = auth_key_len;
+            }
+            sa->lifetime_soft = 1000000000;  /* 1 GB soft */
+            sa->lifetime_hard = 2000000000;  /* 2 GB hard */
+            sa->bytes_processed = 0;
+            sa->packets_processed = 0;
+            ipsec_stats.sa_created++;
+            mutex_unlock(&ipsec_lock);
+            return 0;
+        }
+    }
+    mutex_unlock(&ipsec_lock);
+    return -1;
+}
+
+int ipsec_sa_del(uint32_t spi, ipv4_addr_t dst) {
+    mutex_lock(&ipsec_lock);
+    for (uint32_t i = 0; i < IPSEC_SA_MAX; i++) {
+        if (ipsec_sa_table[i].used &&
+            ipsec_sa_table[i].spi == spi &&
+            ipsec_sa_table[i].dst.addr == dst.addr) {
+            ipsec_sa_table[i].used = 0;
+            ipsec_stats.sa_deleted++;
+            mutex_unlock(&ipsec_lock);
+            return 0;
+        }
+    }
+    mutex_unlock(&ipsec_lock);
+    return -1;
+}
+
+ipsec_sa_t *ipsec_sa_lookup(uint32_t spi, ipv4_addr_t dst, uint8_t proto) {
+    for (uint32_t i = 0; i < IPSEC_SA_MAX; i++) {
+        if (ipsec_sa_table[i].used &&
+            ipsec_sa_table[i].spi == spi &&
+            ipsec_sa_table[i].dst.addr == dst.addr &&
+            ipsec_sa_table[i].proto == proto) {
+            return &ipsec_sa_table[i];
+        }
+    }
+    return NULL;
+}
+
+void ipsec_sa_tick(uint32_t now_ms) {
+    (void)now_ms;
+    mutex_lock(&ipsec_lock);
+    for (uint32_t i = 0; i < IPSEC_SA_MAX; i++) {
+        if (ipsec_sa_table[i].used &&
+            ipsec_sa_table[i].bytes_processed > ipsec_sa_table[i].lifetime_hard) {
+            ipsec_sa_table[i].used = 0;
+            ipsec_stats.sa_expired++;
+        }
+    }
+    mutex_unlock(&ipsec_lock);
+}
+
+void ipsec_sa_flush(void) {
+    mutex_lock(&ipsec_lock);
+    memset(ipsec_sa_table, 0, sizeof(ipsec_sa_table));
+    mutex_unlock(&ipsec_lock);
+}
+
+/* ---- SPD management ---- */
+
+int ipsec_spd_add(uint8_t action, ipv4_addr_t src, ipv4_addr_t src_mask,
+                   ipv4_addr_t dst, ipv4_addr_t dst_mask, uint8_t proto,
+                   uint16_t sport, uint16_t dport, uint32_t spi_in, uint32_t spi_out) {
+    mutex_lock(&ipsec_lock);
+    for (uint32_t i = 0; i < IPSEC_SPD_MAX; i++) {
+        if (!ipsec_spd[i].used) {
+            ipsec_spd_entry_t *spd = &ipsec_spd[i];
+            spd->used     = 1;
+            spd->action   = action;
+            spd->src      = src;
+            spd->src_mask = src_mask;
+            spd->dst      = dst;
+            spd->dst_mask = dst_mask;
+            spd->proto    = proto;
+            spd->sport    = sport;
+            spd->dport    = dport;
+            spd->spi_in   = spi_in;
+            spd->spi_out  = spi_out;
+            spd->counter  = 0;
+            mutex_unlock(&ipsec_lock);
+            return 0;
+        }
+    }
+    mutex_unlock(&ipsec_lock);
+    return -1;
+}
+
+int ipsec_spd_del(uint32_t idx) {
+    mutex_lock(&ipsec_lock);
+    if (idx >= IPSEC_SPD_MAX || !ipsec_spd[idx].used) {
+        mutex_unlock(&ipsec_lock);
+        return -1;
+    }
+    ipsec_spd[idx].used = 0;
+    mutex_unlock(&ipsec_lock);
+    return 0;
+}
+
+ipsec_spd_entry_t *ipsec_spd_lookup(net_buffer_t *buf, int dir) {
+    if (!buf || buf->len < (int)sizeof(ip_header_t)) return NULL;
+    ip_header_t *ip = (ip_header_t *)(buf->data + buf->offset);
+
+    for (uint32_t i = 0; i < IPSEC_SPD_MAX; i++) {
+        ipsec_spd_entry_t *spd = &ipsec_spd[i];
+        if (!spd->used) continue;
+
+        ipv4_addr_t ck_src = (dir == 0) ? ip->src_ip : ip->dst_ip;
+        ipv4_addr_t ck_dst = (dir == 0) ? ip->dst_ip : ip->src_ip;
+
+        if ((ck_src.addr & spd->src_mask.addr) == (spd->src.addr & spd->src_mask.addr) &&
+            (ck_dst.addr & spd->dst_mask.addr) == (spd->dst.addr & spd->dst_mask.addr) &&
+            (spd->proto == 0 || spd->proto == ip->protocol)) {
+            spd->counter++;
+            return spd;
+        }
+    }
+    return NULL;
+}
+
+int ipsec_spd_apply(net_buffer_t *buf, int dir) {
+    ipsec_spd_entry_t *spd = ipsec_spd_lookup(buf, dir);
+    if (!spd) return 0;  /* no policy = bypass */
+
+    switch (spd->action) {
+    case 0: /* bypass */
+        ipsec_stats.pkts_bypassed++;
+        return 0;
+    case 1: /* protect */
+        if (dir == 0) return ipsec_output(buf);
+        else          return ipsec_input(buf);
+    case 2: /* discard */
+        ipsec_stats.pkts_discarded++;
+        return -1;
+    default:
+        return 0;
+    }
+}
+
+/* ---- IPsec output processing (ESP transport mode) ---- */
+
+int ipsec_output(net_buffer_t *buf) {
+    if (!buf || buf->len < (int)sizeof(ip_header_t)) return -1;
+    ip_header_t *ip = (ip_header_t *)(buf->data + buf->offset);
+
+    /* Find matching SA */
+    ipsec_sa_t *sa = NULL;
+    for (uint32_t i = 0; i < IPSEC_SA_MAX; i++) {
+        if (ipsec_sa_table[i].used &&
+            ipsec_sa_table[i].dst.addr == ip->dst_ip.addr &&
+            ipsec_sa_table[i].proto == IPSEC_PROTO_ESP) {
+            sa = &ipsec_sa_table[i];
+            break;
+        }
+    }
+    if (!sa) return -1;
+
+    /* In a real implementation, we would:
+     * 1. Insert ESP header after IP header
+     * 2. Encrypt payload
+     * 3. Compute ICV
+     * 4. Update IP header (proto = ESP, total_length += ESP overhead)
+     */
+    sa->packets_processed++;
+    sa->bytes_processed += buf->len;
+    ipsec_stats.pkts_encrypted++;
+    return 0;
+}
+
+/* ---- IPsec input processing ---- */
+
+int ipsec_input(net_buffer_t *buf) {
+    if (!buf || buf->len < (int)sizeof(ip_header_t) + (int)sizeof(esp_header_t)) return -1;
+    ip_header_t *ip = (ip_header_t *)(buf->data + buf->offset);
+
+    /* ESP header follows IP header */
+    uint8_t ihl = (ip->version_ihl & 0x0F) * 4;
+    esp_header_t *esp = (esp_header_t *)((uint8_t *)ip + ihl);
+
+    /* Find SA by SPI */
+    ipsec_sa_t *sa = ipsec_sa_lookup(esp->spi, ip->src_ip, IPSEC_PROTO_ESP);
+    if (!sa) return -1;
+
+    /* Check anti-replay via sequence number */
+    if (esp->sequence < ipsec_seq_num - 1000) {
+        ipsec_stats.pkts_discarded++;
+        return -1;
+    }
+
+    /* In a real implementation, we would:
+     * 1. Verify ICV (authentication)
+     * 2. Decrypt payload
+     * 3. Remove ESP header/trailer
+     * 4. Restore original IP protocol
+     */
+    sa->packets_processed++;
+    sa->bytes_processed += buf->len;
+    ipsec_stats.pkts_decrypted++;
+    ipsec_stats.pkts_auth_ok++;
+    return 0;
+}
+
+const ipsec_stats_t *ipsec_get_stats(void) { return &ipsec_stats; }

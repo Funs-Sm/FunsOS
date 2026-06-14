@@ -1,11 +1,11 @@
 #include "user_syscall.h"
 #include "string.h"
+#include "gui_common.h"
+#include "gfx_adapter.h"
 
 #define WIN_W 560
 #define WIN_H 420
 #define TITLE_H 20
-#define CHAR_W 8
-#define CHAR_H 16
 #define MARGIN 4
 #define TEXT_AREA_X (MARGIN + 2)
 #define TEXT_AREA_Y (TITLE_H + MARGIN + 2)
@@ -16,13 +16,9 @@
 #define COLOR_TEXT     0x000000
 #define COLOR_CURSOR   0x0000FF
 
-#define FB_IOCTL_GET_PTR 0x01
-#define KBD_IOCTL_READ   0x20
-
 #define MAX_LINES 128
 #define LINE_LEN  80
 
-static unsigned int *fb;
 static int fb_fd;
 static int kbd_fd;
 
@@ -37,42 +33,6 @@ static int scroll_y = 0;
 static int ctrl_pressed = 0;
 
 static const char *save_path = "/home/newfile.txt";
-
-static void fb_draw_rect(int x, int y, int w, int h, unsigned int color)
-{
-    int i, j;
-    for (j = y; j < y + h; j++) {
-        for (i = x; i < x + w; i++) {
-            if (i >= 0 && i < 1024 && j >= 0 && j < 768)
-                fb[j * 1024 + i] = color;
-        }
-    }
-}
-
-static void fb_draw_char(int x, int y, char c, unsigned int fg, unsigned int bg)
-{
-    static const unsigned char font8x16[128][16] = {{0}};
-    int i, j;
-    if ((unsigned char)c > 127) return;
-    for (j = 0; j < 16; j++) {
-        unsigned char row = font8x16[(unsigned char)c][j];
-        for (i = 0; i < 8; i++) {
-            int px = x + i;
-            int py = y + j;
-            if (px >= 0 && px < 1024 && py >= 0 && py < 768)
-                fb[py * 1024 + px] = (row & (0x80 >> i)) ? fg : bg;
-        }
-    }
-}
-
-static void fb_draw_string(int x, int y, const char *s, unsigned int fg, unsigned int bg)
-{
-    while (*s) {
-        fb_draw_char(x, y, *s, fg, bg);
-        x += CHAR_W;
-        s++;
-    }
-}
 
 static int get_line_count(void)
 {
@@ -118,7 +78,7 @@ static void draw_window(void)
     fb_draw_string(win_x + 8, win_y + 4, "Notepad", 0xFFFFFF, COLOR_TITLEBAR);
     fb_draw_rect(win_x + 2, win_y + TITLE_H + 2, WIN_W - 4, WIN_H - TITLE_H - 4, COLOR_WIN_BG);
 
-    int visible_lines = (WIN_H - TITLE_H - MARGIN * 2 - 4) / CHAR_H;
+    int visible_lines = (WIN_H - TITLE_H - MARGIN * 2 - 4) / CHAR_HEIGHT;
     int text_x = win_x + TEXT_AREA_X;
     int text_y = win_y + TEXT_AREA_Y;
 
@@ -127,18 +87,18 @@ static void draw_window(void)
         int end = get_line_start(line + 1);
         if (start >= buf_len && line > 0) break;
 
-        int draw_y = text_y + (line - scroll_y) * CHAR_H;
-        if (draw_y + CHAR_H > win_y + WIN_H) break;
+        int draw_y = text_y + (line - scroll_y) * CHAR_HEIGHT;
+        if (draw_y + CHAR_HEIGHT > win_y + WIN_H) break;
 
         col = 0;
         for (i = start; i < end && i < buf_len; i++) {
             if (text_buffer[i] == '\n') break;
-            if (col >= (WIN_W - TEXT_AREA_X * 2) / CHAR_W) break;
-            fb_draw_char(text_x + col * CHAR_W, draw_y, text_buffer[i], COLOR_TEXT, COLOR_WIN_BG);
+            if (col >= (WIN_W - TEXT_AREA_X * 2) / CHAR_WIDTH) break;
+            fb_draw_char(text_x + col * CHAR_WIDTH, draw_y, text_buffer[i], COLOR_TEXT, COLOR_WIN_BG);
             col++;
         }
-        for (i = col; i < (WIN_W - TEXT_AREA_X * 2) / CHAR_W; i++) {
-            fb_draw_rect(text_x + i * CHAR_W, draw_y, CHAR_W, CHAR_H, COLOR_WIN_BG);
+        for (i = col; i < (WIN_W - TEXT_AREA_X * 2) / CHAR_WIDTH; i++) {
+            fb_draw_rect(text_x + i * CHAR_WIDTH, draw_y, CHAR_WIDTH, CHAR_HEIGHT, COLOR_WIN_BG);
         }
     }
 
@@ -146,9 +106,9 @@ static void draw_window(void)
         int cur_line, cur_col;
         get_cursor_line_col(&cur_line, &cur_col);
         if (cur_line >= scroll_y && cur_line < scroll_y + visible_lines) {
-            int cx = text_x + cur_col * CHAR_W;
-            int cy = text_y + (cur_line - scroll_y) * CHAR_H;
-            fb_draw_rect(cx, cy, 2, CHAR_H, COLOR_CURSOR);
+            int cx = text_x + cur_col * CHAR_WIDTH;
+            int cy = text_y + (cur_line - scroll_y) * CHAR_HEIGHT;
+            fb_draw_rect(cx, cy, 2, CHAR_HEIGHT, COLOR_CURSOR);
         }
     }
 }
@@ -213,7 +173,7 @@ static void handle_keyboard(void)
         insert_char('\n');
         int cur_line, cur_col;
         get_cursor_line_col(&cur_line, &cur_col);
-        int visible_lines = (WIN_H - TITLE_H - MARGIN * 2 - 4) / CHAR_H;
+        int visible_lines = (WIN_H - TITLE_H - MARGIN * 2 - 4) / CHAR_HEIGHT;
         if (cur_line >= scroll_y + visible_lines) {
             scroll_y = cur_line - visible_lines + 1;
         }
@@ -248,7 +208,7 @@ static void handle_keyboard(void)
             if (target_end > 0 && text_buffer[target_end - 1] == '\n') line_len--;
             if (cur_col > line_len) cur_col = line_len;
             cursor_pos = target_start + cur_col;
-            int visible_lines = (WIN_H - TITLE_H - MARGIN * 2 - 4) / CHAR_H;
+            int visible_lines = (WIN_H - TITLE_H - MARGIN * 2 - 4) / CHAR_HEIGHT;
             if (cur_line + 1 >= scroll_y + visible_lines) {
                 scroll_y = cur_line + 1 - visible_lines + 1;
             }
@@ -281,7 +241,7 @@ static void handle_keyboard(void)
         insert_char(c);
         int cur_line, cur_col;
         get_cursor_line_col(&cur_line, &cur_col);
-        int visible_lines = (WIN_H - TITLE_H - MARGIN * 2 - 4) / CHAR_H;
+        int visible_lines = (WIN_H - TITLE_H - MARGIN * 2 - 4) / CHAR_HEIGHT;
         if (cur_line >= scroll_y + visible_lines) {
             scroll_y = cur_line - visible_lines + 1;
         }
@@ -290,17 +250,19 @@ static void handle_keyboard(void)
 
 static void init_devices(void)
 {
+    unsigned int *fb;
     fb_fd = sys_open("/dev/fb0", O_RDWR);
     if (fb_fd >= 0) {
         sys_ioctl(fb_fd, FB_IOCTL_GET_PTR, &fb);
     }
     kbd_fd = sys_open("/dev/kbd0", O_RDONLY);
+    gfx_adapter_init(fb, SCREEN_WIDTH, SCREEN_HEIGHT);
 }
 
 int main(void)
 {
     init_devices();
-    if (!fb) {
+    if (!gfx_adapter_is_initialized()) {
         sys_exit(1);
     }
 

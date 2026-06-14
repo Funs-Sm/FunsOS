@@ -37,6 +37,9 @@ typedef struct drm_mode {
     char name[32];
 } drm_mode_t;
 
+typedef struct drm_connector drm_connector_t;
+typedef int (*drm_hotplug_callback_t)(drm_connector_t *conn, uint32_t event);
+
 typedef struct drm_crtc {
     uint32_t id;
     uint32_t x, y;
@@ -54,6 +57,10 @@ typedef struct drm_connector {
     drm_mode_t *modes;
     uint32_t mode_count;
     uint32_t encoder_id;
+    uint32_t last_status;
+    uint32_t poll_interval_ms;
+    uint32_t last_poll_tick;
+    drm_hotplug_callback_t hotplug_callback;
     void *driver_private;
 } drm_connector_t;
 
@@ -130,17 +137,56 @@ typedef struct drm_driver {
     void *driver_private;
 } drm_driver_t;
 
+/* DRM page flip flags */
+#define DRM_PAGE_FLIP_WAIT     0x01
+#define DRM_PAGE_FLIP_ASYNC    0x02
+#define DRM_PAGE_FLIP_VSYNC    0x04
+
+/* DRM hotplug event types */
+#define DRM_HOTPLUG_CONNECTED    1
+#define DRM_HOTPLUG_DISCONNECTED 2
+
+/* DRM dumb buffer flags */
+#define DRM_DUMB_BUF_WC      (1 << 0)
+#define DRM_DUMB_BUF_CACHED  (1 << 1)
+
 void drm_init(void);
 int drm_register_driver(drm_driver_t *drv);
 drm_driver_t *drm_get_driver(uint32_t index);
 uint32_t drm_get_driver_count(void);
 drm_framebuffer_t *drm_fb_create(uint32_t width, uint32_t height, uint32_t bpp);
 void drm_fb_destroy(drm_framebuffer_t *fb);
+int drm_fb_modify(drm_framebuffer_t *fb, uint32_t width, uint32_t height, uint32_t bpp, uint32_t pitch);
 int drm_set_mode(drm_crtc_t *crtc, drm_mode_t *mode);
 int drm_page_flip(drm_crtc_t *crtc, drm_framebuffer_t *fb);
+int drm_page_flip_with_flags(drm_crtc_t *crtc, drm_framebuffer_t *fb, uint32_t flags);
+int drm_wait_vblank(drm_crtc_t *crtc);
 int drm_accel_fill(drm_framebuffer_t *fb, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color);
 int drm_accel_blit(drm_framebuffer_t *src, uint32_t sx, uint32_t sy, uint32_t sw, uint32_t sh,
                     drm_framebuffer_t *dst, uint32_t dx, uint32_t dy);
 int drm_accel_copy(drm_framebuffer_t *fb, uint32_t sx, uint32_t sy, uint32_t dx, uint32_t dy, uint32_t w, uint32_t h);
+
+/* DRM framebuffer management */
+drm_framebuffer_t *drm_fb_add(drm_driver_t *drv, uint32_t width, uint32_t height, uint32_t bpp, uint32_t pitch, uint32_t flags);
+int drm_fb_remove(drm_driver_t *drv, drm_framebuffer_t *fb);
+drm_framebuffer_t *drm_fb_lookup(drm_driver_t *drv, uint32_t id);
+drm_framebuffer_t *drm_fb_alloc_dumb(drm_driver_t *drv, uint32_t width, uint32_t height, uint32_t bpp, uint32_t flags);
+int drm_fb_free_dumb(drm_driver_t *drv, drm_framebuffer_t *fb);
+
+/* DRM connector detection */
+int drm_connector_detect(drm_connector_t *conn);
+int drm_connector_detect_all(drm_driver_t *drv);
+int drm_connector_set_hotplug_callback(drm_connector_t *conn, drm_hotplug_callback_t cb);
+void drm_hotplug_poll(drm_driver_t *drv);
+int drm_connector_get_modes(drm_connector_t *conn);
+drm_mode_t *drm_connector_find_mode(drm_connector_t *conn, uint32_t width, uint32_t height, uint32_t refresh);
+
+/* DRM mode setting */
+int drm_mode_validate(drm_crtc_t *crtc, drm_mode_t *mode);
+int drm_crtc_set_mode_with_fb(drm_crtc_t *crtc, drm_mode_t *mode, drm_framebuffer_t *fb);
+int drm_crtc_disable(drm_crtc_t *crtc);
+int drm_crtc_enable(drm_crtc_t *crtc, drm_mode_t *mode);
+int drm_mode_equal(drm_mode_t *a, drm_mode_t *b);
+void drm_crtc_get_current_mode(drm_crtc_t *crtc, drm_mode_t *mode);
 
 #endif

@@ -19,6 +19,11 @@ static spinlock_t process_lock;
 pcb_t *current_process = NULL;
 volatile int need_resched = 0;
 
+/* Virtual address range for kernel stacks (2 pages each)
+ * Must NOT overlap with kheap at 0xD0000000 (32MB = 0xD2000000) */
+#define KSTACK_VIRT_BASE  0xD2000000
+static uint32_t next_kstack_virt = KSTACK_VIRT_BASE;
+
 void init_process(void)
 {
     int i;
@@ -44,7 +49,6 @@ static pid_t alloc_pid(void)
 }
 
 static uint32_t calculate_timeslice(uint32_t priority) {
-    /* Simple timeslice calculation: higher priority = more time */
     if (priority > SCHED_PRIORITY_MAX) priority = SCHED_PRIORITY_MAX;
     return DEFAULT_TIME_SLICE + (priority * DEFAULT_TIME_SLICE) / SCHED_PRIORITY_MAX;
 }
@@ -93,6 +97,75 @@ static pcb_t *create_process_common(const char *name)
     return proc;
 }
 
+/* Allocate a 2-page kernel stack, mapped contiguously in kernel virtual
+ * memory.  Sets proc->kernel_stack (top) and proc->kernel_esp.  For a
+ * new process the stack is set up so that context_switch will "return"
+ * to process_first_run.  For fork the caller adjusts kernel_esp later. */
+static int alloc_kernel_stack(pcb_t *proc)
+{
+    uint32_t kstack_virt = next_kstack_virt;
+    next_kstack_virt += 2 * PAGE_SIZE;
+
+    void *phys1 = pmm_alloc_page();
+    void *phys2 = pmm_alloc_page();
+    if (!phys1 || !phys2) {
+        if (phys1) pmm_free_page(phys1);
+        if (phys2) pmm_free_page(phys2);
+        return -1;
+    }
+
+    vmm_map_page(vmm_get_current_dir(), kstack_virt, (uint32_t)phys1,
+                 PTE_PRESENT | PTE_WRITABLE);
+    vmm_map_page(vmm_get_current_dir(), kstack_virt + PAGE_SIZE, (uint32_t)phys2,
+                 PTE_PRESENT | PTE_WRITABLE);
+
+    /* Zero the stack pages */
+    memset((void *)kstack_virt, 0, 2 * PAGE_SIZE);
+
+    proc->kernel_stack = kstack_virt + 2 * PAGE_SIZE;  /* top of stack */
+
+    /* Set up for context_switch: the asm pops edi,esi,ebx,ebp then RET.
+     * For a new process, RET should jump to process_first_run. */
+    uint32_t *sp = (uint32_t *)proc->kernel_stack;
+    sp--; *sp = (uint32_t)process_first_run;   /* return address */
+    sp--; *sp = 0;   /* ebp */
+    sp--; *sp = 0;   /* ebx */
+    sp--; *sp = 0;   /* esi */
+    sp--; *sp = 0;   /* edi */
+    proc->kernel_esp = (uint32_t)sp;
+
+    return 0;
+}
+
+/* Create a kernel-only thread (no user-space, no ELF loading).
+ * Used for idle task and other kernel threads. */
+pcb_t *process_create_kernel(const char *name, void (*entry)(void))
+{
+    pcb_t *proc = create_process_common(name);
+    if (!proc) return NULL;
+
+    if (alloc_kernel_stack(proc) != 0) {
+        return NULL;
+    }
+
+    proc->entry_point = (uint32_t)entry;
+    proc->user_stack = 0;
+    proc->page_dir = vmm_get_current_dir();
+    proc->state = PROCESS_READY;
+    proc->sched_policy = PROCESS_IDLE;
+    proc->priority = SCHED_PRIORITY_MAX;
+    proc->effective_priority = SCHED_PRIORITY_MAX;
+
+    /* Override the return address on the kernel stack to point to entry.
+     * The context_switch will pop callee-saved regs and RET to entry. */
+    uint32_t *sp = (uint32_t *)proc->kernel_esp;
+    /* sp points to: [edi=0] [esi=0] [ebx=0] [ebp=0] [ret=process_first_run]
+     * Replace process_first_run with our kernel entry point */
+    sp[4] = (uint32_t)entry;  /* overwrite return address */
+
+    return proc;
+}
+
 pcb_t *process_create(const char *name, uint8_t *elf_data, uint32_t elf_size)
 {
     if (!elf_validate(elf_data, elf_size)) return (void *)0;
@@ -110,6 +183,10 @@ pcb_t *process_create(const char *name, uint8_t *elf_data, uint32_t elf_size)
     uint16_t ph_entry_size = hdr->e_phentsize;
     uint16_t ph_num = hdr->e_phnum;
 
+    /* Phase 1: Map all PT_LOAD pages into the new address space.
+     * This must happen while CR3 still points to the kernel page
+     * directory because vmm_map_page dereferences physical addresses
+     * that rely on the identity mapping. */
     for (uint16_t i = 0; i < ph_num; i++) {
         Elf32_Phdr *ph = (Elf32_Phdr *)(elf_data + ph_offset + i * ph_entry_size);
 
@@ -128,12 +205,9 @@ pcb_t *process_create(const char *name, uint8_t *elf_data, uint32_t elf_size)
             vmm_map_page(proc->page_dir, addr, (uint32_t)phys, page_flags);
             addr += PAGE_SIZE;
         }
-
-        uint8_t *dest = (uint8_t *)ph->p_vaddr;
-        memset(dest, 0, ph->p_memsz);
-        memcpy(dest, elf_data + ph->p_offset, ph->p_filesz);
     }
 
+    /* Map user stack (4 pages below USER_STACK_TOP) */
     for (int i = 0; i < 4; i++) {
         uint32_t stack_addr = USER_STACK_TOP - (i + 1) * PMM_PAGE_SIZE;
         void *phys = pmm_alloc_page();
@@ -144,29 +218,33 @@ pcb_t *process_create(const char *name, uint8_t *elf_data, uint32_t elf_size)
                      VMM_PAGE_PRESENT | VMM_PAGE_WRITABLE | VMM_PAGE_USER);
     }
 
-    void *kernel_stack_phys = pmm_alloc_page();
-    if (!kernel_stack_phys) {
+    /* Phase 2: Switch CR3 to the new address space and copy ELF data.
+     * The new directory has kernel mappings (high-half PDEs are shared),
+     * so kernel code and the elf_data buffer remain accessible. */
+    uint32_t old_cr3;
+    asm volatile("mov %%cr3, %0" : "=r"(old_cr3));
+    asm volatile("mov %0, %%cr3" : : "r"(proc->page_dir) : "memory");
+
+    for (uint16_t i = 0; i < ph_num; i++) {
+        Elf32_Phdr *ph = (Elf32_Phdr *)(elf_data + ph_offset + i * ph_entry_size);
+
+        if (ph->p_type != PT_LOAD) continue;
+
+        uint8_t *dest = (uint8_t *)ph->p_vaddr;
+        memset(dest, 0, ph->p_memsz);
+        memcpy(dest, elf_data + ph->p_offset, ph->p_filesz);
+    }
+
+    /* Switch CR3 back to the kernel page directory */
+    asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
+
+    /* Allocate kernel stack (2 pages, with context_switch setup) */
+    if (alloc_kernel_stack(proc) != 0) {
         goto err_free_page_dir;
     }
-    proc->user_stack = USER_STACK_TOP;
-    proc->kernel_stack = (uint32_t)kernel_stack_phys + PMM_PAGE_SIZE + VMM_KERNEL_BASE;
-    proc->entry_point = hdr->e_entry;
 
-    proc->context.eax = 0;
-    proc->context.ebx = 0;
-    proc->context.ecx = 0;
-    proc->context.edx = 0;
-    proc->context.esi = 0;
-    proc->context.edi = 0;
-    proc->context.ebp = 0;
-    proc->context.eip = hdr->e_entry;
-    proc->context.cs = 0x1B;
-    proc->context.eflags = 0x202;
-    proc->context.useresp = USER_STACK_TOP;
-    proc->context.ss = 0x23;
-    proc->context.esp_kernel = proc->kernel_stack;
-    proc->context.int_no = 0;
-    proc->context.err_code = 0;
+    proc->user_stack = USER_STACK_TOP;
+    proc->entry_point = hdr->e_entry;
 
     proc->parent_pid = sched_get_current() ? sched_get_current()->pid : 0;
     proc->first_child = (void *)0;
@@ -220,7 +298,9 @@ void process_exit(int status)
         curr->page_dir = (void *)0;
     }
 
-    process_table[curr->pid] = (void *)0;
+    /* BUG-10 fix: do NOT clear process_table here.  The ZOMBIE entry
+     * must remain so that process_wait() can reap it and read the
+     * exit_status.  The table entry is cleared in process_wait(). */
 
     sched_remove(curr);
 
@@ -266,6 +346,10 @@ pid_t process_wait(int *status)
                     }
                 }
 
+                /* Now safe to clear the process table entry and free the PCB */
+                if (pid >= 0 && pid < MAX_PROCESSES) {
+                    process_table[pid] = (void *)0;
+                }
                 kfree(child);
                 spinlock_unlock(&process_lock);
                 return pid;
@@ -315,7 +399,84 @@ pid_t process_fork(void)
 
     child->entry_point = parent->entry_point;
     child->user_stack = parent->user_stack;
-    child->kernel_stack = (uint32_t)pmm_alloc_page() + PMM_PAGE_SIZE + VMM_KERNEL_BASE;
+
+    /* Allocate a 2-page kernel stack for the child */
+    if (alloc_kernel_stack(child) != 0) {
+        vmm_destroy_address_space(child->page_dir);
+        if (child->pid >= 0 && child->pid < MAX_PROCESSES) {
+            process_table[child->pid] = (void *)0;
+        }
+        kfree(child);
+        spinlock_unlock(&process_lock);
+        return -1;
+    }
+
+    /* For fork, the child should resume as if returning from the
+     * syscall.  We set up the kernel stack so that context_switch
+     * "returns" into the interrupt return path.  The child's
+     * kernel_esp must point to a regs_t frame that iret will use.
+     *
+     * Layout (growing down from kernel_stack):
+     *   [gs] [fs] [es] [ds]           -- segment regs
+     *   [edi] [esi] [ebp] [esp_k] [ebx] [edx] [ecx] [eax]  -- PUSHAD
+     *   [int_no] [err_code]           -- ISR stub
+     *   [eip] [cs] [eflags] [useresp] [ss]  -- CPU
+     *   [callee-saved for context_switch: edi, esi, ebx, ebp]
+     *   [return address -> fork_return_trampoline]
+     *
+     * Actually, the simplest approach: set up the stack so that
+     * context_switch returns to a small trampoline that pops the
+     * regs_t frame and does iret, just like the normal interrupt
+     * return path. */
+
+    /* We build a regs_t frame on the child's kernel stack, then
+     * set up context_switch's callee-saved regs above it so that
+     * context_switch returns into our fork_return trampoline which
+     * pops the regs_t and irets. */
+    uint32_t *sp = (uint32_t *)child->kernel_stack;
+
+    /* CPU-pushed registers (for iret) */
+    sp--; *sp = child->context.ss;          /* ss = 0x23 */
+    sp--; *sp = child->context.useresp;     /* useresp */
+    sp--; *sp = child->context.eflags;      /* eflags */
+    sp--; *sp = child->context.cs;          /* cs = 0x1B or 0x08 */
+    sp--; *sp = child->context.eip;         /* eip */
+
+    /* ISR stub pushed */
+    sp--; *sp = child->context.err_code;    /* err_code */
+    sp--; *sp = child->context.int_no;      /* int_no */
+
+    /* PUSHAD registers */
+    sp--; *sp = child->context.eax;
+    sp--; *sp = child->context.ecx;
+    sp--; *sp = child->context.edx;
+    sp--; *sp = child->context.ebx;
+    sp--; *sp = child->context.esp_kernel;  /* esp (discarded by POPAD) */
+    sp--; *sp = child->context.ebp;
+    sp--; *sp = child->context.esi;
+    sp--; *sp = child->context.edi;
+
+    /* Segment registers */
+    sp--; *sp = child->context.ds;
+    sp--; *sp = child->context.es;
+    sp--; *sp = child->context.fs;
+    sp--; *sp = child->context.gs;
+
+    /* Now sp points to the regs_t frame.  Above it we place the
+     * context_switch callee-saved regs and a return address to
+     * fork_return_asm (defined in interrupt.asm) which does:
+     *   pop gs; pop fs; pop es; pop ds; popad; add esp,8; iret */
+    sp--; *sp = 0;   /* ebp for context_switch */
+    sp--; *sp = 0;   /* ebx */
+    sp--; *sp = 0;   /* esi */
+    sp--; *sp = 0;   /* edi */
+
+    /* Return address: jump to the interrupt return path */
+    extern void fork_return_trampoline(void);
+    sp--; *sp = (uint32_t)fork_return_trampoline;
+
+    child->kernel_esp = (uint32_t)sp;
+
     child->parent_pid = parent->pid;
     child->time_slice = calculate_timeslice(child->priority);
     child->exit_status = 0;
@@ -417,7 +578,8 @@ int process_exec(const char *path, char *const argv[])
         return -1;
     }
 
-    /* 5. Load each PT_LOAD segment into the new address space */
+    /* 5. Map all PT_LOAD segments into the new address space.
+     * Must happen while CR3 is still the current directory. */
     uint32_t ph_offset = hdr->e_phoff;
     uint16_t ph_entry_size = hdr->e_phentsize;
     uint16_t ph_num = hdr->e_phnum;
@@ -442,11 +604,6 @@ int process_exec(const char *path, char *const argv[])
             vmm_map_page(new_dir, addr, (uint32_t)phys, page_flags);
             addr += PAGE_SIZE;
         }
-
-        /* Copy segment data: zero-fill memsz then copy filesz */
-        uint8_t *dest = (uint8_t *)ph->p_vaddr;
-        memset(dest, 0, ph->p_memsz);
-        memcpy(dest, elf_buf + ph->p_offset, ph->p_filesz);
     }
 
     /* 6. Set up the user stack (4 pages below USER_STACK_TOP) */
@@ -462,45 +619,43 @@ int process_exec(const char *path, char *const argv[])
                      VMM_PAGE_PRESENT | VMM_PAGE_WRITABLE | VMM_PAGE_USER);
     }
 
-    /* 7. Save the old address space before replacing */
+    /* 7. Switch CR3 to the new address space and copy ELF data */
+    uint32_t old_cr3;
+    asm volatile("mov %%cr3, %0" : "=r"(old_cr3));
+    asm volatile("mov %0, %%cr3" : : "r"(new_dir) : "memory");
+
+    for (uint16_t i = 0; i < ph_num; i++) {
+        Elf32_Phdr *ph = (Elf32_Phdr *)(elf_buf + ph_offset + i * ph_entry_size);
+        if (ph->p_type != PT_LOAD) continue;
+
+        uint8_t *dest = (uint8_t *)ph->p_vaddr;
+        memset(dest, 0, ph->p_memsz);
+        memcpy(dest, elf_buf + ph->p_offset, ph->p_filesz);
+    }
+
+    /* Switch CR3 back */
+    asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
+
+    /* 8. Save the old address space before replacing */
     page_directory_t *old_dir = curr->page_dir;
 
-    /* 8. Switch to the new address space */
+    /* 9. Switch to the new address space */
     curr->page_dir = new_dir;
     vmm_set_current_dir(new_dir);
 
-    /* 9. Destroy the old address space */
+    /* 10. Destroy the old address space */
     if (old_dir) {
         vmm_destroy_address_space(old_dir);
     }
 
-    /* 10. Update process metadata */
+    /* 11. Update process metadata */
     curr->entry_point = hdr->e_entry;
     curr->user_stack = USER_STACK_TOP;
 
-    /* Allocate a new kernel stack */
-    void *kernel_stack_phys = pmm_alloc_page();
-    if (!kernel_stack_phys) {
+    /* Allocate a new 2-page kernel stack */
+    if (alloc_kernel_stack(curr) != 0) {
         KERNEL_PANIC("process_exec: failed to allocate kernel stack");
     }
-    curr->kernel_stack = (uint32_t)kernel_stack_phys + PMM_PAGE_SIZE + VMM_KERNEL_BASE;
-
-    /* 11. Set up registers for user mode entry */
-    curr->context.eax = 0;
-    curr->context.ebx = 0;
-    curr->context.ecx = 0;
-    curr->context.edx = 0;
-    curr->context.esi = 0;
-    curr->context.edi = 0;
-    curr->context.ebp = 0;
-    curr->context.eip = hdr->e_entry;
-    curr->context.cs = 0x1B;
-    curr->context.eflags = 0x202;
-    curr->context.useresp = USER_STACK_TOP;
-    curr->context.ss = 0x23;
-    curr->context.esp_kernel = curr->kernel_stack;
-    curr->context.int_no = 0;
-    curr->context.err_code = 0;
 
     /* Reset signal state */
     curr->signal_pending = 0;

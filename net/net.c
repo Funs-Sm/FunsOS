@@ -12,6 +12,7 @@
 #include "dhcp.h"
 #include "dns.h"
 #include "igmp.h"
+#include "ipv6.h"
 #include "net_buf_pool.h"
 #include "kheap.h"
 #include "string.h"
@@ -45,6 +46,14 @@ void net_init(void) {
     dhcp_client_init();
     dns_init();
     igmp_init();
+
+    /* New feature initialization */
+    ipv6_init();               /* IPv6 stack (ICMPv6, NDP, SLAAC) */
+    vlan_init();               /* VLAN management (802.1Q) */
+    bridge_init();             /* Network bridge (802.1D) */
+    mcast_forwarder_enable(1); /* Multicast routing (IGMP snooping) */
+    qos_init();                /* QoS packet scheduling (pfifo_fast + TBF) */
+    ipsec_init();              /* IPsec security (AH/ESP) */
 }
 
 void net_register_interface(net_interface_t *iface) {
@@ -188,6 +197,8 @@ void net_tick(uint32_t now_ms) {
     dhcp_client_tick(now_ms);
     dns_tick(now_ms);
     igmp_tick(now_ms);
+    ipv6_tick(now_ms);
+    bridge_tick(now_ms);
     (void)now_ms;
 }
 

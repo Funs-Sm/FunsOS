@@ -36,4 +36,10 @@ void theme_draw_title_bar(gfx_context_t *ctx, window_t *win);
 void theme_draw_border(gfx_context_t *ctx, window_t *win);
 void theme_draw_button(gfx_context_t *ctx, gfx_rect_t rect, uint8_t hovered, uint8_t pressed);
 
+/* ---- Theme synchronization with FunRender ---- */
+void *gui_theme_from_fr_theme(void *fr_theme);
+void *gui_theme_to_fr_theme(void);
+int gui_theme_sync_with_fr(const char *theme_name);
+void gui_theme_apply_fr_colors(gfx_context_t *ctx);
+
 #endif

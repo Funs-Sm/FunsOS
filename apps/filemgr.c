@@ -1,5 +1,7 @@
 #include "user_syscall.h"
 #include "string.h"
+#include "gui_common.h"
+#include "gfx_adapter.h"
 
 #define WIN_W 600
 #define WIN_H 450
@@ -7,8 +9,6 @@
 #define ICON_SIZE 48
 #define ICON_PAD 12
 #define LABEL_H 14
-#define CHAR_W 8
-#define CHAR_H 16
 #define MARGIN 4
 
 #define COLOR_WIN_BG   0xE0E0E0
@@ -22,10 +22,6 @@
 #define COLOR_LABEL    0x000000
 #define COLOR_UPBTN    0x008000
 
-#define FB_IOCTL_GET_PTR 0x01
-#define MOUSE_IOCTL_READ 0x10
-#define KBD_IOCTL_READ   0x20
-
 #define MAX_ENTRIES 64
 #define MAX_PATH 256
 
@@ -34,7 +30,6 @@ typedef struct {
     int is_dir;
 } dir_entry_t;
 
-static unsigned int *fb;
 static int fb_fd;
 static int mouse_fd;
 static int kbd_fd;
@@ -51,42 +46,6 @@ static int mouse_y = 384;
 static int mouse_btn = 0;
 static int last_click_time = 0;
 static int last_click_idx = -1;
-
-static void fb_draw_rect(int x, int y, int w, int h, unsigned int color)
-{
-    int i, j;
-    for (j = y; j < y + h; j++) {
-        for (i = x; i < x + w; i++) {
-            if (i >= 0 && i < 1024 && j >= 0 && j < 768)
-                fb[j * 1024 + i] = color;
-        }
-    }
-}
-
-static void fb_draw_char(int x, int y, char c, unsigned int fg, unsigned int bg)
-{
-    static const unsigned char font8x16[128][16] = {{0}};
-    int i, j;
-    if ((unsigned char)c > 127) return;
-    for (j = 0; j < 16; j++) {
-        unsigned char row = font8x16[(unsigned char)c][j];
-        for (i = 0; i < 8; i++) {
-            int px = x + i;
-            int py = y + j;
-            if (px >= 0 && px < 1024 && py >= 0 && py < 768)
-                fb[py * 1024 + px] = (row & (0x80 >> i)) ? fg : bg;
-        }
-    }
-}
-
-static void fb_draw_string(int x, int y, const char *s, unsigned int fg, unsigned int bg)
-{
-    while (*s) {
-        fb_draw_char(x, y, *s, fg, bg);
-        x += CHAR_W;
-        s++;
-    }
-}
 
 static void read_directory(void)
 {
@@ -162,7 +121,7 @@ static void draw_window(void)
 
         int name_len = 0;
         while (entries[i].name[name_len] && name_len < 8) name_len++;
-        int label_x = ix + (ICON_SIZE - name_len * CHAR_W) / 2;
+        int label_x = ix + (ICON_SIZE - name_len * CHAR_WIDTH) / 2;
         fb_draw_string(label_x, iy + ICON_SIZE + 2, entries[i].name, COLOR_LABEL, COLOR_WIN_BG);
     }
 }
@@ -264,18 +223,20 @@ static void handle_click(void)
 
 static void init_devices(void)
 {
+    unsigned int *fb;
     fb_fd = sys_open("/dev/fb0", O_RDWR);
     if (fb_fd >= 0) {
         sys_ioctl(fb_fd, FB_IOCTL_GET_PTR, &fb);
     }
     mouse_fd = sys_open("/dev/mouse0", O_RDONLY);
     kbd_fd = sys_open("/dev/kbd0", O_RDONLY);
+    gfx_adapter_init(fb, SCREEN_WIDTH, SCREEN_HEIGHT);
 }
 
 int main(void)
 {
     init_devices();
-    if (!fb) {
+    if (!gfx_adapter_is_initialized()) {
         sys_exit(1);
     }
 

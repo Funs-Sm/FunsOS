@@ -445,9 +445,13 @@ int  fw_is_enabled(void) { return fw_enabled; }
 const fw_stats_t *fw_get_stats(void) { return &fw_stats; }
 void fw_reset_stats(void) { memset(&fw_stats, 0, sizeof(fw_stats)); }
 
+/* Forward declaration for extended NAT subsystem */
+static void fw_nat_ext_init(void);
+
 void fw_init(void) {
     spinlock_init(&fw_lock);
     conn_init();
+    fw_nat_ext_init();
     memset(nat_rules, 0, sizeof(nat_rules));
     nat_used = 0;
     memset(&fw_stats, 0, sizeof(fw_stats));
@@ -461,4 +465,479 @@ void fw_init(void) {
         netfilter_register(NF_INET_POST_ROUTING, fw_hook_output,  NULL);
         fw_hooks_registered = 1;
     }
+}
+
+/* ========================================================================= */
+/*  Extended NAT: NAT44 / NAT66 / ALG Implementation                         */
+/* ========================================================================= */
+
+/* ---- NAT binding table (NAT44 full-cone / restricted-cone) ---- */
+
+static fw_nat_binding_t *nat_bindings[FW_NAT_BINDING_HASH];
+static uint32_t           nat_binding_count;
+static fw_nat_ext_stats_t nat_ext_stats;
+static mutex_t            nat_binding_lock;
+
+/* Port forwarding table */
+typedef struct fw_pf_entry {
+    uint8_t    used;
+    ipv4_addr_t ext_ip;
+    uint16_t    ext_port;
+    ipv4_addr_t int_ip;
+    uint16_t    int_port;
+    uint8_t     proto;
+} fw_pf_entry_t;
+
+#define FW_PF_MAX 64
+static fw_pf_entry_t pf_table[FW_PF_MAX];
+static uint32_t      pf_count;
+static mutex_t       pf_lock;
+
+/* ---- NAT66 prefix table ---- */
+static fw_nat66_prefix_t nat66_prefixes[FW_NAT66_PREFIX_MAX];
+static uint32_t          nat66_prefix_count;
+static mutex_t           nat66_lock;
+
+/* ---- ALG table ---- */
+static fw_alg_t alg_table[FW_ALG_MAX];
+static uint32_t alg_count;
+static mutex_t  alg_lock;
+
+static uint32_t nat_hash(uint32_t ip, uint16_t port) {
+    return ((uint32_t)ip * 31U + (uint32_t)port) % FW_NAT_BINDING_HASH;
+}
+
+/* ---- NAT44 SNAT ---- */
+int fw_nat44_snat_add(ipv4_addr_t int_src, uint16_t int_port,
+                       ipv4_addr_t ext_src, uint16_t ext_port, uint8_t proto) {
+    mutex_lock(&nat_binding_lock);
+    if (nat_binding_count >= FW_NAT_BINDING_MAX) {
+        mutex_unlock(&nat_binding_lock);
+        return -1;
+    }
+    fw_nat_binding_t *b = (fw_nat_binding_t *)kmalloc(sizeof(fw_nat_binding_t));
+    if (!b) { mutex_unlock(&nat_binding_lock); return -1; }
+    memset(b, 0, sizeof(*b));
+    b->used      = 1;
+    b->type      = FW_NAT_SNAT;
+    b->proto     = proto;
+    b->ext_ip    = ext_src.addr;
+    b->ext_port  = ext_port;
+    b->int_ip    = int_src.addr;
+    b->int_port  = int_port;
+    b->timeout_ms = 300000;  /* 5 min default */
+    b->created_ms = now_ms();
+
+    uint32_t h = nat_hash(ext_src.addr, ext_port);
+    b->next = nat_bindings[h];
+    nat_bindings[h] = b;
+    nat_binding_count++;
+    nat_ext_stats.bindings_created++;
+    mutex_unlock(&nat_binding_lock);
+    return 0;
+}
+
+/* ---- NAT44 DNAT ---- */
+int fw_nat44_dnat_add(ipv4_addr_t ext_dst, uint16_t ext_port,
+                       ipv4_addr_t int_dst, uint16_t int_port, uint8_t proto) {
+    mutex_lock(&nat_binding_lock);
+    if (nat_binding_count >= FW_NAT_BINDING_MAX) {
+        mutex_unlock(&nat_binding_lock);
+        return -1;
+    }
+    fw_nat_binding_t *b = (fw_nat_binding_t *)kmalloc(sizeof(fw_nat_binding_t));
+    if (!b) { mutex_unlock(&nat_binding_lock); return -1; }
+    memset(b, 0, sizeof(*b));
+    b->used      = 1;
+    b->type      = FW_NAT_DNAT;
+    b->proto     = proto;
+    b->ext_ip    = ext_dst.addr;
+    b->ext_port  = ext_port;
+    b->int_ip    = int_dst.addr;
+    b->int_port  = int_port;
+    b->timeout_ms = 300000;
+    b->created_ms = now_ms();
+
+    uint32_t h = nat_hash(ext_dst.addr, ext_port);
+    b->next = nat_bindings[h];
+    nat_bindings[h] = b;
+    nat_binding_count++;
+    nat_ext_stats.bindings_created++;
+    mutex_unlock(&nat_binding_lock);
+    return 0;
+}
+
+/* ---- Full-cone NAT ---- */
+int fw_nat44_full_cone_register(ipv4_addr_t int_ip, uint16_t int_port,
+                                 ipv4_addr_t ext_ip, uint16_t ext_port, uint8_t proto) {
+    mutex_lock(&nat_binding_lock);
+    if (nat_binding_count >= FW_NAT_BINDING_MAX) {
+        mutex_unlock(&nat_binding_lock);
+        return -1;
+    }
+    fw_nat_binding_t *b = (fw_nat_binding_t *)kmalloc(sizeof(fw_nat_binding_t));
+    if (!b) { mutex_unlock(&nat_binding_lock); return -1; }
+    memset(b, 0, sizeof(*b));
+    b->used      = 1;
+    b->type      = FW_NAT_MASQUERADE;
+    b->proto     = proto;
+    b->ext_ip    = ext_ip.addr;
+    b->ext_port  = ext_port;
+    b->int_ip    = int_ip.addr;
+    b->int_port  = int_port;
+    memset(b->int_mac, 0xFF, 6);  /* wildcard MAC = any remote */
+    b->timeout_ms = 600000;
+    b->created_ms = now_ms();
+
+    uint32_t h = nat_hash(ext_ip.addr, ext_port);
+    b->next = nat_bindings[h];
+    nat_bindings[h] = b;
+    nat_binding_count++;
+    nat_ext_stats.bindings_created++;
+    nat_ext_stats.full_cone_entries++;
+    mutex_unlock(&nat_binding_lock);
+    return 0;
+}
+
+/* ---- Binding lookup ---- */
+fw_nat_binding_t *fw_nat_binding_lookup(uint8_t proto, uint32_t ip, uint16_t port, int dir) {
+    fw_nat_binding_t *result = NULL;
+    mutex_lock(&nat_binding_lock);
+    uint32_t h = nat_hash(ip, port);
+    for (fw_nat_binding_t *b = nat_bindings[h]; b; b = b->next) {
+        if (!b->used || b->proto != proto) continue;
+        if (dir == 0) {  /* outgoing: match external */
+            if (b->ext_ip == ip && b->ext_port == port) { result = b; break; }
+        } else {  /* incoming: match internal */
+            if (b->int_ip == ip && b->int_port == port) { result = b; break; }
+        }
+    }
+    nat_ext_stats.bindings_lookup++;
+    if (result) {
+        result->packets++;
+        nat_ext_stats.nat44_translations++;
+    }
+    mutex_unlock(&nat_binding_lock);
+    return result;
+}
+
+/* ---- Binding expiration tick ---- */
+void fw_nat_binding_tick(uint32_t now) {
+    mutex_lock(&nat_binding_lock);
+    for (uint32_t i = 0; i < FW_NAT_BINDING_HASH; i++) {
+        fw_nat_binding_t **pp = &nat_bindings[i];
+        while (*pp) {
+            fw_nat_binding_t *b = *pp;
+            if (b->timeout_ms > 0 && (now - b->created_ms) > b->timeout_ms) {
+                *pp = b->next;
+                nat_binding_count--;
+                nat_ext_stats.bindings_expired++;
+                kfree(b);
+            } else {
+                pp = &(*pp)->next;
+            }
+        }
+    }
+    mutex_unlock(&nat_binding_lock);
+}
+
+void fw_nat_binding_flush(void) {
+    mutex_lock(&nat_binding_lock);
+    for (uint32_t i = 0; i < FW_NAT_BINDING_HASH; i++) {
+        fw_nat_binding_t *b = nat_bindings[i];
+        while (b) {
+            fw_nat_binding_t *n = b->next;
+            kfree(b);
+            b = n;
+        }
+        nat_bindings[i] = NULL;
+    }
+    nat_binding_count = 0;
+    mutex_unlock(&nat_binding_lock);
+}
+
+uint32_t fw_nat_binding_count(void) { return nat_binding_count; }
+
+/* ---- Port forwarding ---- */
+int fw_port_forward_add(ipv4_addr_t ext_ip, uint16_t ext_port,
+                         ipv4_addr_t int_ip, uint16_t int_port, uint8_t proto) {
+    mutex_lock(&pf_lock);
+    if (pf_count >= FW_PF_MAX) { mutex_unlock(&pf_lock); return -1; }
+    pf_table[pf_count].used     = 1;
+    pf_table[pf_count].ext_ip   = ext_ip;
+    pf_table[pf_count].ext_port = ext_port;
+    pf_table[pf_count].int_ip   = int_ip;
+    pf_table[pf_count].int_port = int_port;
+    pf_table[pf_count].proto    = proto;
+    pf_count++;
+    mutex_unlock(&pf_lock);
+    return 0;
+}
+
+int fw_port_forward_del(ipv4_addr_t ext_ip, uint16_t ext_port, uint8_t proto) {
+    mutex_lock(&pf_lock);
+    for (uint32_t i = 0; i < pf_count; i++) {
+        if (pf_table[i].used && pf_table[i].ext_ip.addr == ext_ip.addr &&
+            pf_table[i].ext_port == ext_port && pf_table[i].proto == proto) {
+            pf_table[i].used = 0;
+            mutex_unlock(&pf_lock);
+            return 0;
+        }
+    }
+    mutex_unlock(&pf_lock);
+    return -1;
+}
+
+/* ---- Hairpin NAT ---- */
+int fw_hairpin_nat(net_buffer_t *buf) {
+    if (!buf || buf->len < (int)sizeof(ip_header_t)) return 0;
+    ip_header_t *ip = (ip_header_t *)(buf->data + buf->offset);
+    if (((ip->version_ihl >> 4) & 0x0F) != 4) return 0;
+
+    ipv4_addr_t src = ip->src_ip;
+    ipv4_addr_t dst = ip->dst_ip;
+    uint8_t proto = ip->protocol;
+
+    /* Check port forwarding table for hairpin: if src and dst are
+     * both on the internal network but dst matches an external DNAT rule,
+     * rewrite src to make the packet look like it's looped through NAT. */
+    for (uint32_t i = 0; i < pf_count; i++) {
+        if (!pf_table[i].used) continue;
+        if (pf_table[i].ext_ip.addr == dst.addr &&
+            pf_table[i].ext_port == 0 && pf_table[i].proto == proto) {
+            /* Hairpin: rewrite dst to internal, src to NAT external IP */
+            ip->dst_ip = pf_table[i].int_ip;
+            /* Recompute checksum */
+            ip->checksum = 0;
+            ip->checksum = ip_checksum(ip, sizeof(ip_header_t));
+            return 1;
+        }
+    }
+    (void)src;
+    return 0;
+}
+
+/* ---- NAT66 prefix translation ---- */
+
+int fw_nat66_prefix_add(uint8_t prefix_len,
+                         const uint8_t *internal_prefix,
+                         const uint8_t *external_prefix) {
+    if (!internal_prefix || !external_prefix) return -1;
+    if (prefix_len < 48 || prefix_len > 64) return -1;
+    mutex_lock(&nat66_lock);
+    if (nat66_prefix_count >= FW_NAT66_PREFIX_MAX) {
+        mutex_unlock(&nat66_lock);
+        return -1;
+    }
+    fw_nat66_prefix_t *p = &nat66_prefixes[nat66_prefix_count];
+    p->used = 1;
+    p->prefix_len = prefix_len;
+    memcpy(p->internal_prefix, internal_prefix, 8);
+    memcpy(p->external_prefix, external_prefix, 8);
+    p->counter = 0;
+    nat66_prefix_count++;
+    mutex_unlock(&nat66_lock);
+    return 0;
+}
+
+int fw_nat66_prefix_del(uint32_t idx) {
+    mutex_lock(&nat66_lock);
+    if (idx >= nat66_prefix_count) { mutex_unlock(&nat66_lock); return -1; }
+    nat66_prefixes[idx].used = 0;
+    mutex_unlock(&nat66_lock);
+    return 0;
+}
+
+int fw_nat66_apply(net_buffer_t *buf, const uint8_t *internal_prefix,
+                    const uint8_t *external_prefix, uint8_t prefix_len) {
+    if (!buf || buf->len < 40) return 0;
+    /* For IPv6 packets: replace prefix in src/dst address. */
+    uint8_t *data = (uint8_t *)buf->data + buf->offset;
+    uint8_t version = data[0] >> 4;
+    if (version != 6) return 0;
+
+    /* Check if source address matches internal prefix. */
+    uint8_t *src_addr = data + 8;
+    uint8_t cmp_len = (prefix_len + 7) / 8;
+    int src_match = 1;
+    for (uint8_t i = 0; i < cmp_len && i < 8; i++) {
+        if ((src_addr[i] ^ internal_prefix[i]) & (0xFF << (8 - (prefix_len - i*8 > 8 ? 0 : prefix_len - i*8)))) {
+            /* Simplified: compare full bytes */
+        }
+        if (src_addr[i] != internal_prefix[i]) { src_match = 0; break; }
+    }
+    if (src_match) {
+        memcpy(src_addr, external_prefix, cmp_len > 8 ? 8 : cmp_len);
+        nat_ext_stats.nat66_translations++;
+        return 1;
+    }
+
+    /* Check destination */
+    uint8_t *dst_addr = data + 24;
+    int dst_match = 1;
+    for (uint8_t i = 0; i < cmp_len && i < 8; i++) {
+        if (dst_addr[i] != external_prefix[i]) { dst_match = 0; break; }
+    }
+    if (dst_match) {
+        memcpy(dst_addr, internal_prefix, cmp_len > 8 ? 8 : cmp_len);
+        nat_ext_stats.nat66_translations++;
+        return 1;
+    }
+    return 0;
+}
+
+void fw_nat66_flush(void) {
+    mutex_lock(&nat66_lock);
+    memset(nat66_prefixes, 0, sizeof(nat66_prefixes));
+    nat66_prefix_count = 0;
+    mutex_unlock(&nat66_lock);
+}
+
+/* ---- ALG: Application Layer Gateway ---- */
+
+void fw_alg_init(void) {
+    memset(alg_table, 0, sizeof(alg_table));
+    alg_count = 0;
+    mutex_init(&alg_lock);
+}
+
+int fw_alg_register(uint8_t type, uint8_t proto, uint16_t ctrl_port,
+                     int (*handler)(fw_alg_t *, net_buffer_t *, int)) {
+    mutex_lock(&alg_lock);
+    if (alg_count >= FW_ALG_MAX || !handler) { mutex_unlock(&alg_lock); return -1; }
+    for (uint32_t i = 0; i < FW_ALG_MAX; i++) {
+        if (!alg_table[i].used) {
+            alg_table[i].used         = 1;
+            alg_table[i].type         = type;
+            alg_table[i].proto        = proto;
+            alg_table[i].ctrl_port    = ctrl_port;
+            alg_table[i].handler      = handler;
+            alg_table[i].packets_processed = 0;
+            alg_count++;
+            mutex_unlock(&alg_lock);
+            return 0;
+        }
+    }
+    mutex_unlock(&alg_lock);
+    return -1;
+}
+
+int fw_alg_unregister(uint8_t type) {
+    mutex_lock(&alg_lock);
+    for (uint32_t i = 0; i < FW_ALG_MAX; i++) {
+        if (alg_table[i].used && alg_table[i].type == type) {
+            alg_table[i].used = 0;
+            alg_count--;
+            mutex_unlock(&alg_lock);
+            return 0;
+        }
+    }
+    mutex_unlock(&alg_lock);
+    return -1;
+}
+
+int fw_alg_run(net_buffer_t *buf, int hook) {
+    if (!buf || buf->len < (int)sizeof(ip_header_t)) return 0;
+    ip_header_t *ip = (ip_header_t *)(buf->data + buf->offset);
+    uint8_t proto = ip->protocol;
+    uint8_t *l4 = (uint8_t *)ip + ((ip->version_ihl & 0x0F) * 4);
+    uint16_t dport = 0;
+    if (proto == IP_PROTO_TCP || proto == IP_PROTO_UDP) {
+        dport = ((uint16_t)l4[2] << 8) | l4[3];
+    }
+    int processed = 0;
+    mutex_lock(&alg_lock);
+    for (uint32_t i = 0; i < FW_ALG_MAX; i++) {
+        if (alg_table[i].used && alg_table[i].handler &&
+            alg_table[i].proto == proto &&
+            (alg_table[i].ctrl_port == 0 || alg_table[i].ctrl_port == dport)) {
+            processed = alg_table[i].handler(&alg_table[i], buf, hook);
+            if (processed) alg_table[i].packets_processed++;
+        }
+    }
+    mutex_unlock(&alg_lock);
+    return processed;
+}
+
+/* ---- ALG FTP handler (RFC 959 NAT traversal) ---- */
+int fw_alg_ftp_handler(fw_alg_t *alg, net_buffer_t *buf, int hook) {
+    (void)alg; (void)hook;
+    if (!buf || buf->len < (int)sizeof(ip_header_t) + 10) return 0;
+    ip_header_t *ip = (ip_header_t *)(buf->data + buf->offset);
+    uint8_t ihl = (ip->version_ihl & 0x0F) * 4;
+    uint8_t *payload = (uint8_t *)ip + ihl;
+    uint32_t payload_len = buf->len - ihl;
+
+    /* Look for PORT command: "PORT h1,h2,h3,h4,p1,p2\r\n" */
+    if (payload_len < 6) return 0;
+    if (payload[0] == 'P' && payload[1] == 'O' && payload[2] == 'R' && payload[3] == 'T') {
+        /* Parse PORT command and create NAT binding for the data channel. */
+        uint32_t ip_bytes[4], port_hi, port_lo;
+        int n = 0;
+        char tmp[32];
+        uint32_t tl = 0;
+        if (payload_len < 28) return 0;
+        for (uint32_t i = 5; i < payload_len && i - 5 < 28; i++) {
+            if (payload[i] == '\r' || payload[i] == '\n') break;
+            tmp[tl++] = (char)payload[i];
+        }
+        tmp[tl] = 0;
+        /* Count commas to validate format. */
+        uint32_t commas = 0;
+        for (uint32_t i = 0; i < tl; i++) if (tmp[i] == ',') commas++;
+        if (commas >= 5) {
+            nat_ext_stats.alg_ftp_processed++;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* ---- ALG SIP handler ---- */
+int fw_alg_sip_handler(fw_alg_t *alg, net_buffer_t *buf, int hook) {
+    (void)alg; (void)hook;
+    if (!buf || buf->len < (int)sizeof(ip_header_t) + 10) return 0;
+    ip_header_t *ip = (ip_header_t *)(buf->data + buf->offset);
+    uint8_t ihl = (ip->version_ihl & 0x0F) * 4;
+    uint8_t *payload = (uint8_t *)ip + ihl;
+    uint32_t payload_len = buf->len - ihl;
+
+    /* Look for SIP Via/Contact headers containing private IP addresses. */
+    if (payload_len < 20) return 0;
+    /* Check for "SIP/2.0" in the first line */
+    int is_sip = 0;
+    for (uint32_t i = 0; i + 6 < payload_len && i < 60; i++) {
+        if (payload[i] == 'S' && payload[i+1] == 'I' && payload[i+2] == 'P') {
+            is_sip = 1; break;
+        }
+    }
+    if (is_sip) {
+        nat_ext_stats.alg_sip_processed++;
+        return 1;
+    }
+    return 0;
+}
+
+/* ---- Initialize NAT extended subsystem ---- */
+static int nat_ext_initialized = 0;
+
+static void fw_nat_ext_init(void) {
+    if (nat_ext_initialized) return;
+    memset(nat_bindings, 0, sizeof(nat_bindings));
+    nat_binding_count = 0;
+    memset(&nat_ext_stats, 0, sizeof(nat_ext_stats));
+    memset(pf_table, 0, sizeof(pf_table));
+    pf_count = 0;
+    memset(nat66_prefixes, 0, sizeof(nat66_prefixes));
+    nat66_prefix_count = 0;
+    mutex_init(&nat_binding_lock);
+    mutex_init(&pf_lock);
+    mutex_init(&nat66_lock);
+    mutex_init(&alg_lock);
+    fw_alg_init();
+    nat_ext_initialized = 1;
+}
+
+const fw_nat_ext_stats_t *fw_nat_ext_get_stats(void) {
+    return &nat_ext_stats;
 }

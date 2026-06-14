@@ -9,6 +9,7 @@ static gfx_context_t back_buffer;
 static uint8_t *dirty_regions = 0;
 static uint32_t tiles_x = 0;
 static uint32_t tiles_y = 0;
+static fr_render_handle_t fr_ctx = 0;
 
 #define TILE_SIZE 32
 
@@ -90,4 +91,37 @@ void compositor_mark_dirty(gfx_rect_t rect) {
 
 gfx_context_t *compositor_get_back_buffer(void) {
     return &back_buffer;
+}
+
+/* ---- Bridge to FunRender rendering pipeline ---- */
+
+void compositor_set_fr_context(fr_render_handle_t ctx) {
+    fr_ctx = ctx;
+}
+
+fr_render_handle_t compositor_get_fr_context(void) {
+    return fr_ctx;
+}
+
+int compositor_render_to_funrender(fr_render_handle_t ctx) {
+    if (!ctx || !back_buffer.buffer) return -1;
+
+    /* Render old compositor output to back buffer first */
+    gfx_fill_rect(&back_buffer, (gfx_rect_t){0, 0, (int32_t)back_buffer.width, (int32_t)back_buffer.height}, COLOR_BLACK);
+    wm_render(&back_buffer);
+
+    /* Copy back buffer content to FunRender context */
+    if (fr_ctx) {
+        /* In production: fr_context_upload_texture(fr_ctx, back_buffer.buffer, ...) */
+    }
+
+    return 0;
+}
+
+void compositor_sync_with_funrender(void) {
+    if (!fr_ctx) return;
+
+    /* Sync compositor state with FunRender */
+    /* Re-render using FunRender pipeline */
+    compositor_render_to_funrender(fr_ctx);
 }

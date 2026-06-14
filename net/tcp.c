@@ -32,6 +32,7 @@ static mutex_t       tcp_table_lock;
 static uint32_t      tcp_now_ms;
 static tcp_stats_t   stats;
 static tcp_socket_t *all_sockets;     /* linked list for /proc/net */
+static tcp_cc_stats_t cc_stats;       /* CC algorithm stats        */
 
 #define TCP_HASH_TABLE_SIZE 1024
 static tcp_socket_t *tcp_hash[TCP_HASH_TABLE_SIZE];
@@ -162,6 +163,8 @@ tcp_socket_t *tcp_socket_create(void) {
     sock->rcv_adv      = TCP_RCVBUF_SIZE;
     sock->cwnd         = TCP_INITIAL_CWND * MSS;
     sock->ssthresh     = TCP_SLOW_START_THRESHOLD;
+    sock->cc_algo      = TCP_CC_NEWRENO;  /* default: NewReno */
+    memset(&sock->cubic, 0, sizeof(sock->cubic));
     sock->srtt         = 0;
     sock->rttvar       = 0;
     sock->rto          = TCP_RETRANS_TIMEOUT;
@@ -497,11 +500,8 @@ static void rtx_retransmit_due(tcp_socket_t *sock) {
     /* Karn's algorithm: skip RTT measurement for retransmitted segments. */
     sock->rtt_pending = 0;
 
-    /* Apply RFC 5681 reaction to RTO expiry */
-    sock->ssthresh = (sock->cwnd * 3) / 4;
-    if (sock->ssthresh < 2 * tcp_effective_mss(sock))
-        sock->ssthresh = 2 * tcp_effective_mss(sock);
-    sock->cwnd = tcp_effective_mss(sock);
+    /* Delegate RTO loss handling to CC algorithm. */
+    tcp_cc_on_rto(sock);
     sock->dup_acks = 0;
     sock->fast_recovery = 0;
     sock->retrans_cnt++;
@@ -815,50 +815,34 @@ static void sack_rebuild(tcp_socket_t *sock) {
 
 static void tcp_process_ack(tcp_socket_t *sock, uint32_t ack, uint32_t wnd) {
     if (ack == sock->snd_una && wnd == sock->snd_wnd) {
+        /* Duplicate ACK -- delegate to CC algorithm. */
         sock->dup_acks++;
-        if (sock->dup_acks == 3) {
-            /* Fast retransmit */
-            if (sock->rtx_head) {
-                sock->ssthresh = (sock->cwnd * 3) / 4;
-                if (sock->ssthresh < 2 * tcp_effective_mss(sock))
-                    sock->ssthresh = 2 * tcp_effective_mss(sock);
-                sock->cwnd = sock->ssthresh + 3 * tcp_effective_mss(sock);
-                sock->fast_recovery = 1;
-                tcp_retransmit_segment(sock, sock->rtx_head);
-            }
-        } else if (sock->fast_recovery && sock->dup_acks > 3) {
-            sock->cwnd += tcp_effective_mss(sock);
-            tcp_push_pending(sock);
-        }
+        tcp_cc_on_dup_ack(sock);
         return;
     }
     if (seq_gt(ack, sock->snd_una)) {
-        if (sock->fast_recovery) {
-            if (seq_lt(ack, sock->ssthresh)) {
-                sock->cwnd = sock->ssthresh;
-            } else {
-                sock->cwnd += tcp_effective_mss(sock);
+        /* Exiting fast recovery (NewReno partial ACK handled in CC module). */
+        if (sock->fast_recovery && sock->cc_algo == TCP_CC_RENO) {
+            /* Reno: partial ACK exits fast recovery, deflate window */
+            sock->cwnd = sock->ssthresh;
+            sock->fast_recovery = 0;
+        } else if (sock->fast_recovery) {
+            /* NewReno/CUBIC: full ACK exits fast recovery */
+            if (seq_ge(ack, sock->ssthresh)) {
+                /* ssthresh was set to snd_nxt at loss time -- full recovery */
             }
             sock->fast_recovery = 0;
         }
         uint32_t acked = ack - sock->snd_una;
         sock->snd_una = ack;
-        /* RTT measurement: find matching retransmit segment */
+        /* RTT measurement */
         if (sock->rtt_pending) {
             uint32_t m = now_ms() - sock->rtt_send_time;
             if (m > 0 && m < 60000) rtt_measure(sock, m);
             sock->rtt_pending = 0;
         }
-        /* Congestion avoidance / slow start */
-        if (sock->cwnd < sock->ssthresh) {
-            sock->cwnd += acked;
-        } else {
-            sock->partial_bytes_acked += acked;
-            if (sock->partial_bytes_acked >= sock->cwnd) {
-                sock->cwnd += tcp_effective_mss(sock);
-                sock->partial_bytes_acked -= sock->cwnd;
-            }
-        }
+        /* Delegate cwnd increase to CC algorithm. */
+        tcp_cc_on_ack(sock, acked);
         sock->dup_acks = 0;
         sock->retrans_cnt = 0;
         if (sock->rto > sock->rto_min) sock->rto = sock->srtt + 4 * sock->rttvar;
@@ -1591,4 +1575,317 @@ void tcp_handle_icmp_error(ipv4_addr_t src, uint8_t type, uint8_t code) {
 void tcp_mark_error(tcp_socket_t *sock) {
     if (!sock) return;
     sock->flags |= TCP_SOCK_FLAG_RST_RCVD;
+}
+
+/* ========================================================================= */
+/*  Congestion Control Module (Reno / NewReno / CUBIC)                       */
+/* ========================================================================= */
+
+/* ---- Helper: cubic root via integer approximation ---- */
+static uint32_t cubic_root(uint64_t x) {
+    /* Binary search for integer cube root. */
+    uint32_t lo = 0, hi = 2097151;  /* ~cuberoot(UINT32_MAX) */
+    while (lo < hi) {
+        uint32_t mid = (lo + hi + 1) / 2;
+        if ((uint64_t)mid * mid * mid <= x) lo = mid;
+        else hi = mid - 1;
+    }
+    return lo;
+}
+
+/* ---- Helper: integer cubic function ---- */
+/* cwnd = C * (t - K)^3 + W_max, where K = cubic_root(W_max * beta / C) */
+/* We work in integer space: time in ms, cwnd in bytes. */
+static uint32_t cubic_update(tcp_socket_t *sock, uint32_t now_ms) {
+    tcp_cubic_state_t *cu = &sock->cubic;
+    int32_t t = (int32_t)(now_ms - cu->origin_point);
+    if (t <= 0) t = 1;   /* avoid negative time */
+
+    int32_t dt = t - (int32_t)cu->K;
+    int64_t dt_cubed;
+
+    /* Clamp to avoid absurd values during extreme conditions. */
+    if (dt < -20000) dt = -20000;
+    if (dt >  20000) dt =  20000;
+
+    dt_cubed = (int64_t)dt * dt * dt;
+
+    /* CUBIC cwnd = C * (t - K)^3 + W_max */
+    /* Scale: C is 0.4 → multiply by 4 then divide by 10 */
+    int64_t cubic_target;
+    if (dt >= 0) {
+        cubic_target = (dt_cubed * 4) / 10000 + cu->W_max;
+    } else {
+        cubic_target = cu->W_max - ((-dt_cubed) * 4) / 10000;
+    }
+
+    if (cubic_target < (int64_t)(2 * tcp_effective_mss(sock)))
+        cubic_target = 2 * tcp_effective_mss(sock);
+    if (cubic_target > 0xFFFFFFFFULL)
+        cubic_target = 0xFFFFFFFFU;
+
+    /* TCP-friendly CUBIC: track standard TCP cwnd for fallback. */
+    if (cu->tcp_friendliness) {
+        uint32_t mss = tcp_effective_mss(sock);
+        /* Standard TCP AIMD: cwnd = cwnd + MSS*MSS/cwnd */
+        if (cu->tcp_cwnd < cu->W_max) {
+            /* In concave region, TCP may grow faster. */
+            cu->cwnd_cnt += mss;
+            while (cu->cwnd_cnt >= cu->tcp_cwnd) {
+                cu->cwnd_cnt -= cu->tcp_cwnd;
+                cu->tcp_cwnd += mss;
+            }
+        } else {
+            /* In convex region, TCP grows slower (not tracked). */
+        }
+        if (cu->tcp_cwnd < 2 * mss) cu->tcp_cwnd = 2 * mss;
+
+        if (cu->tcp_cwnd > (uint32_t)cubic_target) {
+            cc_stats.cubic_tcp_friendly_wins++;
+            return cu->tcp_cwnd;
+        }
+    }
+
+    return (uint32_t)cubic_target;
+}
+
+/* ---- CC set / get / name ---- */
+
+void tcp_cc_set_algo(tcp_socket_t *sock, uint8_t algo) {
+    if (!sock) return;
+    if (algo > TCP_CC_CUBIC) return;
+    sock->cc_algo = algo;
+    if (algo == TCP_CC_CUBIC) {
+        tcp_cc_init_cubic(sock);
+    }
+}
+
+uint8_t tcp_cc_get_algo(tcp_socket_t *sock) {
+    return sock ? sock->cc_algo : TCP_CC_NEWRENO;
+}
+
+const char *tcp_cc_get_name(uint8_t algo) {
+    switch (algo) {
+    case TCP_CC_RENO:    return "reno";
+    case TCP_CC_NEWRENO: return "newreno";
+    case TCP_CC_CUBIC:   return "cubic";
+    default:             return "unknown";
+    }
+}
+
+/* ---- CUBIC initialization (RFC 8312) ---- */
+
+int tcp_cc_init_cubic(tcp_socket_t *sock) {
+    if (!sock) return -1;
+    tcp_cubic_state_t *cu = &sock->cubic;
+    memset(cu, 0, sizeof(*cu));
+    cu->tcp_friendliness = 1;
+    cu->fast_convergence  = 1;
+    cu->beta_cubic        = 0.7f;
+    cu->C                 = 0.4f;
+    cu->W_max             = 0;
+    cu->W_last_max        = 0;
+    cu->epoch_start       = now_ms();
+    cu->origin_point      = now_ms();
+    cu->dMin              = 100;  /* reasonable default */
+    cu->cwnd_cnt          = 0;
+    cu->K                 = 0;
+    cu->last_cwnd         = 0;
+    cu->tcp_cwnd          = sock->cwnd;
+    return 0;
+}
+
+/* ---- Congestion window increase on ACK ---- */
+
+void tcp_cc_on_ack(tcp_socket_t *sock, uint32_t acked_bytes) {
+    if (!sock || acked_bytes == 0) return;
+    uint32_t mss = tcp_effective_mss(sock);
+
+    switch (sock->cc_algo) {
+    case TCP_CC_CUBIC: {
+        /* CUBIC: growth governed by cubic function, not AIMD. */
+        tcp_cubic_state_t *cu = &sock->cubic;
+        uint32_t target = cubic_update(sock, now_ms());
+        if (target > (uint32_t)0x7FFFFFFFU) target = 0x7FFFFFFFU;
+
+        /* In slow start, use standard approach */
+        if (sock->fast_recovery && sock->cwnd < sock->ssthresh) {
+            /* CUBIC uses HyStart slow start */
+            sock->cwnd += acked_bytes;
+            if (sock->cwnd > target && sock->cwnd > sock->ssthresh)
+                sock->cwnd = target;
+        } else if (sock->fast_recovery) {
+            /* In fast recovery, CUBIC also inflates to target */
+            if (target > sock->cwnd)
+                sock->cwnd = target;
+        } else {
+            /* Normal CUBIC operation */
+            sock->cwnd = target;
+        }
+        /* Maintain ssthresh from slow start transition. */
+        if (!sock->fast_recovery && sock->cwnd >= sock->ssthresh) {
+            cc_stats.reno_slow_starts++;
+        }
+        cu->last_cwnd = sock->cwnd;
+        cu->cwnd_cnt = 0;
+        break;
+    }
+    case TCP_CC_RENO:
+    case TCP_CC_NEWRENO:
+    default: {
+        /* Standard AIMD: slow start or congestion avoidance. */
+        if (sock->cwnd < sock->ssthresh) {
+            /* Slow start: cwnd += min(acked, MSS) */
+            sock->cwnd += acked_bytes;
+            cc_stats.reno_slow_starts++;
+        } else {
+            /* Congestion avoidance: increase by 1 MSS per RTT */
+            sock->partial_bytes_acked += acked_bytes;
+            while (sock->partial_bytes_acked >= sock->cwnd) {
+                sock->partial_bytes_acked -= sock->cwnd;
+                sock->cwnd += mss;
+            }
+        }
+        break;
+    }
+    }
+}
+
+/* ---- Duplicate ACK handling ---- */
+
+void tcp_cc_on_dup_ack(tcp_socket_t *sock) {
+    if (!sock) return;
+    uint32_t mss = tcp_effective_mss(sock);
+
+    switch (sock->cc_algo) {
+    case TCP_CC_CUBIC:
+        /* CUBIC fast retransmit on 3 dup acks. */
+        if (sock->dup_acks == 3 && sock->rtx_head && !sock->fast_recovery) {
+            tcp_cubic_state_t *cu = &sock->cubic;
+            /* Fast convergence heuristic (RFC 8312 §4.6) */
+            if (cu->W_last_max > 0 && cu->W_max < cu->W_last_max) {
+                cu->W_last_max = cu->W_max;
+                cu->W_max = (uint32_t)((float)cu->W_max * (1.0f + cu->beta_cubic) / 2.0f);
+                cc_stats.cubic_fast_convergences++;
+            } else {
+                cu->W_last_max = cu->W_max;
+                cu->W_max = sock->cwnd;
+            }
+            /* Multiplicative decrease */
+            sock->ssthresh = (uint32_t)((float)sock->cwnd * cu->beta_cubic);
+            if (sock->ssthresh < 2 * mss) sock->ssthresh = 2 * mss;
+
+            /* Set K = cubic_root(W_max * (1 - beta) / C) */
+            uint32_t reduction = cu->W_max - sock->ssthresh;
+            if (reduction > 0 && cu->C > 0.0f) {
+                cu->K = cubic_root((uint64_t)reduction * 10000 / 4);
+            } else {
+                cu->K = 0;
+            }
+            cu->origin_point = now_ms();
+            cu->tcp_cwnd = sock->cwnd;
+            sock->cwnd = sock->ssthresh + 3 * mss;
+            sock->fast_recovery = 1;
+            cc_stats.reno_fast_retrans++;
+            tcp_retransmit_segment(sock, sock->rtx_head);
+        } else if (sock->fast_recovery && sock->dup_acks > 3) {
+            /* Inflate cwnd during fast recovery. */
+            sock->cwnd += mss;
+            tcp_push_pending(sock);
+        }
+        break;
+
+    case TCP_CC_NEWRENO:
+        /* NewReno: same fast retransmit trigger as Reno, but ssthresh
+         * is set to snd_nxt at the time of retransmit (for partial ACK
+         * detection via recovery_point). */
+        if (sock->dup_acks == 3 && sock->rtx_head && !sock->fast_recovery) {
+            uint32_t old_cwnd = sock->cwnd;
+            sock->ssthresh = (old_cwnd * 3) / 4;
+            if (sock->ssthresh < 2 * mss) sock->ssthresh = 2 * mss;
+            /* NewReno marks recovery point = snd_nxt */
+            uint32_t recovery_point = sock->snd_nxt;
+            sock->cwnd = sock->ssthresh + 3 * mss;
+            sock->fast_recovery = 1;
+            sock->ssthresh = recovery_point;  /* store recovery point in ssthresh temporarily */
+            /* Restore proper ssthresh after retransmit */
+            uint32_t proper_ss = (old_cwnd * 3) / 4;
+            if (proper_ss < 2 * mss) proper_ss = 2 * mss;
+            sock->ssthresh = proper_ss;
+            cc_stats.reno_fast_retrans++;
+            cc_stats.newreno_recoveries++;
+            tcp_retransmit_segment(sock, sock->rtx_head);
+        } else if (sock->fast_recovery && sock->dup_acks > 3) {
+            sock->cwnd += mss;
+            cc_stats.newreno_partial_acks++;
+            tcp_push_pending(sock);
+        }
+        break;
+
+    case TCP_CC_RENO:
+    default:
+        /* Reno: standard fast retransmit / fast recovery. */
+        if (sock->dup_acks == 3 && sock->rtx_head && !sock->fast_recovery) {
+            sock->ssthresh = (sock->cwnd * 3) / 4;
+            if (sock->ssthresh < 2 * mss) sock->ssthresh = 2 * mss;
+            sock->cwnd = sock->ssthresh + 3 * mss;
+            sock->fast_recovery = 1;
+            cc_stats.reno_fast_retrans++;
+            tcp_retransmit_segment(sock, sock->rtx_head);
+        } else if (sock->fast_recovery && sock->dup_acks > 3) {
+            sock->cwnd += mss;
+            tcp_push_pending(sock);
+        }
+        break;
+    }
+}
+
+/* ---- Loss detection (RTO timeout) ---- */
+
+void tcp_cc_on_loss(tcp_socket_t *sock) {
+    if (!sock) return;
+    uint32_t mss = tcp_effective_mss(sock);
+
+    switch (sock->cc_algo) {
+    case TCP_CC_CUBIC: {
+        tcp_cubic_state_t *cu = &sock->cubic;
+        /* CUBIC loss reaction */
+        cu->W_last_max = cu->W_max;
+        cu->W_max = sock->cwnd;
+        if (cu->fast_convergence && cu->W_max < cu->W_last_max) {
+            cu->W_max = (uint32_t)((float)cu->W_max * (1.0f + cu->beta_cubic) / 2.0f);
+        }
+        sock->ssthresh = (uint32_t)((float)sock->cwnd * cu->beta_cubic);
+        if (sock->ssthresh < 2 * mss) sock->ssthresh = 2 * mss;
+        sock->cwnd = mss;
+        /* Reset epoch */
+        cu->origin_point = now_ms();
+        if (sock->ssthresh < cu->W_max) {
+            uint32_t diff = cu->W_max - sock->ssthresh;
+            cu->K = cubic_root((uint64_t)diff * 10000 / 4);
+        } else {
+            cu->K = 0;
+        }
+        cu->tcp_cwnd = sock->cwnd;
+        cu->epoch_start = now_ms();
+        cc_stats.cubic_epochs++;
+        break;
+    }
+    case TCP_CC_RENO:
+    case TCP_CC_NEWRENO:
+    default:
+        sock->ssthresh = (sock->cwnd * 3) / 4;
+        if (sock->ssthresh < 2 * mss) sock->ssthresh = 2 * mss;
+        sock->cwnd = mss;
+        break;
+    }
+}
+
+void tcp_cc_on_rto(tcp_socket_t *sock) {
+    /* RTO: same as loss for all algorithms. */
+    tcp_cc_on_loss(sock);
+}
+
+const tcp_cc_stats_t *tcp_cc_get_stats(void) {
+    return &cc_stats;
 }

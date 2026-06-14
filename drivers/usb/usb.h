@@ -6,16 +6,11 @@
 #define USB_MAX_DEVICES 128
 #define USB_MAX_ENDPOINTS 32
 
-typedef struct {
-    uint8_t addr;
-    uint8_t speed;
-    uint8_t config;
-    uint16_t vendor_id;
-    uint16_t device_id;
-} usb_device_t;
+/* Forward declaration - usb_core.h has the full definition */
+struct usb_device;
+typedef struct usb_device usb_device_t;
 
-void usb_init(void);
-int32_t usb_control_msg(usb_device_t *dev, uint8_t request, uint16_t value, uint16_t index, void *buf, uint16_t len);
-int32_t usb_bulk_transfer(usb_device_t *dev, uint8_t endpoint, void *buf, uint32_t len);
+/* Hub-specific control message API (implemented in usb/usb_core.c) */
+int32_t usb_control_msg(usb_device_t *dev, uint8_t request_type, uint8_t request, uint16_t value, uint16_t index, void *buf, uint16_t len);
 
 #endif

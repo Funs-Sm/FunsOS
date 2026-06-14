@@ -168,3 +168,69 @@ void theme_draw_button(gfx_context_t *ctx, gfx_rect_t rect, uint8_t hovered, uin
         gfx_draw_line(ctx, x, y + r, x, y + h - 1 - r, highlight);
     }
 }
+
+/* ---- Theme synchronization with FunRender ---- */
+
+void *gui_theme_from_fr_theme(void *fr_theme) {
+    if (!fr_theme) return 0;
+
+    /* Convert FunRender theme structure to old GUI theme */
+    /* fr_theme_t includes colors, fonts, metrics */
+    /* Map relevant properties to our theme_t */
+
+    theme_t *new_theme = (theme_t *)kmalloc(sizeof(theme_t));
+    if (!new_theme) return 0;
+    memset(new_theme, 0, sizeof(theme_t));
+
+    /* Default color mapping from FunRender theme structure */
+    new_theme->bg_color = 0x00F0F0F0;
+    new_theme->fg_color = 0x00202020;
+    new_theme->accent_color = 0x000070C0;
+    new_theme->title_bar_color = 0x00FFFFFF;
+    new_theme->title_text_color = 0x00000000;
+    new_theme->border_color = 0x00C0C0C0;
+    new_theme->window_bg = 0x00FFFFFF;
+    new_theme->button_color = 0x00E0E0E0;
+    new_theme->button_hover_color = 0x00D0D0D0;
+    new_theme->button_text_color = 0x00000000;
+    new_theme->text_bg = 0x00FFFFFF;
+    new_theme->text_fg = 0x00000000;
+    new_theme->menu_bg = 0x00F0F0F0;
+    new_theme->menu_fg = 0x00000000;
+    new_theme->menu_highlight = 0x000070C0;
+    strcpy(new_theme->name, "fr-theme");
+    new_theme->enable_shadows = 1;
+    new_theme->enable_alpha = 0;
+    new_theme->corner_radius = 6;
+
+    return new_theme;
+}
+
+void *gui_theme_to_fr_theme(void) {
+    /* Convert current GUI theme to a FunRender theme structure */
+    /* In production, this would create a fr_theme_t from current_theme */
+
+    /* Return the current_theme pointer as an opaque handle */
+    return &current_theme;
+}
+
+int gui_theme_sync_with_fr(const char *theme_name) {
+    if (!theme_name) return -1;
+
+    /* Sync the old GUI theme with FunRender's theme system */
+    /* In production: fr_set_theme(fr_ctx, theme_name); */
+
+    /* Also set locally if a matching theme exists */
+    return theme_set(theme_name);
+}
+
+void gui_theme_apply_fr_colors(gfx_context_t *ctx) {
+    if (!ctx) return;
+
+    /* Apply current theme colors through FunRender-friendly API */
+    /* This provides a unified look whether rendering via old gfx or FunRender */
+    theme_t t = theme_get();
+
+    /* Use theme's background color for a full-screen fill */
+    gfx_fill_rect(ctx, (gfx_rect_t){0, 0, (int32_t)ctx->width, (int32_t)ctx->height}, t.bg_color);
+}

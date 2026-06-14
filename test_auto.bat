@@ -2,7 +2,7 @@
 setlocal enabledelayedexpansion
 
 echo ==========================================
-echo  Funs Core v0.4 - Automated Test Script
+echo  Funs Core v0.5 - Automated Test Script
 echo ==========================================
 echo.
 echo [TEST] Starting automated kernel test...

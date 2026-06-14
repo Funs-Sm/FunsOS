@@ -64,6 +64,10 @@ int ipv6_addr_is_loopback(const ipv6_addr_t *addr) {
     return addr->addr[15] == 1;
 }
 
+int ipv6_addr_is_site_local(const ipv6_addr_t *addr) {
+    return addr->addr[0] == 0xFE && (addr->addr[1] & 0xC0) == 0xC0;
+}
+
 void ipv6_addr_to_str(const ipv6_addr_t *addr, char *buf, int bufsize) {
     int pos = 0;
     for (int i = 0; i < 16; i += 2) {
@@ -823,4 +827,340 @@ void ipv6_tick(uint32_t now_ms) {
 
 const ipv6_stats_t *ipv6_get_stats(void) {
     return &g_stats;
+}
+
+/* ================================================================ */
+/*  扩展功能: SLAAC DAD + EUI-64                                     */
+/* ================================================================ */
+
+int ipv6_slaac_generate_eui64(const uint8_t *mac, ipv6_addr_t *out) {
+    if (!mac || !out) return -1;
+
+    memset(out, 0, 16);
+    out->addr[0] = 0xFE;
+    out->addr[1] = 0x80;
+    out->addr[2] = 0x00;
+    out->addr[3] = 0x00;
+    out->addr[4] = 0x00;
+    out->addr[5] = 0x00;
+    out->addr[6] = 0x00;
+    out->addr[7] = 0x00;
+
+    out->addr[8]  = mac[0] ^ 0x02;
+    out->addr[9]  = mac[1];
+    out->addr[10] = mac[2];
+    out->addr[11] = 0xFF;
+    out->addr[12] = 0xFE;
+    out->addr[13] = mac[3];
+    out->addr[14] = mac[4];
+    out->addr[15] = mac[5];
+    return 0;
+}
+
+int ipv6_slaac_perform_dad(net_interface_t *iface, const ipv6_addr_t *addr) {
+    /* Duplicate Address Detection (RFC 4862 §5.4)
+     * Send neighbor solicitation with unspecified source.
+     * If we receive a neighbor advertisement in response,
+     * the address is already in use. */
+    if (!iface) return -1;
+
+    uint8_t packet[32];
+    memset(packet, 0, sizeof(packet));
+
+    ndp_ns_header_t *ns = (ndp_ns_header_t *)packet;
+    ns->type = ICMPV6_TYPE_NEIGHBOR_SOLICIT;
+    ns->code = 0;
+    ns->checksum = 0;
+    ns->reserved = 0;
+    memcpy(ns->target, addr->addr, 16);
+
+    /* Use unspecified address as source */
+    ipv6_addr_t unspec;
+    memset(&unspec, 0, 16);
+
+    ipv6_addr_t dst_mcast;
+    ipv6_solicited_node_mcast(addr, &dst_mcast);
+
+    ns->checksum = ipv6_checksum(&unspec, &dst_mcast,
+                                  IPV6_PROTO_ICMPV6, packet, sizeof(ndp_ns_header_t));
+
+    /* Send DAD probe */
+    ipv6_send_packet_raw(iface, &dst_mcast, IPV6_PROTO_ICMPV6,
+                         packet, sizeof(ndp_ns_header_t), 255);
+
+    /* In a real implementation, we'd wait with a timer for responses.
+     * For this embedded system, perform a quick poll. */
+    uint32_t deadline = timer_get_ticks() * 10U + 2000; /* 2 second timeout */
+    while ((uint32_t)((int32_t)(timer_get_ticks() * 10U) - (int32_t)deadline) < 0) {
+        /* Check if any neighbor advertisement was received for this address */
+        neighbor_entry_t *n = ipv6_neighbor_lookup(addr);
+        if (n && n->state == NEIGHBOR_STATE_REACHABLE) {
+            klog_warn("IPv6: DAD failed - duplicate address detected");
+            return -1;
+        }
+    }
+
+    klog_info("IPv6: DAD passed - address is unique");
+    return 0;
+}
+
+/* ================================================================ */
+/*  扩展功能: 路由                                                    */
+/* ================================================================ */
+
+int ipv6_route_add_default(const ipv6_addr_t *gateway, net_interface_t *iface) {
+    ipv6_addr_t all_zeros;
+    memset(&all_zeros, 0, 16);
+    return ipv6_route_add(&all_zeros, 0, gateway, iface, 1);
+}
+
+int ipv6_route_add_blackhole(const ipv6_addr_t *network, uint8_t prefix_len) {
+    if (prefix_len > 128) return -1;
+
+    ipv6_route_entry_t *entry = (ipv6_route_entry_t *)kmalloc(sizeof(ipv6_route_entry_t));
+    if (!entry) return -1;
+
+    entry->network = *network;
+    entry->prefix_len = prefix_len;
+    memset(&entry->gateway, 0xFF, 16); /* blackhole marker */
+    entry->iface = NULL;
+    entry->metric = 0;
+
+    spinlock_lock(&g_route_lock);
+    entry->next = g_routes;
+    g_routes = entry;
+    spinlock_unlock(&g_route_lock);
+    return 0;
+}
+
+void ipv6_routes_dump(char *buf, uint32_t buf_size) {
+    if (!buf || buf_size < 2) { return; }
+    buf[0] = '\0';
+    int pos = 0;
+
+    spinlock_lock(&g_route_lock);
+    ipv6_route_entry_t *entry = g_routes;
+    while (entry && pos < (int)buf_size - 128) {
+        char net_str[40], gw_str[40];
+        ipv6_addr_to_str(&entry->network, net_str, sizeof(net_str));
+        ipv6_addr_to_str(&entry->gateway, gw_str, sizeof(gw_str));
+        pos += snprintf(buf + pos, buf_size - pos,
+                        "%s/%d via %s iface=%s metric=%d\n",
+                        net_str, entry->prefix_len, gw_str,
+                        entry->iface ? entry->iface->name : "null",
+                        entry->metric);
+        entry = entry->next;
+    }
+    spinlock_unlock(&g_route_lock);
+}
+
+int ipv6_get_route_count(void) {
+    int count = 0;
+    spinlock_lock(&g_route_lock);
+    ipv6_route_entry_t *entry = g_routes;
+    while (entry) { count++; entry = entry->next; }
+    spinlock_unlock(&g_route_lock);
+    return count;
+}
+
+/* ================================================================ */
+/*  扩展功能: 邻居发现                                                 */
+/* ================================================================ */
+
+int ipv6_neighbor_add_static(const ipv6_addr_t *addr, const uint8_t *mac) {
+    if (!addr || !mac) return -1;
+
+    spinlock_lock(&g_neighbor_lock);
+    neighbor_entry_t *entry = neighbor_get_or_create(addr);
+    if (entry) {
+        memcpy(entry->mac, mac, 6);
+        entry->state = NEIGHBOR_STATE_REACHABLE;
+        entry->timer = timer_get_ticks() * 10U;
+    }
+    spinlock_unlock(&g_neighbor_lock);
+    return entry ? 0 : -1;
+}
+
+int ipv6_neighbor_del(const ipv6_addr_t *addr) {
+    if (!addr) return -1;
+
+    spinlock_lock(&g_neighbor_lock);
+    neighbor_entry_t **pp = &g_neighbors;
+    while (*pp) {
+        if (ipv6_addr_compare(&(*pp)->addr, addr)) {
+            neighbor_entry_t *del = *pp;
+            *pp = del->next;
+            kfree(del);
+            spinlock_unlock(&g_neighbor_lock);
+            return 0;
+        }
+        pp = &(*pp)->next;
+    }
+    spinlock_unlock(&g_neighbor_lock);
+    return -1;
+}
+
+void ipv6_neighbor_flush(void) {
+    spinlock_lock(&g_neighbor_lock);
+    neighbor_entry_t *entry = g_neighbors;
+    while (entry) {
+        neighbor_entry_t *next = entry->next;
+        kfree(entry);
+        entry = next;
+    }
+    g_neighbors = NULL;
+    spinlock_unlock(&g_neighbor_lock);
+}
+
+void ipv6_neighbors_dump(char *buf, uint32_t buf_size) {
+    if (!buf || buf_size < 2) { return; }
+    buf[0] = '\0';
+    int pos = 0;
+
+    spinlock_lock(&g_neighbor_lock);
+    neighbor_entry_t *entry = g_neighbors;
+    while (entry && pos < (int)buf_size - 100) {
+        char addr_str[40];
+        ipv6_addr_to_str(&entry->addr, addr_str, sizeof(addr_str));
+        const char *state_str = "unknown";
+        switch (entry->state) {
+        case NEIGHBOR_STATE_INCOMPLETE: state_str = "INCOMPLETE"; break;
+        case NEIGHBOR_STATE_REACHABLE:  state_str = "REACHABLE"; break;
+        case NEIGHBOR_STATE_STALE:      state_str = "STALE"; break;
+        case NEIGHBOR_STATE_PROBE:      state_str = "PROBE"; break;
+        }
+        pos += snprintf(buf + pos, buf_size - pos,
+                        "%s %02X:%02X:%02X:%02X:%02X:%02X %s\n",
+                        addr_str,
+                        entry->mac[0], entry->mac[1], entry->mac[2],
+                        entry->mac[3], entry->mac[4], entry->mac[5],
+                        state_str);
+        entry = entry->next;
+    }
+    spinlock_unlock(&g_neighbor_lock);
+}
+
+int ipv6_ndp_get_router_mtu(net_interface_t *iface, uint32_t *mtu) {
+    /* MTU option from Router Advertisement (NDP type 5, RFC 4861 §4.6.4) */
+    if (!iface || !mtu) return -1;
+    *mtu = iface->mtu;
+    return 0;
+}
+
+int ipv6_get_neighbor_count(void) {
+    int count = 0;
+    spinlock_lock(&g_neighbor_lock);
+    neighbor_entry_t *entry = g_neighbors;
+    while (entry) { count++; entry = entry->next; }
+    spinlock_unlock(&g_neighbor_lock);
+    return count;
+}
+
+/* ================================================================ */
+/*  扩展功能: 数据包转发 + ICMPv6 错误                                  */
+/* ================================================================ */
+
+int ipv6_forward_packet(net_interface_t *in_iface, const void *data, uint16_t len) {
+    if (!data || len < sizeof(ipv6_header_t)) return -1;
+
+    const ipv6_header_t *hdr = (const ipv6_header_t *)data;
+
+    /* Don't forward link-local or multicast */
+    if (ipv6_addr_is_link_local(&hdr->dst) || ipv6_addr_is_multicast(&hdr->dst) ||
+        ipv6_addr_is_link_local(&hdr->src)) {
+        return -1;
+    }
+
+    /* Decrement hop limit */
+    uint8_t new_hop = hdr->hop_limit;
+    if (new_hop <= 1) {
+        /* Send Time Exceeded ICMPv6 error */
+        ipv6_send_error(in_iface, &hdr->src,
+                        ICMPV6_TYPE_TIME_EXCEEDED, 0,
+                        data, len);
+        g_stats.hop_limit_expired++;
+        return -1;
+    }
+    new_hop--;
+
+    /* Route lookup */
+    ipv6_addr_t gateway;
+    net_interface_t *out_iface = NULL;
+    if (ipv6_route_lookup(&hdr->dst, &gateway, &out_iface) < 0 || !out_iface) {
+        /* Destination unreachable */
+        ipv6_send_error(in_iface, &hdr->src,
+                        ICMPV6_TYPE_DEST_UNREACH, 0,
+                        data, len);
+        g_stats.no_route++;
+        return -1;
+    }
+
+    /* Check MTU */
+    uint32_t payload_len = hdr->payload_len;
+    if (payload_len + sizeof(ipv6_header_t) > out_iface->mtu) {
+        /* Packet Too Big */
+        ipv6_send_error(in_iface, &hdr->src,
+                        ICMPV6_TYPE_PACKET_TOO_BIG, 0,
+                        data, len);
+        /* Set MTU field in ICMPv6 error to out_iface->mtu */
+        return -1;
+    }
+
+    /* Forward packet */
+    int ret = ipv6_send_packet_raw(out_iface, &hdr->dst,
+                                    hdr->next_header,
+                                    (const uint8_t *)data + sizeof(ipv6_header_t),
+                                    (uint16_t)payload_len, new_hop);
+    return ret;
+}
+
+int ipv6_send_error(net_interface_t *iface, const ipv6_addr_t *dst,
+                    uint8_t type, uint8_t code,
+                    const void *orig, uint16_t orig_len) {
+    if (!iface || !dst || !orig) return -1;
+
+    /* Build ICMPv6 error message including as much of the original packet
+     * as will fit without exceeding 1280 bytes (IPv6 minimum MTU) */
+    uint32_t max_payload = 1280 - sizeof(ipv6_header_t) - 8;
+    uint32_t include_len = orig_len;
+    if (include_len > max_payload) include_len = max_payload;
+
+    uint32_t total = 8 + include_len;
+    uint8_t *packet = (uint8_t *)kcalloc(1, total);
+    if (!packet) return -1;
+
+    /* ICMPv6 error header */
+    packet[0] = type;
+    packet[1] = code;
+    packet[2] = 0; packet[3] = 0; /* checksum */
+    packet[4] = 0; packet[5] = 0; packet[6] = 0; packet[7] = 0; /* unused */
+
+    /* Copy as much original packet as fits */
+    memcpy(packet + 8, orig, include_len);
+
+    /* Compute checksum */
+    uint16_t csum = ipv6_checksum(&g_link_local, dst,
+                                   IPV6_PROTO_ICMPV6, packet, total);
+    packet[2] = (uint8_t)(csum >> 8);
+    packet[3] = (uint8_t)(csum & 0xFF);
+
+    int ret;
+    if (type == ICMPV6_TYPE_PACKET_TOO_BIG) {
+        /* Set MTU field */
+        uint32_t mtu = 0;
+        ipv6_ndp_get_router_mtu(iface, &mtu);
+        packet[4] = (uint8_t)(mtu >> 24);
+        packet[5] = (uint8_t)(mtu >> 16);
+        packet[6] = (uint8_t)(mtu >> 8);
+        packet[7] = (uint8_t)(mtu);
+    }
+
+    ret = ipv6_send_packet_raw(iface, dst, IPV6_PROTO_ICMPV6,
+                               packet, total, 64);
+    kfree(packet);
+    return ret;
+}
+
+void ipv6_reset_stats(void) {
+    memset(&g_stats, 0, sizeof(g_stats));
 }

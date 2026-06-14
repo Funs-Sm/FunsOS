@@ -575,3 +575,41 @@ void wm_arrange_tile(void) {
         w = w->next;
     }
 }
+
+/* ---- Bridge to new desktop system ---- */
+
+static void *desktop_context = 0;
+static uint8_t desktop_registered = 0;
+
+int wm_register_with_desktop(void) {
+    if (desktop_registered) return 0;
+
+    /* Register with the new os/desktop/ system */
+    /* In production: call desktop_init(screen_width, screen_height); */
+    desktop_registered = 1;
+    return 0;
+}
+
+int wm_sync_to_desktop(void) {
+    if (!desktop_registered) return -1;
+
+    /* Sync old WM state to new desktop system */
+    window_t *w = top_window;
+    while (w) {
+        if (w->flags & WINDOW_FLAG_VISIBLE) {
+            /* window_mgr_create_window(w->title, w->x, w->y, w->width, w->height); */
+            gui_window_register_with_sys_wm(w);
+        }
+        w = w->next;
+    }
+
+    return 0;
+}
+
+void wm_set_desktop_context(void *ctx) {
+    desktop_context = ctx;
+}
+
+void *wm_get_desktop_context(void) {
+    return desktop_context;
+}

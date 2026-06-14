@@ -180,6 +180,7 @@ int ipv6_addr_is_multicast(const ipv6_addr_t *addr);
 int ipv6_addr_is_link_local(const ipv6_addr_t *addr);
 int ipv6_addr_is_unspecified(const ipv6_addr_t *addr);
 int ipv6_addr_is_loopback(const ipv6_addr_t *addr);
+int ipv6_addr_is_site_local(const ipv6_addr_t *addr);
 int ipv6_addr_compare(const ipv6_addr_t *a, const ipv6_addr_t *b);
 void ipv6_solicited_node_mcast(const ipv6_addr_t *addr, ipv6_addr_t *mcast);
 uint16_t ipv6_checksum(const ipv6_addr_t *src, const ipv6_addr_t *dst,
@@ -187,6 +188,8 @@ uint16_t ipv6_checksum(const ipv6_addr_t *src, const ipv6_addr_t *dst,
 
 /* 自动配置 (SLAAC) */
 int ipv6_slaac_configure(void);
+int ipv6_slaac_perform_dad(net_interface_t *iface, const ipv6_addr_t *addr);
+int ipv6_slaac_generate_eui64(const uint8_t *mac, ipv6_addr_t *out);
 
 /* 路由 */
 int ipv6_route_add(const ipv6_addr_t *network, uint8_t prefix_len,
@@ -197,8 +200,27 @@ int ipv6_route_lookup(const ipv6_addr_t *dst, ipv6_addr_t *gateway,
 int ipv6_route_del(const ipv6_addr_t *network, uint8_t prefix_len);
 void ipv6_route_flush(void);
 
-/* 统计 */
-const ipv6_stats_t *ipv6_get_stats(void);
+/* 扩展路由 */
+int ipv6_route_add_default(const ipv6_addr_t *gateway, net_interface_t *iface);
+int ipv6_route_add_blackhole(const ipv6_addr_t *network, uint8_t prefix_len);
+void ipv6_routes_dump(char *buf, uint32_t buf_size);
+
+/* 邻居发现扩展 */
+int ipv6_neighbor_add_static(const ipv6_addr_t *addr, const uint8_t *mac);
+int ipv6_neighbor_del(const ipv6_addr_t *addr);
+void ipv6_neighbor_flush(void);
+void ipv6_neighbors_dump(char *buf, uint32_t buf_size);
+int ipv6_ndp_get_router_mtu(net_interface_t *iface, uint32_t *mtu);
+
+/* 数据包处理 */
+int ipv6_forward_packet(net_interface_t *in_iface, const void *data, uint16_t len);
+int ipv6_send_error(net_interface_t *iface, const ipv6_addr_t *dst,
+                    uint8_t type, uint8_t code, const void *orig, uint16_t orig_len);
+
+/* 扩展统计 */
+int ipv6_get_neighbor_count(void);
+int ipv6_get_route_count(void);
+void ipv6_reset_stats(void);
 
 /* 定时器 */
 void ipv6_tick(uint32_t now_ms);

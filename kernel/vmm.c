@@ -153,7 +153,11 @@ void vmm_unmap_page(page_directory_t *dir, uint32_t virt) {
         table->entries[pte_index] = 0;
         invlpg(virt);
 
-        pmm_free_page((void *)phys);
+        /* Do NOT free COW pages - they are shared with other address
+         * spaces.  Only free pages that are exclusively owned. */
+        if (!(pte & PTE_COW)) {
+            pmm_free_page((void *)phys);
+        }
     }
 }
 
@@ -348,9 +352,13 @@ int vmm_clone_address_space(page_directory_t *dst, page_directory_t *src) {
             for (int j = 0; j < PAGE_ENTRIES; j++) {
                 if (src_table->entries[j] & PTE_PRESENT) {
                     uint32_t flags = src_table->entries[j] & 0xFFF;
+                    /* Mark both copies as COW + read-only so that
+                     * either process writing will trigger a fault
+                     * and get a private copy. */
                     flags &= ~PTE_WRITABLE;
                     flags |= PTE_COW;
                     dst_table->entries[j] = (src_table->entries[j] & 0xFFFFF000) | flags;
+                    src_table->entries[j] = (src_table->entries[j] & 0xFFFFF000) | flags;
                 } else {
                     dst_table->entries[j] = 0;
                 }

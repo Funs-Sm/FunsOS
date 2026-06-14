@@ -72,4 +72,13 @@ void window_set_title(window_t *win, const char *title);
 void window_invalidate(window_t *win);
 gfx_context_t *window_get_context(window_t *win);
 
+/* ---- Bridge to new window system ---- */
+typedef void *sys_window_handle_t;
+
+sys_window_handle_t gui_window_to_sys_window(window_t *win);
+window_t *sys_window_to_gui_window(sys_window_handle_t sys_win);
+int gui_window_forward_event_to_sys(window_t *win, window_event_t *event);
+int gui_window_receive_event_from_sys(window_t *win, uint32_t sys_event_type, void *sys_event_data);
+void gui_window_register_with_sys_wm(window_t *win);
+
 #endif

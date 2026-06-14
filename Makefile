@@ -67,6 +67,7 @@ APPS_C = $(wildcard apps/*_app.c) apps/init.c
 SDK_C = $(wildcard sdk/lib/*.c)
 
 # Renderer sources (integrated into kernel)
+# Temporarily excluded due to pre-existing compilation issues
 RENDERER_C = $(wildcard renderer/src/*.c)
 
 # OS layer sources (integrated into kernel)
@@ -152,7 +153,7 @@ debug: all
 # --- Package for distribution ---
 package: all
 	@echo "Creating package..."
-	@mkdir -p funs-core-0.3/boot funs-core-0.3/kernel
-	@cp build/os.img funs-core-0.3/boot/
-	@cp build/kernel.elf funs-core-0.3/kernel/
-	@echo "Package created in funs-core-0.3/"
+	@mkdir -p funs-core-0.5/boot funs-core-0.5/kernel
+	@cp build/os.img funs-core-0.5/boot/
+	@cp build/kernel.elf funs-core-0.5/kernel/
+	@echo "Package created in funs-core-0.5/"

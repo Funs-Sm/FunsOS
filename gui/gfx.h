@@ -57,4 +57,27 @@ void gfx_set_clip(gfx_context_t *ctx, gfx_rect_t clip);
 void gfx_reset_clip(gfx_context_t *ctx);
 void gfx_blit(gfx_context_t *dst, int32_t dx, int32_t dy, gfx_context_t *src, gfx_rect_t src_rect);
 
+/* ---- Renderer backend selection ---- */
+
+#define GFX_BACKEND_SOFTWARE    0
+#define GFX_BACKEND_FUNRENDER   1
+#define GFX_BACKEND_AUTO        2
+
+typedef void *gfx_backend_ctx_t;
+
+void gfx_set_backend(uint32_t backend);
+uint32_t gfx_get_backend(void);
+void gfx_set_backend_context(gfx_backend_ctx_t fr_ctx);
+gfx_backend_ctx_t gfx_get_backend_context(void);
+
+/* ---- Compatibility wrappers for FunRender interop ---- */
+void gfx_fill_rect_fr(gfx_context_t *ctx, gfx_rect_t rect, gfx_color_t color);
+void gfx_draw_rect_fr(gfx_context_t *ctx, gfx_rect_t rect, gfx_color_t color);
+void gfx_draw_line_fr(gfx_context_t *ctx, int32_t x0, int32_t y0, int32_t x1, int32_t y1, gfx_color_t color);
+void gfx_blit_fr(gfx_context_t *dst, int32_t dx, int32_t dy, gfx_context_t *src, gfx_rect_t src_rect);
+
+/* ---- Canvas surface creation backed by FunRender ---- */
+gfx_context_t *gfx_create_fr_surface(uint32_t w, uint32_t h);
+void gfx_destroy_fr_surface(gfx_context_t *ctx);
+
 #endif

@@ -36,56 +36,66 @@
 
 [SECTION .text]
 
-[GLOBAL context_switch]
-[GLOBAL context_switch_to]
-[GLOBAL fpu_save]
-[GLOBAL fpu_restore]
-[GLOBAL fpu_init]
-[GLOBAL sse_init]
-[GLOBAL get_cr0]
-[GLOBAL get_cr2]
-[GLOBAL get_cr3]
-[GLOBAL get_cr4]
-[GLOBAL set_cr0]
-[GLOBAL set_cr3]
-[GLOBAL get_eflags]
+[GLOBAL _context_switch]
+[GLOBAL _fork_return_trampoline]
+[GLOBAL _context_switch_to]
+[GLOBAL _sse_init]
+[GLOBAL _get_cr0]
+[GLOBAL _get_cr2]
+[GLOBAL _get_cr3]
+[GLOBAL _get_cr4]
+[GLOBAL _set_cr0]
+[GLOBAL _set_cr3]
+[GLOBAL _get_eflags]
 
 ; =============================================================================
-; void context_switch(uint32_t** old_esp_ptr, uint32_t* new_esp)
+; void context_switch(uint32_t *old_esp, uint32_t new_esp)
 ;
-; Saves the current task context and switches to the new task.
+; Saves callee-saved registers, switches stacks, restores, returns.
+; For a new process the stack contains:
+;   [edi=0] [esi=0] [ebx=0] [ebp=0] [return-address -> trampoline]
+; For a preempted process the stack contains:
+;   [edi] [esi] [ebx] [ebp] [return-address -> schedule() after call]
 ;
 ; Parameters:
-;   [EBP+8]  = old_esp_ptr - pointer to where to save current ESP
-;   [EBP+12] = new_esp     - stack pointer of the new task
-;
-; The context is saved on the current stack. After saving, ESP is stored
-; in *old_esp_ptr, then the stack is switched to new_esp and the context
-; is restored from there.
+;   [ESP+4]  = old_esp - pointer to where to save current ESP
+;   [ESP+8]  = new_esp - stack pointer of the new task
 ; =============================================================================
-context_switch:
-    ; Save caller-saved registers that C doesn't preserve across calls
-    PUSH    EAX
-    PUSH    ECX
-    PUSH    EDX
+_context_switch:
+    PUSH    EBP
+    PUSH    EBX
+    PUSH    ESI
+    PUSH    EDI
 
-    ; At this point, we have a minimal frame on the stack.
-    ; Load parameters
-    MOV     EAX, [ESP + 16]     ; old_esp_ptr (12 + 4 for the 3 pushes)
-    MOV     EDX, [ESP + 20]     ; new_esp
+    MOV     EAX, [ESP + 20]     ; old_esp (4 pushes + ret addr + 2 args = 20)
+    MOV     ECX, [ESP + 24]     ; new_esp
 
-    ; Save current ESP into *old_esp_ptr
-    MOV     [EAX], ESP
+    MOV     [EAX], ESP          ; save old ESP
 
-    ; Switch to new task's stack
-    MOV     ESP, EDX
+    MOV     ESP, ECX            ; switch to new stack
 
-    ; Restore caller-saved registers from new task's stack
-    POP     EDX
-    POP     ECX
-    POP     EAX
+    POP     EDI
+    POP     ESI
+    POP     EBX
+    POP     EBP
 
     RET
+
+; =============================================================================
+; void fork_return_trampoline(void)
+;
+; Used by process_fork to resume the child. The child's kernel stack
+; contains a regs_t frame (same layout as isr_common_stub / irq_common_stub
+; would leave). We just need to restore registers and iret.
+; =============================================================================
+_fork_return_trampoline:
+    POP     GS
+    POP     FS
+    POP     ES
+    POP     DS
+    POPAD
+    ADD     ESP, 8              ; skip int_no and err_code
+    IRET
 
 ; =============================================================================
 ; void context_switch_to(uint32_t* task_esp)
@@ -99,7 +109,7 @@ context_switch:
 ;
 ; Stack: [EBP+8]=task_esp
 ; =============================================================================
-context_switch_to:
+_context_switch_to:
     PUSH    EBP
     MOV     EBP, ESP
 
@@ -113,83 +123,6 @@ context_switch_to:
     RET                         ; Jump to new task's EIP
 
 ; =============================================================================
-; void fpu_save(void* buffer)
-;
-; Saves the complete FPU/MMX/SSE state to buffer using FXSAVE.
-; The buffer must be 16-byte aligned and at least 512 bytes.
-;
-; Stack: [EBP+8]=buffer
-; =============================================================================
-fpu_save:
-    PUSH    EBP
-    MOV     EBP, ESP
-
-    MOV     EAX, [EBP + 8]      ; EAX = buffer pointer
-
-    ; NULL pointer check
-    TEST    EAX, EAX
-    JZ      .done
-
-    ; Save FPU/MMX/SSE state
-    FXSAVE  [EAX]
-
-.done:
-    POP     EBP
-    RET
-
-; =============================================================================
-; void fpu_restore(const void* buffer)
-;
-; Restores the complete FPU/MMX/SSE state from buffer using FXRSTOR.
-; The buffer must be 16-byte aligned and contain valid FXSAVE data.
-;
-; Stack: [EBP+8]=buffer
-; =============================================================================
-fpu_restore:
-    PUSH    EBP
-    MOV     EBP, ESP
-
-    MOV     EAX, [EBP + 8]      ; EAX = buffer pointer
-
-    TEST    EAX, EAX
-    JZ      .done
-
-    ; Restore FPU/MMX/SSE state
-    FXRSTOR [EAX]
-
-.done:
-    POP     EBP
-    RET
-
-; =============================================================================
-; void fpu_init(void)
-;
-; Initializes the FPU to a known state:
-; - FNINIT: initialize FPU without checking for pending exceptions
-; - Sets control word to default (0x037F):
-;   - Round to nearest
-;   - 64-bit precision
-;   - All exceptions masked
-; =============================================================================
-fpu_init:
-    ; Initialize FPU
-    FNINIT
-
-    ; Set control word: 0x037F = round nearest, 64-bit precision, all exceptions masked
-    ; Wait for FPU to be ready
-    ; FSTCW requires a memory operand
-    SUB     ESP, 4
-    FSTCW   [ESP]               ; Get current control word (just for delay)
-    MOV     WORD [ESP], 0x037F
-    FLDCW   [ESP]               ; Load new control word
-    ADD     ESP, 4
-
-    ; Clear any pending exceptions
-    FNCLEX
-
-    RET
-
-; =============================================================================
 ; void sse_init(void)
 ;
 ; Enables SSE support by setting the appropriate control register bits:
@@ -199,7 +132,7 @@ fpu_init:
 ; - CR4.OSFXSR = 1 (enable FXSAVE/FXRSTOR)
 ; - CR4.OSXMMEXCPT = 1 (enable #XF exception for SSE)
 ; =============================================================================
-sse_init:
+_sse_init:
     ; Enable SSE in CR0
     MOV     EAX, CR0
     AND     EAX, ~(1 << 2)      ; Clear EM (bit 2) - don't emulate
@@ -228,7 +161,7 @@ sse_init:
 ;
 ; Returns the value of control register CR0.
 ; =============================================================================
-get_cr0:
+_get_cr0:
     MOV     EAX, CR0
     RET
 
@@ -237,7 +170,7 @@ get_cr0:
 ;
 ; Returns the value of control register CR2 (page fault linear address).
 ; =============================================================================
-get_cr2:
+_get_cr2:
     MOV     EAX, CR2
     RET
 
@@ -246,7 +179,7 @@ get_cr2:
 ;
 ; Returns the value of control register CR3 (page directory base).
 ; =============================================================================
-get_cr3:
+_get_cr3:
     MOV     EAX, CR3
     RET
 
@@ -255,7 +188,7 @@ get_cr3:
 ;
 ; Returns the value of control register CR4.
 ; =============================================================================
-get_cr4:
+_get_cr4:
     MOV     EAX, CR4
     RET
 
@@ -266,7 +199,7 @@ get_cr4:
 ;
 ; Stack: [EBP+8]=val
 ; =============================================================================
-set_cr0:
+_set_cr0:
     PUSH    EBP
     MOV     EBP, ESP
 
@@ -285,7 +218,7 @@ set_cr0:
 ;
 ; Stack: [EBP+8]=val
 ; =============================================================================
-set_cr3:
+_set_cr3:
     PUSH    EBP
     MOV     EBP, ESP
 
@@ -301,7 +234,7 @@ set_cr3:
 ; Returns the current value of the EFLAGS register.
 ; Uses PUSHFD / POP EAX.
 ; =============================================================================
-get_eflags:
+_get_eflags:
     PUSHFD
     POP     EAX
     RET

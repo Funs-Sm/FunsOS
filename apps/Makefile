@@ -14,7 +14,12 @@ all: $(addsuffix .elf,$(ALL_APPS))
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-%.elf: crt0.o %.o
+# CLI apps: link with crt0 + app object only
+$(addsuffix .elf,$(CLI_APPS)): %.elf: crt0.o %.o
+	$(LD) $(LDFLAGS) -o $@ $^ -L../lib -los
+
+# GUI apps: also link gfx_adapter for shared drawing functions
+$(addsuffix .elf,$(GUI_APPS)): %.elf: crt0.o %.o gfx_adapter.o
 	$(LD) $(LDFLAGS) -o $@ $^ -L../lib -los
 
 clean:

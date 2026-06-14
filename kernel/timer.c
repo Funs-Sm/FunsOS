@@ -53,7 +53,7 @@ uint32_t timer_get_ticks(void) {
 }
 
 void timer_sleep(uint32_t ms) {
-    uint32_t target = ticks + ms / 10;
+    uint32_t target = ticks + (ms + 9) / 10;  /* 向上取整, 避免短延迟无效 */
     while (ticks < target) {
         asm volatile("hlt");
     }

@@ -7,6 +7,12 @@ AR      = ar
 TARGET  = libfunsos_api.a
 OBJ     = funsos_api.o funsos_glue.o
 
+# Tools
+TOOLS_DIR = ../tools
+FUNPACK_SRC = $(TOOLS_DIR)/funpack.c
+FUNPACK_OBJ = funpack.o
+FUNPACK_BIN = funpack
+
 all: $(TARGET)
 
 $(TARGET): $(OBJ)
@@ -18,7 +24,16 @@ funsos_api.o: funsos_api.c funsos_api.h ../include/funsos.h
 funsos_glue.o: funsos_glue.c funsos_api.h ../include/funsos.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
-clean:
-	rm -f $(OBJ) $(TARGET)
+# funpack tool
+funpack: $(FUNPACK_SRC) $(FUNPACK_OBJ)
+	$(CC) $(CFLAGS) -o $(FUNPACK_BIN) $(FUNPACK_SRC) $^
 
-.PHONY: all clean
+$(FUNPACK_OBJ): $(FUNPACK_SRC) $(TOOLS_DIR)/funpack.h
+	$(CC) $(CFLAGS) -I $(TOOLS_DIR) -c $(FUNPACK_SRC) -o $@
+
+tools: funpack
+
+clean:
+	rm -f $(OBJ) $(TARGET) $(FUNPACK_OBJ) $(FUNPACK_BIN)
+
+.PHONY: all clean tools

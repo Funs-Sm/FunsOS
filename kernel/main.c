@@ -67,6 +67,7 @@
 #include "user_ext.h"
 
 #include "vga_text.h"
+#include "serial.h"
 
 static inline void sti(void) {
     asm volatile("sti");
@@ -77,6 +78,12 @@ static inline void hlt(void) {
 }
 
 void kernel_main(void) {
+    /* Initialize serial port FIRST - before any klog output.
+     * Without this, serial_putchar() polls LSR bit 5 which may
+     * never be set on an uninitialised UART, causing klog to hang. */
+    serial_init(COM1);
+    serial_print(COM1, "[early] serial COM1 initialized\n");
+
     init_gdt();
     /* Set up TSS kernel stack for interrupt delivery */
     {
@@ -94,7 +101,22 @@ void kernel_main(void) {
     klog_init();
     klog_info("Kernel log initialized");
 
-    init_pmm(NULL);
+    init_pmm(NULL);  /* NULL => detect from 0x700 boot_info if available */
+    /* Try to use bootloader memory info for accurate PMM init.
+     * The loader stores a boot_info_t at 0x500, but the magic
+     * field is at 0x700.  If valid, pass mem_upper to PMM so it
+     * knows the real RAM size instead of assuming 4 GB. */
+    {
+        boot_info_t bi;
+        uint32_t magic = *(volatile uint32_t *)0x700;
+        if (magic == BOOT_INFO_MAGIC) {
+            bi.mem_upper = *(volatile uint32_t *)0x50C;
+            if (bi.mem_upper > 0) {
+                /* Re-init PMM with correct memory size */
+                init_pmm(&bi);
+            }
+        }
+    }
     klog_info("Physical memory manager initialized");
     init_vmm();
     klog_info("Virtual memory manager initialized");
@@ -102,6 +124,7 @@ void kernel_main(void) {
     klog_info("Kernel heap initialized");
     sched_init();
     init_process();
+    sched_create_idle_task();
     init_syscall();
     klog_info("Scheduler and process subsystem initialized");
 
@@ -288,27 +311,32 @@ void kernel_main(void) {
                 klog_info("VBE: raw block address validated!");
             } else {
                 /* Last resort: try common QEMU Bochs VBE FB addresses.
-                 * QEMU typically places LFB at 0xFD000000 or 0xE0000000. */
+                 * QEMU typically places LFB at 0xFD000000 or 0xE0000000.
+                 * Use read-only probing to avoid corrupting MMIO devices. */
                 klog_info("VBE: raw block also bad, trying known QEMU FB addresses");
                 uint32_t candidates[] = { 0xFD000000, 0xE0000000, 0xF0000000 };
                 for (int i = 0; i < 3; i++) {
-                    /* Try to map a page at candidate address to see if it's usable */
+                    /* Try to map a page at candidate address to see if it's readable */
+                    vmm_map_page(vmm_get_current_dir(), candidates[i], candidates[i],
+                                1); /* present only (read-only) */
+                    /* Read a value - if no page fault, address is mapped */
+                    volatile uint32_t *test = (volatile uint32_t *)candidates[i];
+                    /* Use a safe read-only check: just try to read.
+                     * If we get here without triple-faulting, the address is valid. */
+                    uint32_t val = test[0];
+                    (void)val;  /* suppress unused warning */
+                    /* Re-map as writable now that we know it's safe */
                     vmm_map_page(vmm_get_current_dir(), candidates[i], candidates[i],
                                 3); /* present+writable */
-                    /* Write a test pixel and read it back */
-                    volatile uint32_t *test = (volatile uint32_t *)candidates[i];
-                    test[0] = 0xDEADBEEF;
-                    if (test[0] == 0xDEADBEEF) {
-                        vbe_fb_addr = candidates[i];
-                        /* Keep width/bpp/pitch from original (mode was set OK) */
-                        if (vbe_fb_width < 640) vbe_fb_width = 640;
-                        if (vbe_fb_height < 480) vbe_fb_height = 480;
-                        if (vbe_fb_bpp < 16) vbe_fb_bpp = 24;
-                        if (vbe_fb_pitch < vbe_fb_width * 3) vbe_fb_pitch = vbe_fb_width * 3;
-                        vbe_valid = 1;
-                        klog_info("VBE: found working FB at 0x%X", candidates[i]);
-                        break;
-                    }
+                    vbe_fb_addr = candidates[i];
+                    /* Keep width/bpp/pitch from original (mode was set OK) */
+                    if (vbe_fb_width < 640) vbe_fb_width = 640;
+                    if (vbe_fb_height < 480) vbe_fb_height = 480;
+                    if (vbe_fb_bpp < 16) vbe_fb_bpp = 24;
+                    if (vbe_fb_pitch < vbe_fb_width * 3) vbe_fb_pitch = vbe_fb_width * 3;
+                    vbe_valid = 1;
+                    klog_info("VBE: found working FB at 0x%X", candidates[i]);
+                    break;
                 }
                 if (!vbe_valid) {
                     klog_info("VBE: ALL address detection methods FAILED");

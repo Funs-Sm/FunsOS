@@ -504,3 +504,1630 @@ void amdgpu_shutdown(void) {
 
     klog_info("[AMDGPU] Driver shutdown complete");
 }
+
+/* ================================================================ */
+/*  1. AtomBIOS 解析                                                   */
+/* ================================================================ */
+
+static atom_bios_info_t g_atombios_info;
+
+static int atombios_find_signature(uint8_t *rom_base, uint32_t rom_size) {
+    if (rom_size < 2) return -1;
+    if (rom_base[0] == 0x55 && rom_base[1] == 0xAA) return 0;
+    return -1;
+}
+
+static int atombios_read_string(uint8_t *rom_base, uint32_t offset, char *out, uint32_t out_size) {
+    uint32_t i;
+    for (i = 0; i < out_size - 1; i++) {
+        uint8_t c = rom_base[offset + i];
+        if (c == 0 || c == 0xFF) break;
+        if (c < 0x20 || c > 0x7E) { out[i] = '.'; continue; }
+        out[i] = (char)c;
+    }
+    out[i] = '\0';
+    return 0;
+}
+
+static inline uint32_t atombios_read32(uint8_t *rom, uint32_t off) {
+    return (uint32_t)rom[off] | ((uint32_t)rom[off+1] << 8) |
+           ((uint32_t)rom[off+2] << 16) | ((uint32_t)rom[off+3] << 24);
+}
+
+static inline uint16_t atombios_read16(uint8_t *rom, uint32_t off) {
+    return (uint16_t)(rom[off] | ((uint16_t)rom[off+1] << 8));
+}
+
+int amdgpu_atombios_parse(amdgpu_device_t *dev) {
+    if (!dev || !dev->mmio_base) return -1;
+    memset(&g_atombios_info, 0, sizeof(g_atombios_info));
+
+    uint8_t *rom = (uint8_t *)(dev->mmio_base + AMDGPU_ATOMBIOS_ROM_BASE);
+    if (atombios_find_signature(rom, AMDGPU_ATOMBIOS_ROM_SIZE) < 0) {
+        /* Try alternate ROM locations */
+        rom = (uint8_t *)(dev->mmio_base + 0xC0000);
+        if (atombios_find_signature(rom, 0x10000) < 0) {
+            klog_warn("[AMDGPU] AtomBIOS signature not found");
+            return -1;
+        }
+    }
+
+    g_atombios_info.valid = 1;
+
+    /* Parse PCI info from ROM */
+    uint16_t pci_offset = atombios_read16(rom, 0x18);
+    if (pci_offset > 0 && pci_offset < 0x10000) {
+        g_atombios_info.pci_vendor_id = atombios_read16(rom, pci_offset + 4);
+        g_atombios_info.pci_device_id = atombios_read16(rom, pci_offset + 6);
+    }
+
+    /* Read GPU name string */
+    uint32_t name_offset = atombios_read16(rom, 0x2E);
+    if (name_offset > 0 && name_offset < 0x10000) {
+        atombios_read_string(rom, name_offset, g_atombios_info.gpu_name, 32);
+    }
+
+    /* Parse master data table */
+    uint16_t mdt_offset = atombios_read16(rom, AMDGPU_ATOMBIOS_TABLE_OFFSET);
+    if (mdt_offset > 0 && mdt_offset < 0x10000) {
+        g_atombios_info.gpu_chip_id = atombios_read32(rom, mdt_offset);
+        g_atombios_info.max_engine_clock = atombios_read32(rom, mdt_offset + 8);
+        g_atombios_info.max_memory_clock = atombios_read32(rom, mdt_offset + 12);
+        g_atombios_info.vram_size = atombios_read32(rom, mdt_offset + 16);
+        g_atombios_info.vram_type = rom[mdt_offset + 20];
+        g_atombios_info.core_count = atombios_read16(rom, mdt_offset + 22);
+        g_atombios_info.cu_count = rom[mdt_offset + 24];
+        g_atombios_info.rop_count = rom[mdt_offset + 25];
+        g_atombios_info.tmu_count = rom[mdt_offset + 26];
+    }
+
+    klog_info("[AMDGPU] AtomBIOS parsed: %s (chip_id=0x%08X, vram=%dMB)",
+              g_atombios_info.gpu_name, g_atombios_info.gpu_chip_id,
+              g_atombios_info.vram_size / (1024*1024));
+
+    memcpy(&dev->atombios, &g_atombios_info, sizeof(atom_bios_info_t));
+    return 0;
+}
+
+int amdgpu_atombios_get_clocks(amdgpu_device_t *dev) {
+    if (!dev || !g_atombios_info.valid) return -1;
+
+    uint8_t *rom = (uint8_t *)(dev->mmio_base + AMDGPU_ATOMBIOS_ROM_BASE);
+    uint32_t clock_off = atombios_read16(rom, AMDGPU_ATOMBIOS_CLOCK_TABLE);
+
+    if (clock_off > 0 && clock_off < 0x10000) {
+        uint32_t count = rom[clock_off] & 0x1F;
+        if (count > 16) count = 16;
+        g_atombios_info.sclk_count = count;
+        g_atombios_info.mclk_count = count;
+
+        for (uint32_t i = 0; i < count; i++) {
+            g_atombios_info.sclk_table[i] = atombios_read32(rom, clock_off + 4 + i * 8);
+            g_atombios_info.mclk_table[i] = atombios_read32(rom, clock_off + 8 + i * 8);
+        }
+        dev->atombios.sclk_count = count;
+        dev->atombios.mclk_count = count;
+        for (uint32_t i = 0; i < count; i++) {
+            dev->atombios.sclk_table[i] = g_atombios_info.sclk_table[i];
+            dev->atombios.mclk_table[i] = g_atombios_info.mclk_table[i];
+        }
+    }
+    return 0;
+}
+
+int amdgpu_atombios_get_connectors(amdgpu_device_t *dev) {
+    if (!dev || !g_atombios_info.valid) return -1;
+
+    uint8_t *rom = (uint8_t *)(dev->mmio_base + AMDGPU_ATOMBIOS_ROM_BASE);
+    uint32_t conn_off = atombios_read16(rom, AMDGPU_ATOMBIOS_CONNECTOR_TABLE);
+
+    if (conn_off > 0 && conn_off < 0x10000) {
+        uint32_t count = rom[conn_off];
+        if (count > 8) count = 8;
+        g_atombios_info.connector_count = count;
+        for (uint32_t i = 0; i < count; i++) {
+            g_atombios_info.connector_types[i] = rom[conn_off + 1 + i * 2];
+        }
+        dev->atombios.connector_count = count;
+        for (uint32_t i = 0; i < count; i++) {
+            dev->atombios.connector_types[i] = g_atombios_info.connector_types[i];
+        }
+    }
+    return 0;
+}
+
+const atom_bios_info_t *amdgpu_atombios_get_info(void) {
+    return g_atombios_info.valid ? &g_atombios_info : NULL;
+}
+
+/* ================================================================ */
+/*  2. 显示输出 - DisplayPort / HDMI / DVI                              */
+/* ================================================================ */
+
+static void amdgpu_i2c_start(uint32_t i2c_channel) {
+    amdgpu_reg_write(AMDGPU_DC_I2C_CONTROL, (1 << 0) | (i2c_channel << 4));
+    io_wait();
+    amdgpu_reg_write(AMDGPU_DC_I2C_CONTROL, (2 << 0) | (i2c_channel << 4));
+    io_wait();
+}
+
+static void amdgpu_i2c_stop(uint32_t i2c_channel) {
+    amdgpu_reg_write(AMDGPU_DC_I2C_CONTROL, (3 << 0) | (i2c_channel << 4));
+    io_wait();
+}
+
+static int amdgpu_i2c_write_byte(uint32_t i2c_channel, uint8_t data) {
+    uint32_t timeout;
+    amdgpu_reg_write(AMDGPU_DC_I2C_DATA, data);
+    amdgpu_reg_write(AMDGPU_DC_I2C_CONTROL, (4 << 0) | (i2c_channel << 4));
+
+    for (timeout = 0; timeout < 1000; timeout++) {
+        uint32_t status = amdgpu_reg_read(AMDGPU_DC_I2C_STATUS);
+        if (status & 0x01) return 0; /* ACK */
+        if (status & 0x02) break;    /* NACK */
+        io_wait();
+    }
+    return -1;
+}
+
+static uint8_t amdgpu_i2c_read_byte(uint32_t i2c_channel, int last) {
+    uint32_t cmd = last ? (6 << 0) : (5 << 0);
+    amdgpu_reg_write(AMDGPU_DC_I2C_CONTROL, cmd | (i2c_channel << 4));
+
+    uint32_t timeout;
+    for (timeout = 0; timeout < 1000; timeout++) {
+        uint32_t status = amdgpu_reg_read(AMDGPU_DC_I2C_STATUS);
+        if (status & 0x10) break; /* data ready */
+        io_wait();
+    }
+    return (uint8_t)(amdgpu_reg_read(AMDGPU_DC_I2C_DATA) & 0xFF);
+}
+
+int amdgpu_edid_read(amdgpu_device_t *dev, uint32_t connector_idx) {
+    if (!dev || connector_idx >= 8) return -1;
+    amdgpu_connector_t *conn = &dev->connectors[connector_idx];
+    if (!conn->plugged) return -1;
+
+    uint32_t i2c_ch = conn->i2c_channel;
+    uint8_t *edid = conn->edid;
+
+    /* EDID I2C address = 0x50 (0xA0 with R/W bit) */
+    amdgpu_i2c_start(i2c_ch);
+    if (amdgpu_i2c_write_byte(i2c_ch, 0xA0) < 0) {
+        amdgpu_i2c_stop(i2c_ch);
+        return -1;
+    }
+    amdgpu_i2c_write_byte(i2c_ch, 0x00); /* start offset */
+
+    /* Restart for read */
+    amdgpu_i2c_start(i2c_ch);
+    if (amdgpu_i2c_write_byte(i2c_ch, 0xA1) < 0) {
+        amdgpu_i2c_stop(i2c_ch);
+        return -1;
+    }
+
+    for (uint32_t i = 0; i < 128; i++) {
+        edid[i] = amdgpu_i2c_read_byte(i2c_ch, (i == 127) ? 1 : 0);
+    }
+    amdgpu_i2c_stop(i2c_ch);
+
+    /* Verify EDID header (00 FF FF FF FF FF FF 00) */
+    if (edid[0] == 0x00 && edid[1] == 0xFF && edid[2] == 0xFF &&
+        edid[3] == 0xFF && edid[4] == 0xFF && edid[5] == 0xFF &&
+        edid[6] == 0xFF && edid[7] == 0x00) {
+        conn->edid_valid = 1;
+
+        /* Extract monitor name from descriptor blocks */
+        for (uint32_t d = 0; d < 4; d++) {
+            uint32_t base = 54 + d * 18;
+            if (edid[base] == 0x00 && edid[base+1] == 0x00 &&
+                edid[base+2] == 0x00 && edid[base+3] == 0xFC) {
+                for (uint32_t j = 0; j < 13; j++) {
+                    uint8_t c = edid[base + 5 + j];
+                    if (c == 0x0A || c == 0x00) break;
+                    conn->monitor_name[j] = (c >= 0x20 && c <= 0x7E) ? (char)c : ' ';
+                }
+                break;
+            }
+        }
+
+        /* Preferred timing from first detailed timing descriptor */
+        uint32_t pixclk_khz = ((uint32_t)edid[54] | ((uint32_t)edid[55] << 8)) * 10;
+        conn->pref_width  = ((uint32_t)(edid[58] & 0xF0) << 4) | edid[56];
+        conn->pref_height = ((uint32_t)(edid[61] & 0xF0) << 4) | edid[59];
+        conn->pref_refresh = (uint32_t)(pixclk_khz * 1000) /
+                             (uint32_t)((edid[57] << 8 | edid[56]) *
+                                       (edid[60] << 8 | edid[59]));
+        conn->max_pixel_clock = pixclk_khz;
+        conn->max_hres = conn->pref_width;
+        conn->max_vres = conn->pref_height;
+        conn->max_refresh = conn->pref_refresh;
+    }
+
+    return conn->edid_valid ? 0 : -1;
+}
+
+int amdgpu_dp_link_train(amdgpu_device_t *dev, uint32_t connector_idx) {
+    if (!dev || connector_idx >= dev->connector_count) return -1;
+    amdgpu_connector_t *conn = &dev->connectors[connector_idx];
+    if (!conn->dpcd_capable || !conn->plugged) return -1;
+
+    /* Start link training pattern 1 */
+    amdgpu_reg_write(AMDGPU_DC_DP_CONFIG, 0x01);
+    amdgpu_reg_write(AMDGPU_DC_DP_LANE_COUNT, 4);  /* 4 lanes */
+    amdgpu_reg_write(AMDGPU_DC_DP_LINK_RATE, 0x06); /* HBR2 (5.4 Gbps) */
+
+    uint32_t retry;
+    int trained = 0;
+    for (retry = 0; retry < 5 && !trained; retry++) {
+        amdgpu_reg_write(AMDGPU_DC_DP_LINK_TRAINING, 0x01); /* clock recovery */
+
+        uint32_t timeout;
+        for (timeout = 0; timeout < 1000; timeout++) {
+            uint32_t status = amdgpu_reg_read(AMDGPU_DC_DP_LINK_TRAINING);
+            if (status & 0x100) { trained = 1; break; }
+            if (status & 0x200) break; /* lane failure */
+            io_wait();
+        }
+        if (trained) break;
+
+        /* Fallback: reduce lane count */
+        uint32_t lanes = amdgpu_reg_read(AMDGPU_DC_DP_LANE_COUNT);
+        if (lanes > 1) {
+            lanes--;
+            amdgpu_reg_write(AMDGPU_DC_DP_LANE_COUNT, lanes);
+        }
+    }
+
+    if (!trained) {
+        klog_warn("[AMDGPU] DP link training failed on connector %d", connector_idx);
+        return -1;
+    }
+
+    klog_info("[AMDGPU] DP link trained successfully on connector %d", connector_idx);
+    return 0;
+}
+
+int amdgpu_hdmi_configure(amdgpu_device_t *dev, uint32_t connector_idx) {
+    if (!dev || connector_idx >= dev->connector_count) return -1;
+    amdgpu_connector_t *conn = &dev->connectors[connector_idx];
+    if (!conn->hdmi_capable || !conn->plugged) return -1;
+
+    /* Enable HDMI mode */
+    amdgpu_reg_write(AMDGPU_DC_HDMI_CONFIG, 0x03); /* HDMI + TMDS */
+
+    /* Write AVI InfoFrame */
+    uint32_t iframe[8];
+    iframe[0] = 0x820D0282; /* packet type=0x82, version=2, length=13 */
+    iframe[1] = 0;          /* S=0, B=0, A=0, Y=0 */
+    iframe[2] = 0;          /* C=0, M=0, R=0... */
+    iframe[3] = 0;
+    iframe[4] = 0;
+    iframe[5] = 0;
+    iframe[6] = 0;
+    iframe[7] = 0;
+
+    for (int i = 0; i < 8; i++) {
+        amdgpu_reg_write(AMDGPU_DC_HDMI_INFOFRAME + i, iframe[i]);
+    }
+
+    /* Enable HDMI audio */
+    amdgpu_reg_write(AMDGPU_DC_HDMI_AUDIO, 0x01);
+
+    klog_info("[AMDGPU] HDMI configured on connector %d", connector_idx);
+    return 0;
+}
+
+int amdgpu_dvi_configure(amdgpu_device_t *dev, uint32_t connector_idx) {
+    if (!dev || connector_idx >= dev->connector_count) return -1;
+    amdgpu_connector_t *conn = &dev->connectors[connector_idx];
+    if (conn->type != AMDGPU_CONNECTOR_DVI_I &&
+        conn->type != AMDGPU_CONNECTOR_DVI_D &&
+        conn->type != AMDGPU_CONNECTOR_DVI_A) return -1;
+    if (!conn->plugged) return -1;
+
+    /* Configure TMDS or analog output */
+    uint32_t mode = conn->type == AMDGPU_CONNECTOR_DVI_A ? 0x01 : 0x00;
+    if (conn->dvi_dual_link) mode |= 0x02;
+    amdgpu_reg_write(AMDGPU_DC_DVI_CONFIG, mode);
+
+    klog_info("[AMDGPU] DVI configured on connector %d (dual_link=%d)",
+              connector_idx, conn->dvi_dual_link);
+    return 0;
+}
+
+int amdgpu_connector_detect(amdgpu_device_t *dev) {
+    if (!dev || !dev->mmio_base) return -1;
+
+    dev->connector_count = 0;
+
+    /* Probe HPD pins for each connector */
+    uint32_t hpd_status = amdgpu_reg_read(AMDGPU_DC_HPD_STATUS);
+
+    /* Use AtomBIOS connector info if available */
+    uint32_t max_conn = dev->atombios.connector_count > 0 ?
+                        dev->atombios.connector_count : 4;
+
+    for (uint32_t i = 0; i < max_conn && dev->connector_count < 8; i++) {
+        amdgpu_connector_t *conn = &dev->connectors[dev->connector_count];
+        memset(conn, 0, sizeof(amdgpu_connector_t));
+
+        if (dev->atombios.connector_count > 0 && i < dev->atombios.connector_count) {
+            conn->type = dev->atombios.connector_types[i];
+        } else {
+            conn->type = AMDGPU_CONNECTOR_DisplayPort; /* default */
+        }
+
+        conn->i2c_channel = i;
+        conn->hpd_pin = (hpd_status >> (i * 4)) & 0x0F;
+
+        /* Set capabilities based on connector type */
+        switch (conn->type) {
+        case AMDGPU_CONNECTOR_DisplayPort:
+        case AMDGPU_CONNECTOR_eDP:
+            conn->dpcd_capable = 1;
+            break;
+        case AMDGPU_CONNECTOR_HDMI_A:
+        case AMDGPU_CONNECTOR_HDMI_B:
+            conn->hdmi_capable = 1;
+            break;
+        case AMDGPU_CONNECTOR_DVI_D:
+            conn->dvi_dual_link = 1;
+            break;
+        default:
+            break;
+        }
+
+        /* Check if display is plugged */
+        uint32_t hpd_ctrl = amdgpu_reg_read(AMDGPU_DC_HPD_CONTROL);
+        conn->plugged = ((hpd_ctrl >> (i + 8)) & 0x01) ? 1 : 0;
+
+        if (conn->plugged) {
+            amdgpu_edid_read(dev, dev->connector_count);
+            dev->connector_count++;
+        }
+    }
+
+    klog_info("[AMDGPU] Detected %d connected displays", dev->connector_count);
+    return (int)dev->connector_count;
+}
+
+int amdgpu_connector_set_mode(amdgpu_device_t *dev, uint32_t connector_idx,
+                               uint32_t width, uint32_t height, uint32_t bpp, uint32_t refresh) {
+    if (!dev || connector_idx >= dev->connector_count) return -1;
+
+    amdgpu_connector_t *conn = &dev->connectors[connector_idx];
+    if (!conn->plugged) return -1;
+
+    /* Configure connector-specific settings */
+    if (conn->dpcd_capable) {
+        amdgpu_dp_link_train(dev, connector_idx);
+    } else if (conn->hdmi_capable) {
+        amdgpu_hdmi_configure(dev, connector_idx);
+    } else {
+        amdgpu_dvi_configure(dev, connector_idx);
+    }
+
+    /* Set CRTC mode */
+    amdgpu_set_mode(width, height, bpp);
+
+    klog_info("[AMDGPU] Connector %d set to %dx%d@%d %dbpp",
+              connector_idx, width, height, refresh, bpp);
+    return 0;
+}
+
+/* ================================================================ */
+/*  3. GPU 环形缓冲区管理                                              */
+/* ================================================================ */
+
+int amdgpu_ring_init(amdgpu_ring_t *ring, uint32_t size_kb) {
+    if (!ring) return -1;
+
+    uint32_t actual_size = size_kb * 1024;
+    ring->base = (uint32_t *)kmalloc(actual_size);
+    if (!ring->base) return -1;
+
+    memset(ring->base, 0, actual_size);
+    ring->size = actual_size / 4; /* in dwords */
+    ring->rptr = 0;
+    ring->wptr = 0;
+    ring->align_mask = 0xF; /* 64-byte alignment */
+    ring->ready = 1;
+
+    /* Allocate doorbell page */
+    ring->doorbell_ptr = (uint32_t *)kmalloc(4096);
+    if (ring->doorbell_ptr) {
+        memset(ring->doorbell_ptr, 0, 4096);
+    }
+
+    klog_info("[AMDGPU] Ring buffer initialized: %dKB at 0x%08X",
+              size_kb, (uint32_t)(uintptr_t)ring->base);
+    return 0;
+}
+
+int amdgpu_ring_submit(amdgpu_ring_t *ring, const uint32_t *entries, uint32_t count) {
+    if (!ring || !ring->ready || !entries || count == 0) return -1;
+
+    /* Wait for space */
+    uint32_t free_slots = ring->size - (ring->wptr - ring->rptr);
+    if (free_slots < count * 4) {
+        int waited = amdgpu_ring_wait(ring, 100);
+        if (waited < 0) return -1;
+    }
+
+    /* Copy entries to ring */
+    for (uint32_t i = 0; i < count * 4; i++) {
+        ring->base[ring->wptr] = entries[i];
+        ring->wptr = (ring->wptr + 1) % ring->size;
+    }
+
+    /* Ring doorbell to notify GPU */
+    amdgpu_ring_doorbell(ring);
+
+    return 0;
+}
+
+int amdgpu_ring_wait(amdgpu_ring_t *ring, uint32_t timeout_ms) {
+    if (!ring || !ring->ready) return -1;
+    (void)timeout_ms;
+
+    /* In a real implementation, we'd wait for GPU to advance rptr.
+     * Here we simulate by checking the doorbell response. */
+    uint32_t deadline = 0; /* timer_get_ticks() * 10 + timeout_ms; */
+    while (ring->wptr == ring->rptr) {
+        /* if (timer_get_ticks() * 10 > deadline) return -1; */
+        io_wait();
+    }
+    return 0;
+}
+
+void amdgpu_ring_destroy(amdgpu_ring_t *ring) {
+    if (!ring) return;
+    if (ring->base) { kfree(ring->base); ring->base = NULL; }
+    if (ring->doorbell_ptr) { kfree(ring->doorbell_ptr); ring->doorbell_ptr = NULL; }
+    ring->size = 0;
+    ring->ready = 0;
+}
+
+int amdgpu_ib_create(amdgpu_ib_t *ib, uint32_t size) {
+    if (!ib || size == 0 || size > AMDGPU_IB_MAX_SIZE) return -1;
+    ib->cpu_addr = (uint32_t *)kmalloc(size);
+    if (!ib->cpu_addr) return -1;
+    ib->size = size;
+    ib->used = 0;
+    /* GPU address would be set by the MMU/VMM layer */
+    ib->gpu_addr = (uint32_t)(uintptr_t)ib->cpu_addr;
+    return 0;
+}
+
+int amdgpu_ib_submit(amdgpu_ring_t *ring, amdgpu_ib_t *ib) {
+    if (!ring || !ib || ib->used == 0) return -1;
+
+    uint32_t entries[8];
+    memset(entries, 0, sizeof(entries));
+    /* IB packet: type=INDIRECT_BUFFER, count=number of dwords */
+    entries[0] = (0x01 << 30) | ((ib->used / 4) & 0x3FFFFF);
+    entries[1] = ib->gpu_addr;      /* IB GPU address lo */
+    entries[2] = 0;                  /* IB GPU address hi */
+    entries[3] = 0;                  /* VMID */
+    /* Padding */
+    entries[4] = 0; entries[5] = 0; entries[6] = 0; entries[7] = 0;
+
+    int ret = amdgpu_ring_submit(ring, entries, 2);
+    if (ret == 0) {
+        /* In real HW, the CPU marks the fence after GPU completion.
+         * Here we only bump the write-pointer for the simulated ring. */
+    }
+    return ret;
+}
+
+void amdgpu_ring_doorbell(amdgpu_ring_t *ring) {
+    if (!ring || !ring->doorbell_ptr) return;
+
+    /* Write wptr to doorbell to notify GPU */
+    *(volatile uint32_t *)(ring->doorbell_ptr + ring->doorbell_offset / 4) = ring->wptr;
+
+    /* MFENCE to ensure write is visible */
+    __asm__ volatile("mfence" ::: "memory");
+}
+
+/* ================================================================ */
+/*  4. 2D 加速引擎                                                     */
+/* ================================================================ */
+
+int amdgpu_2d_init(amdgpu_2d_engine_t *engine) {
+    if (!engine) return -1;
+
+    engine->command_buffer_size = 4096;
+    engine->command_buffer = (uint32_t *)kmalloc(engine->command_buffer_size * 4);
+    if (!engine->command_buffer) return -1;
+
+    memset(engine->command_buffer, 0, engine->command_buffer_size * 4);
+    engine->command_count = 0;
+    engine->op_count = 0;
+    engine->bytes_copied = 0;
+    engine->pixels_filled = 0;
+    engine->lines_drawn = 0;
+    engine->busy = 0;
+    engine->initialized = 1;
+
+    klog_info("[AMDGPU] 2D acceleration engine initialized");
+    return 0;
+}
+
+static int amdgpu_2d_wait_idle(amdgpu_2d_engine_t *engine) {
+    if (!engine || !amdgpu_dev.mmio_base) return -1;
+
+    uint32_t timeout;
+    for (timeout = 0; timeout < 10000; timeout++) {
+        uint32_t status = amdgpu_reg_read(AMDGPU_2D_STATUS);
+        if (!(status & 0x01)) { /* busy bit */
+            engine->busy = 0;
+            return 0;
+        }
+        io_wait();
+    }
+    return -1;
+}
+
+int amdgpu_2d_bitblt(amdgpu_2d_engine_t *engine,
+                     uint32_t dst_addr, uint32_t dst_pitch, uint32_t dst_x, uint32_t dst_y,
+                     uint32_t src_addr, uint32_t src_pitch, uint32_t src_x, uint32_t src_y,
+                     uint32_t w, uint32_t h, uint8_t rop) {
+    if (!engine || !engine->initialized || !amdgpu_dev.mmio_base) return -1;
+
+    if (amdgpu_2d_wait_idle(engine) < 0) return -1;
+
+    engine->busy = 1;
+
+    /* Program bitblt source */
+    amdgpu_reg_write(AMDGPU_2D_SRC_ADDR, src_addr);
+    amdgpu_reg_write(AMDGPU_2D_SRC_PITCH, src_pitch);
+    amdgpu_reg_write(AMDGPU_2D_SRC_X, src_x);
+    amdgpu_reg_write(AMDGPU_2D_SRC_Y, src_y);
+
+    /* Program bitblt destination */
+    amdgpu_reg_write(AMDGPU_2D_DST_ADDR, dst_addr);
+    amdgpu_reg_write(AMDGPU_2D_DST_PITCH, dst_pitch);
+    amdgpu_reg_write(AMDGPU_2D_DST_X, dst_x);
+    amdgpu_reg_write(AMDGPU_2D_DST_Y, dst_y);
+
+    /* Set dimensions */
+    amdgpu_reg_write(AMDGPU_2D_WIDTH, w);
+    amdgpu_reg_write(AMDGPU_2D_HEIGHT, h);
+
+    /* Set ROP */
+    amdgpu_reg_write(AMDGPU_2D_ROP3, rop);
+
+    /* Fire command */
+    amdgpu_reg_write(AMDGPU_2D_COMMAND, AMDGPU_2D_CMD_BITBLT);
+
+    engine->op_count++;
+    engine->bytes_copied += w * h * (amdgpu_dev.bpp / 8);
+    return 0;
+}
+
+int amdgpu_2d_solid_fill(amdgpu_2d_engine_t *engine,
+                         uint32_t dst_addr, uint32_t dst_pitch,
+                         uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                         uint32_t color) {
+    if (!engine || !engine->initialized || !amdgpu_dev.mmio_base) return -1;
+
+    if (amdgpu_2d_wait_idle(engine) < 0) return -1;
+
+    engine->busy = 1;
+
+    amdgpu_reg_write(AMDGPU_2D_DST_ADDR, dst_addr);
+    amdgpu_reg_write(AMDGPU_2D_DST_PITCH, dst_pitch);
+    amdgpu_reg_write(AMDGPU_2D_DST_X, x);
+    amdgpu_reg_write(AMDGPU_2D_DST_Y, y);
+    amdgpu_reg_write(AMDGPU_2D_WIDTH, w);
+    amdgpu_reg_write(AMDGPU_2D_HEIGHT, h);
+    amdgpu_reg_write(AMDGPU_2D_FILL_COLOR, color);
+    amdgpu_reg_write(AMDGPU_2D_COMMAND, AMDGPU_2D_CMD_SOLID_FILL);
+
+    engine->op_count++;
+    engine->pixels_filled += w * h;
+    return 0;
+}
+
+int amdgpu_2d_line_draw(amdgpu_2d_engine_t *engine,
+                        uint32_t dst_addr, uint32_t dst_pitch,
+                        int32_t x0, int32_t y0, int32_t x1, int32_t y1,
+                        uint32_t color, uint32_t thickness) {
+    if (!engine || !engine->initialized || !amdgpu_dev.mmio_base) return -1;
+
+    if (amdgpu_2d_wait_idle(engine) < 0) return -1;
+
+    engine->busy = 1;
+
+    amdgpu_reg_write(AMDGPU_2D_DST_ADDR, dst_addr);
+    amdgpu_reg_write(AMDGPU_2D_DST_PITCH, dst_pitch);
+    amdgpu_reg_write(AMDGPU_2D_FILL_COLOR, color);
+
+    /* Bresenham line parameters */
+    amdgpu_reg_write(AMDGPU_2D_LINE_X0, (uint32_t)x0);
+    amdgpu_reg_write(AMDGPU_2D_LINE_Y0, (uint32_t)y0);
+    amdgpu_reg_write(AMDGPU_2D_LINE_X1, (uint32_t)x1);
+    amdgpu_reg_write(AMDGPU_2D_LINE_Y1, (uint32_t)y1);
+    amdgpu_reg_write(AMDGPU_2D_BRESENHAM_CTL, (thickness & 0xFF) | 0x100);
+
+    amdgpu_reg_write(AMDGPU_2D_COMMAND, AMDGPU_2D_CMD_LINE_DRAW);
+
+    engine->op_count++;
+    /* Approximate pixel count */
+    int32_t dx = x1 - x0; if (dx < 0) dx = -dx;
+    int32_t dy = y1 - y0; if (dy < 0) dy = -dy;
+    engine->lines_drawn++;
+    engine->pixels_filled += (uint32_t)((dx > dy ? dx : dy) + 1) * (thickness > 0 ? thickness : 1);
+    return 0;
+}
+
+int amdgpu_2d_clear(amdgpu_2d_engine_t *engine,
+                    uint32_t dst_addr, uint32_t dst_pitch,
+                    uint32_t w, uint32_t h, uint32_t color) {
+    return amdgpu_2d_solid_fill(engine, dst_addr, dst_pitch, 0, 0, w, h, color);
+}
+
+void amdgpu_2d_shutdown(amdgpu_2d_engine_t *engine) {
+    if (!engine || !engine->initialized) return;
+    amdgpu_2d_wait_idle(engine);
+    if (engine->command_buffer) {
+        kfree(engine->command_buffer);
+        engine->command_buffer = NULL;
+    }
+    engine->initialized = 0;
+}
+
+/* ================================================================ */
+/*  5. VRAM 带宽优化                                                    */
+/* ================================================================ */
+
+int amdgpu_vram_config_init(amdgpu_device_t *dev) {
+    if (!dev || !dev->mmio_base) return -1;
+
+    amdgpu_vram_config_t *cfg = &dev->vram_config;
+    memset(cfg, 0, sizeof(amdgpu_vram_config_t));
+
+    /* Read memory controller configuration */
+    uint32_t mc_config = amdgpu_reg_read(AMDGPU_VRAM_MC_CONFIG);
+    cfg->channel_count = (mc_config & 0x0F) + 1;
+    cfg->bank_count = ((mc_config >> 4) & 0x0F) + 1;
+    cfg->num_banks = ((mc_config >> 8) & 0x1F) + 1;
+
+    /* Default tile mode: 4KB tiling for good balance */
+    cfg->tile_mode = 2;
+    cfg->macro_tile_mode = 1; /* 64KB macro-tile */
+    cfg->micro_tile_mode = 0; /* 1D thin micro-tile */
+    cfg->surface_alignment = AMDGPU_SURF_ALIGN_4KB;
+    cfg->tiling_enabled = 0;
+    cfg->dcc_enabled = 0;
+    cfg->bandwidth_optimized = 0;
+
+    klog_info("[AMDGPU] VRAM config: %d channels, %d banks, %d bank groups",
+              cfg->channel_count, cfg->bank_count, cfg->num_banks);
+    return 0;
+}
+
+int amdgpu_vram_set_tiling(amdgpu_device_t *dev, uint32_t mode) {
+    if (!dev || !dev->mmio_base) return -1;
+    if (mode > 4) return -1;
+
+    dev->vram_config.tile_mode = mode;
+    dev->vram_config.tiling_enabled = (mode > 0) ? 1 : 0;
+
+    uint32_t tile_config = amdgpu_reg_read(AMDGPU_VRAM_TILING_CFG);
+    tile_config &= ~0x07;
+    tile_config |= (mode & 0x07);
+
+    /* Configure tile dimensions based on mode */
+    switch (mode) {
+    case 0: /* Linear */
+        tile_config |= (0x00 << 4);
+        dev->vram_config.bank_width = 1;
+        dev->vram_config.bank_height = 1;
+        break;
+    case 1: /* 256B micro-tiling */
+        tile_config |= (0x01 << 4);
+        dev->vram_config.bank_width = 8;
+        dev->vram_config.bank_height = 8;
+        break;
+    case 2: /* 4KB macro-tiling */
+        tile_config |= (0x02 << 4);
+        dev->vram_config.bank_width = 32;
+        dev->vram_config.bank_height = 32;
+        break;
+    case 3: /* 64KB macro-tiling */
+        tile_config |= (0x03 << 4);
+        dev->vram_config.bank_width = 64;
+        dev->vram_config.bank_height = 64;
+        break;
+    case 4: /* Mixed tiling */
+        tile_config |= (0x04 << 4);
+        break;
+    }
+
+    amdgpu_reg_write(AMDGPU_VRAM_TILING_CFG, tile_config);
+    amdgpu_reg_write(AMDGPU_VRAM_TILE_CONFIG, dev->vram_config.bank_width |
+                     (dev->vram_config.bank_height << 16));
+    amdgpu_reg_write(AMDGPU_VRAM_MACROTILE_MODE, dev->vram_config.macro_tile_mode);
+    amdgpu_reg_write(AMDGPU_VRAM_MICROTILE_MODE, dev->vram_config.micro_tile_mode);
+
+    /* Configure bandwidth optimization */
+    uint32_t bw_ctl = 0;
+    if (dev->vram_config.tiling_enabled) {
+        bw_ctl |= 0x01; /* Enable tiling-aware burst */
+        bw_ctl |= (dev->vram_config.channel_count << 4); /* Channel interleave */
+    }
+    amdgpu_reg_write(AMDGPU_VRAM_BANDWIDTH_CTL, bw_ctl);
+    dev->vram_config.bandwidth_optimized = (bw_ctl != 0) ? 1 : 0;
+
+    klog_info("[AMDGPU] VRAM tiling set to mode %d", mode);
+    return 0;
+}
+
+int amdgpu_vram_enable_dcc(amdgpu_device_t *dev, int enable) {
+    if (!dev || !dev->mmio_base) return -1;
+
+    dev->vram_config.dcc_enabled = (enable != 0) ? 1 : 0;
+
+    if (enable) {
+        /* DCC requires at least 4KB tiling */
+        if (dev->vram_config.tile_mode < 2) {
+            amdgpu_vram_set_tiling(dev, 2);
+        }
+        amdgpu_reg_write(AMDGPU_VRAM_DCC_CTL, 0x01); /* DCC enable */
+        dev->vram_config.optimized_bytes_saved = 0;
+    } else {
+        amdgpu_reg_write(AMDGPU_VRAM_DCC_CTL, 0x00); /* DCC disable */
+    }
+
+    klog_info("[AMDGPU] DCC %s", enable ? "enabled" : "disabled");
+    return 0;
+}
+
+int amdgpu_vram_calc_alignment(uint32_t width, uint32_t height, uint32_t bpp,
+                                uint32_t *pitch, uint32_t *size) {
+    if (!pitch || !size) return -1;
+
+    uint32_t bytes_per_pixel = bpp / 8;
+    uint32_t raw_pitch = width * bytes_per_pixel;
+
+    /* Align to 256 bytes optimal for GPU memory controller */
+    uint32_t aligned_pitch = (raw_pitch + 255) & ~255U;
+    *pitch = aligned_pitch;
+    *size = aligned_pitch * height;
+
+    return 0;
+}
+
+int amdgpu_vram_get_bandwidth(amdgpu_device_t *dev, uint32_t *read_bw, uint32_t *write_bw) {
+    if (!dev) return -1;
+
+    /* Estimated bandwidth based on memory clock and bus width */
+    uint32_t mem_clk_mhz = dev->memory_clock;
+    uint32_t bus_width_bits = dev->vram_config.channel_count * 32; /* 32-bit per channel */
+    uint32_t bw_raw_mbps = mem_clk_mhz * bus_width_bits / 8;
+
+    /* Efficiency factor */
+    float efficiency = 0.75f;
+    if (dev->vram_config.tiling_enabled) efficiency += 0.08f;
+    if (dev->vram_config.dcc_enabled) efficiency += 0.05f;
+
+    uint32_t effective_bw = (uint32_t)((float)bw_raw_mbps * efficiency);
+
+    if (read_bw) *read_bw = effective_bw;
+    if (write_bw) *write_bw = (uint32_t)((float)effective_bw * 0.9f); /* write is slightly slower */
+
+    return 0;
+}
+
+/* ================================================================ */
+/*  6. PowerPlay 时钟/电压控制                                           */
+/* ================================================================ */
+
+static int amdgpu_smu_send_msg(uint32_t msg, uint32_t arg) {
+    if (!amdgpu_dev.mmio_base) return -1;
+
+    amdgpu_reg_write(AMDGPU_PP_SMU_ARG, arg);
+    amdgpu_reg_write(AMDGPU_PP_SMU_CMD, msg);
+
+    /* Wait for response */
+    uint32_t timeout;
+    for (timeout = 0; timeout < 5000; timeout++) {
+        uint32_t resp = amdgpu_reg_read(AMDGPU_PP_SMU_RESP);
+        if (resp == 0x01) return 0; /* OK */
+        if (resp == 0xFF) return -1; /* error */
+        io_wait();
+    }
+
+    return -1;
+}
+
+int amdgpu_pp_init(amdgpu_device_t *dev) {
+    if (!dev || !dev->mmio_base) return -1;
+
+    amdgpu_powerplay_t *pp = &dev->powerplay;
+    memset(pp, 0, sizeof(amdgpu_powerplay_t));
+
+    /* Read SMU firmware version */
+    pp->dpm_enabled = 0;
+    pp->current_pstate = 0;
+    pp->gpu_load = 0;
+    pp->gpu_power = 0;
+    pp->fan_speed = 0;
+    pp->clock_policy = 1; /* balanced by default */
+
+    /* Set up default P-states */
+    if (dev->atombios.sclk_count > 0) {
+        pp->pstate_count = dev->atombios.sclk_count;
+        if (pp->pstate_count > 8) pp->pstate_count = 8;
+        for (uint32_t i = 0; i < pp->pstate_count; i++) {
+            pp->pstates[i].sclk = dev->atombios.sclk_table[i];
+            pp->pstates[i].mclk = dev->atombios.mclk_table[i];
+            pp->pstates[i].vcore = 800 + i * 25; /* rough estimate */
+            pp->pstates[i].fan_speed_pwm = 30 + i * 15;
+            pp->pstates[i].power_limit = 0;
+        }
+    } else {
+        /* Default P-states based on device info */
+        pp->pstate_count = 4;
+        pp->pstates[0].sclk = dev->engine_clock / 4;       /* idle */
+        pp->pstates[0].mclk = dev->memory_clock / 4;
+        pp->pstates[0].vcore = 800;
+        pp->pstates[0].fan_speed_pwm = 20;
+
+        pp->pstates[1].sclk = dev->engine_clock / 2;       /* low */
+        pp->pstates[1].mclk = dev->memory_clock / 2;
+        pp->pstates[1].vcore = 900;
+        pp->pstates[1].fan_speed_pwm = 35;
+
+        pp->pstates[2].sclk = dev->engine_clock * 3 / 4;   /* medium */
+        pp->pstates[2].mclk = dev->memory_clock * 3 / 4;
+        pp->pstates[2].vcore = 1000;
+        pp->pstates[2].fan_speed_pwm = 50;
+
+        pp->pstates[3].sclk = dev->engine_clock;            /* full */
+        pp->pstates[3].mclk = dev->memory_clock;
+        pp->pstates[3].vcore = 1100;
+        pp->pstates[3].fan_speed_pwm = 75;
+    }
+
+    pp->initialized = 1;
+    klog_info("[AMDGPU] PowerPlay initialized (%d P-states)", pp->pstate_count);
+    return 0;
+}
+
+int amdgpu_pp_set_clock(uint32_t sclk_khz, uint32_t mclk_khz) {
+    if (!amdgpu_dev.mmio_base) return -1;
+
+    /* Request SMU to set clock frequencies */
+    amdgpu_smu_send_msg(AMDGPU_SMU_MSG_SET_CLK_FREQ, sclk_khz);
+
+    /* Update current clocks in device */
+    amdgpu_dev.engine_clock = sclk_khz / 1000;
+    amdgpu_dev.memory_clock = mclk_khz / 1000;
+
+    amdgpu_reg_write(AMDGPU_PP_SCLK_CURRENT, sclk_khz);
+    amdgpu_reg_write(AMDGPU_PP_MCLK_CURRENT, mclk_khz);
+
+    return 0;
+}
+
+int amdgpu_pp_set_voltage(uint32_t vcore_mv) {
+    if (!amdgpu_dev.mmio_base) return -1;
+
+    amdgpu_smu_send_msg(AMDGPU_SMU_MSG_SET_VOLTAGE, vcore_mv);
+    amdgpu_reg_write(AMDGPU_PP_VCORE_CURRENT, vcore_mv);
+
+    return 0;
+}
+
+int amdgpu_pp_set_fan_speed(uint32_t pwm) {
+    if (!amdgpu_dev.mmio_base) return -1;
+
+    if (pwm > 255) pwm = 255;
+    amdgpu_smu_send_msg(AMDGPU_SMU_MSG_SET_FAN_SPEED, pwm);
+    amdgpu_reg_write(AMDGPU_PP_FAN_PWM, pwm);
+
+    return 0;
+}
+
+int amdgpu_pp_get_gpu_load(uint32_t *load_pct) {
+    if (!load_pct || !amdgpu_dev.mmio_base) return -1;
+
+    /* Try SMU first */
+    amdgpu_smu_send_msg(AMDGPU_SMU_MSG_GET_GPU_LOAD, 0);
+    uint32_t load = amdgpu_reg_read(AMDGPU_PP_GPU_LOAD);
+
+    if (load > 100) load = 100;
+    *load_pct = load;
+    return 0;
+}
+
+int amdgpu_pp_get_power(uint32_t *power_mw) {
+    if (!power_mw || !amdgpu_dev.mmio_base) return -1;
+
+    amdgpu_smu_send_msg(AMDGPU_SMU_MSG_GET_POWER_CONSUMP, 0);
+    *power_mw = 0; /* would read from SMU response */
+    return 0;
+}
+
+int amdgpu_pp_set_policy(uint32_t policy) {
+    if (!amdgpu_dev.powerplay.initialized) return -1;
+
+    amdgpu_dev.powerplay.clock_policy = policy;
+
+    switch (policy) {
+    case 0: /* Battery saver */
+        if (amdgpu_dev.powerplay.pstate_count > 0) {
+            amdgpu_dev.powerplay.current_pstate = 0;
+            amdgpu_pp_set_clock(amdgpu_dev.powerplay.pstates[0].sclk,
+                               amdgpu_dev.powerplay.pstates[0].mclk);
+            amdgpu_pp_set_voltage(amdgpu_dev.powerplay.pstates[0].vcore);
+            amdgpu_pp_set_fan_speed(amdgpu_dev.powerplay.pstates[0].fan_speed_pwm);
+        }
+        amdgpu_power_save();
+        break;
+    case 1: /* Balanced */
+        if (amdgpu_dev.powerplay.pstate_count > 1) {
+            uint32_t mid = amdgpu_dev.powerplay.pstate_count / 2;
+            amdgpu_dev.powerplay.current_pstate = mid;
+            amdgpu_pp_set_clock(amdgpu_dev.powerplay.pstates[mid].sclk,
+                               amdgpu_dev.powerplay.pstates[mid].mclk);
+            amdgpu_pp_set_voltage(amdgpu_dev.powerplay.pstates[mid].vcore);
+            amdgpu_pp_set_fan_speed(amdgpu_dev.powerplay.pstates[mid].fan_speed_pwm);
+        }
+        break;
+    case 2: /* Performance */
+        if (amdgpu_dev.powerplay.pstate_count > 0) {
+            uint32_t max = amdgpu_dev.powerplay.pstate_count - 1;
+            amdgpu_dev.powerplay.current_pstate = max;
+            amdgpu_pp_set_clock(amdgpu_dev.powerplay.pstates[max].sclk,
+                               amdgpu_dev.powerplay.pstates[max].mclk);
+            amdgpu_pp_set_voltage(amdgpu_dev.powerplay.pstates[max].vcore);
+            amdgpu_pp_set_fan_speed(amdgpu_dev.powerplay.pstates[max].fan_speed_pwm);
+        }
+        amdgpu_power_full();
+        break;
+    default:
+        break;
+    }
+
+    return 0;
+}
+
+int amdgpu_pp_get_current_pstate(amdgpu_pstate_t *pstate) {
+    if (!pstate || !amdgpu_dev.powerplay.initialized) return -1;
+
+    uint32_t idx = amdgpu_dev.powerplay.current_pstate;
+    if (idx >= amdgpu_dev.powerplay.pstate_count) return -1;
+
+    memcpy(pstate, &amdgpu_dev.powerplay.pstates[idx], sizeof(amdgpu_pstate_t));
+    return 0;
+}
+
+int amdgpu_pp_dpm_enable(int enable) {
+    if (!amdgpu_dev.mmio_base) return -1;
+
+    if (enable) {
+        amdgpu_smu_send_msg(AMDGPU_SMU_MSG_ENTER_DPM, 0);
+        amdgpu_reg_write(AMDGPU_PP_DPM_STATE, AMDGPU_DPM_STATE_BALANCED);
+        amdgpu_dev.powerplay.dpm_enabled = 1;
+    } else {
+        amdgpu_smu_send_msg(AMDGPU_SMU_MSG_EXIT_DPM, 0);
+        amdgpu_reg_write(AMDGPU_PP_DPM_STATE, AMDGPU_DPM_STATE_BOOT);
+        amdgpu_dev.powerplay.dpm_enabled = 0;
+    }
+
+    klog_info("[AMDGPU] DPM %s", enable ? "enabled" : "disabled");
+    return 0;
+}
+
+/* ================================================================ */
+/*  7. 多显示器支持                                                     */
+/* ================================================================ */
+
+int amdgpu_multihead_init(amdgpu_device_t *dev) {
+    if (!dev) return -1;
+
+    memset(dev->crtc, 0, sizeof(dev->crtc));
+    dev->crtc_count = 0;
+
+    /* Detect connected displays */
+    amdgpu_connector_detect(dev);
+
+    klog_info("[AMDGPU] Multi-head initialized (%d connectors detected)",
+              dev->connector_count);
+    return 0;
+}
+
+int amdgpu_multihead_add_crtc(amdgpu_device_t *dev, uint32_t connector_idx,
+                               uint32_t width, uint32_t height, uint32_t bpp, uint32_t refresh) {
+    if (!dev || dev->crtc_count >= 4) return -1;
+    if (connector_idx >= dev->connector_count) return -1;
+
+    amdgpu_crtc_t *crtc = &dev->crtc[dev->crtc_count];
+    crtc->crtc_id = dev->crtc_count;
+    crtc->connector_id = connector_idx;
+    crtc->width = width;
+    crtc->height = height;
+    crtc->bpp = bpp;
+    crtc->refresh = refresh;
+
+    /* Calculate framebuffer offset (tiled layout for multi-head) */
+    crtc->fb_offset = crtc->crtc_id * (width * height * (bpp / 8));
+    crtc->pitch = width * (bpp / 8);
+    crtc->fb_base = dev->fb_base + crtc->fb_offset;
+
+    /* Configure CRTC timing */
+    uint32_t crtc_base = AMDGPU_DC_CRTC_BASE(crtc->crtc_id);
+
+    /* Generate mode timings */
+    crtc->h_total = width + width / 5;
+    crtc->h_sync_start = width + width / 20;
+    crtc->h_sync_end = width + width / 20 + width / 16;
+    crtc->v_total = height + height / 20;
+    crtc->v_sync_start = height + height / 50;
+    crtc->v_sync_end = height + height / 50 + 3;
+
+    /* Write CRTC registers */
+    amdgpu_reg_write(crtc_base + 0x02, crtc->h_total);
+    amdgpu_reg_write(crtc_base + 0x03, crtc->v_total);
+    amdgpu_reg_write(crtc_base + 0x04, (crtc->h_sync_start << 16) | crtc->h_sync_end);
+    amdgpu_reg_write(crtc_base + 0x05, (crtc->v_sync_start << 16) | crtc->v_sync_end);
+
+    /* Set framebuffer for this CRTC */
+    amdgpu_reg_write(crtc_base + 0x06, crtc->fb_base);
+    amdgpu_reg_write(crtc_base + 0x07, 0); /* high address */
+    amdgpu_reg_write(crtc_base + 0x08, crtc->pitch);
+
+    /* Enable CRTC */
+    amdgpu_reg_write(crtc_base, 0x01); /* CRTC enable */
+    crtc->enabled = 1;
+    dev->crtc_count++;
+
+    klog_info("[AMDGPU] CRTC %d added: %dx%d@%d on connector %d",
+              crtc->crtc_id, width, height, refresh, connector_idx);
+    return 0;
+}
+
+int amdgpu_multihead_remove_crtc(amdgpu_device_t *dev, uint32_t crtc_id) {
+    if (!dev || crtc_id >= dev->crtc_count) return -1;
+
+    /* Disable CRTC */
+    uint32_t crtc_base = AMDGPU_DC_CRTC_BASE(crtc_id);
+    amdgpu_reg_write(crtc_base, 0x00);
+
+    dev->crtc[crtc_id].enabled = 0;
+
+    /* Compact array */
+    for (uint32_t i = crtc_id; i < dev->crtc_count - 1; i++) {
+        memcpy(&dev->crtc[i], &dev->crtc[i + 1], sizeof(amdgpu_crtc_t));
+        dev->crtc[i].crtc_id = i;
+    }
+    dev->crtc_count--;
+
+    klog_info("[AMDGPU] CRTC %d removed", crtc_id);
+    return 0;
+}
+
+int amdgpu_multihead_get_crtc_count(amdgpu_device_t *dev) {
+    return dev ? (int)dev->crtc_count : 0;
+}
+
+void amdgpu_multihead_scan_displays(amdgpu_device_t *dev) {
+    if (!dev) return;
+
+    /* Re-scan HPD status */
+    uint32_t hpd_status = amdgpu_reg_read(AMDGPU_DC_HPD_STATUS);
+    uint32_t old_count = dev->connector_count;
+
+    amdgpu_connector_detect(dev);
+
+    /* Handle hotplug events */
+    if (dev->connector_count > old_count) {
+        klog_info("[AMDGPU] Display connected (now %d displays)", dev->connector_count);
+    } else if (dev->connector_count < old_count) {
+        klog_info("[AMDGPU] Display disconnected (now %d displays)", dev->connector_count);
+        /* Remove any CRTCs that reference disconnected connectors */
+        for (uint32_t i = 0; i < dev->crtc_count; i++) {
+            if (dev->crtc[i].connector_id >= dev->connector_count) {
+                amdgpu_multihead_remove_crtc(dev, i);
+                i--; /* re-check this index */
+            }
+        }
+    }
+
+    (void)hpd_status;
+}
+
+int amdgpu_multihead_set_primary(amdgpu_device_t *dev, uint32_t crtc_id) {
+    if (!dev || crtc_id >= dev->crtc_count) return -1;
+
+    /* Swap primary CRTC to position 0 for simplicity */
+    if (crtc_id > 0) {
+        amdgpu_crtc_t temp = dev->crtc[0];
+        dev->crtc[0] = dev->crtc[crtc_id];
+        dev->crtc[crtc_id] = temp;
+        dev->crtc[0].crtc_id = 0;
+        dev->crtc[crtc_id].crtc_id = crtc_id;
+    }
+
+    dev->width = dev->crtc[0].width;
+    dev->height = dev->crtc[0].height;
+    dev->pitch = dev->crtc[0].pitch;
+
+    klog_info("[AMDGPU] Primary display set to CRTC %d (%dx%d)",
+              crtc_id, dev->crtc[0].width, dev->crtc[0].height);
+    return 0;
+}
+
+/* ================================================================ */
+/*  8. 温度监控                                                       */
+/* ================================================================ */
+
+int amdgpu_thermal_init(amdgpu_device_t *dev) {
+    if (!dev || !dev->mmio_base) return -1;
+
+    amdgpu_thermal_t *th = &dev->thermal;
+    memset(th, 0, sizeof(amdgpu_thermal_t));
+
+    th->throttle_temp = AMDGPU_THERMAL_THROTTLE_DEFAULT;
+    th->critical_temp = AMDGPU_THERMAL_CRITICAL_DEFAULT;
+    th->emergency_temp = AMDGPU_THERMAL_EMERGENCY_DEFAULT;
+    th->throttling_active = 0;
+    th->throttle_level = 0;
+    th->overheat_count = 0;
+
+    /* Write thresholds to hardware */
+    amdgpu_reg_write(AMDGPU_THERMAL_THROTTLE_TEMP, th->throttle_temp);
+    amdgpu_reg_write(AMDGPU_THERMAL_CRITICAL_TEMP, th->critical_temp);
+    amdgpu_reg_write(AMDGPU_THERMAL_EMERGENCY_TEMP, th->emergency_temp);
+
+    th->initialized = 1;
+
+    /* Do initial reading */
+    amdgpu_thermal_read(dev);
+
+    klog_info("[AMDGPU] Thermal monitoring initialized (throttle=%dC, critical=%dC)",
+              th->throttle_temp / 1000, th->critical_temp / 1000);
+    return 0;
+}
+
+int amdgpu_thermal_read(amdgpu_device_t *dev) {
+    if (!dev || !dev->mmio_base || !dev->thermal.initialized) return -1;
+
+    amdgpu_thermal_t *th = &dev->thermal;
+
+    /* Try SMU temperature query first */
+    if (amdgpu_smu_send_msg(AMDGPU_SMU_MSG_GET_TEMPERATURE, 0) == 0) {
+        th->temp_edge = amdgpu_reg_read(AMDGPU_THERMAL_TEMP_EDGE);
+        th->temp_junction = amdgpu_reg_read(AMDGPU_THERMAL_TEMP_JUNCTION);
+        th->temp_mem = amdgpu_reg_read(AMDGPU_THERMAL_TEMP_MEM);
+        th->temp_vrm = amdgpu_reg_read(AMDGPU_THERMAL_TEMP_VRM);
+    } else {
+        /* Fallback: read edge temperature from hardware register */
+        th->temp_edge = amdgpu_reg_read(AMDGPU_THERMAL_TEMP_EDGE);
+        th->temp_junction = th->temp_edge + 5000; /* estimate +5°C */
+        th->temp_mem = th->temp_edge - 5000;       /* estimate -5°C */
+        th->temp_vrm = th->temp_edge;
+    }
+
+    /* Update thermal status */
+    uint32_t status = amdgpu_reg_read(AMDGPU_THERMAL_STATUS);
+    th->throttling_active = (status & 0x01) ? 1 : 0;
+    th->throttle_level = (status >> 1) & 0x03;
+
+    return 0;
+}
+
+int amdgpu_thermal_get_temp(uint32_t *edge, uint32_t *junction, uint32_t *mem, uint32_t *vrm) {
+    if (!amdgpu_dev.thermal.initialized) return -1;
+
+    amdgpu_thermal_read(&amdgpu_dev);
+
+    if (edge) *edge = amdgpu_dev.thermal.temp_edge;
+    if (junction) *junction = amdgpu_dev.thermal.temp_junction;
+    if (mem) *mem = amdgpu_dev.thermal.temp_mem;
+    if (vrm) *vrm = amdgpu_dev.thermal.temp_vrm;
+    return 0;
+}
+
+int amdgpu_thermal_get_throttle(uint32_t *level) {
+    if (!level || !amdgpu_dev.thermal.initialized) return -1;
+    *level = amdgpu_dev.thermal.throttle_level;
+    return 0;
+}
+
+int amdgpu_thermal_set_thresholds(uint32_t throttle, uint32_t critical) {
+    if (!amdgpu_dev.thermal.initialized || !amdgpu_dev.mmio_base) return -1;
+
+    amdgpu_dev.thermal.throttle_temp = throttle;
+    amdgpu_dev.thermal.critical_temp = critical;
+
+    amdgpu_reg_write(AMDGPU_THERMAL_THROTTLE_TEMP, throttle);
+    amdgpu_reg_write(AMDGPU_THERMAL_CRITICAL_TEMP, critical);
+
+    return 0;
+}
+
+void amdgpu_thermal_check(amdgpu_device_t *dev) {
+    if (!dev || !dev->thermal.initialized) return;
+
+    amdgpu_thermal_read(dev);
+    amdgpu_thermal_t *th = &dev->thermal;
+
+    if (th->temp_junction >= th->emergency_temp) {
+        /* Emergency: immediate shutdown */
+        klog_err("[AMDGPU] EMERGENCY: GPU junction temp %dC exceeds %dC!",
+                 th->temp_junction / 1000, th->emergency_temp / 1000);
+        th->overheat_count++;
+        /* Force minimum clocks */
+        amdgpu_pp_set_clock(300000, 300000); /* 300 MHz */
+        amdgpu_pp_set_fan_speed(255); /* max fan */
+        th->throttle_level = 3;
+    } else if (th->temp_junction >= th->critical_temp) {
+        /* Critical throttling */
+        th->throttle_level = 2;
+        amdgpu_pp_set_clock(amdgpu_dev.engine_clock * 500 / 1000,
+                           amdgpu_dev.memory_clock * 500 / 1000); /* 50% */
+        amdgpu_pp_set_fan_speed(200);
+    } else if (th->temp_junction >= th->throttle_temp) {
+        /* Moderate throttling */
+        th->throttle_level = 1;
+        amdgpu_pp_set_clock(amdgpu_dev.engine_clock * 750 / 1000,
+                           amdgpu_dev.memory_clock * 750 / 1000); /* 75% */
+        amdgpu_pp_set_fan_speed(128);
+    } else {
+        th->throttle_level = 0;
+    }
+}
+
+/* ================================================================ */
+/*  9. DMA 引擎                                                        */
+/* ================================================================ */
+
+int amdgpu_dma_init(amdgpu_dma_engine_t *dma, uint32_t ring_size) {
+    if (!dma) return -1;
+
+    memset(dma, 0, sizeof(amdgpu_dma_engine_t));
+
+    int ret = amdgpu_ring_init(&dma->ring, ring_size);
+    if (ret < 0) return ret;
+
+    dma->pending_max = 64;
+    dma->pending = (amdgpu_dma_cmd_t *)kcalloc(dma->pending_max, sizeof(amdgpu_dma_cmd_t));
+    if (!dma->pending) {
+        amdgpu_ring_destroy(&dma->ring);
+        return -1;
+    }
+
+    dma->pending_count = 0;
+    dma->bytes_transferred = 0;
+    dma->transfer_count = 0;
+    dma->fence_value = 1;
+    dma->busy = 0;
+    dma->initialized = 1;
+
+    /* Enable SDMA ring */
+    if (amdgpu_dev.mmio_base) {
+        amdgpu_reg_write(AMDGPU_SDMA0_RB_CNTL, 0x01); /* RB enable */
+    }
+
+    klog_info("[AMDGPU] DMA engine initialized (ring=%dKB)", ring_size);
+    return 0;
+}
+
+static int amdgpu_dma_submit_cmd(amdgpu_dma_engine_t *dma, uint32_t src_addr,
+                                  uint32_t dst_addr, uint32_t size, uint32_t flags) {
+    if (!dma || !dma->initialized || !amdgpu_dev.mmio_base) return -1;
+
+    /* Wait for DMA engine to be ready */
+    uint32_t timeout;
+    for (timeout = 0; timeout < 10000; timeout++) {
+        if (!(amdgpu_reg_read(AMDGPU_SDMA0_STATUS) & 0x01)) break;
+        io_wait();
+    }
+
+    /* Program source and destination */
+    amdgpu_reg_write(AMDGPU_SDMA0_SRC_ADDR, src_addr);
+    amdgpu_reg_write(AMDGPU_SDMA0_SRC_ADDR_HI, 0);
+    amdgpu_reg_write(AMDGPU_SDMA0_DST_ADDR, dst_addr);
+    amdgpu_reg_write(AMDGPU_SDMA0_DST_ADDR_HI, 0);
+    amdgpu_reg_write(AMDGPU_SDMA0_COPY_SIZE, size);
+
+    /* Program fence if requested */
+    if (flags & 0x01) { /* interrupt */
+        amdgpu_reg_write(AMDGPU_SDMA0_FENCE_ADDR, 0);
+        amdgpu_reg_write(AMDGPU_SDMA0_FENCE_DATA, dma->fence_value);
+    }
+
+    /* Fire copy command */
+    uint32_t cmd = AMDGPU_SDMA_PKT_COPY_LINEAR;
+    if (!(flags & 0x04)) cmd = AMDGPU_SDMA_PKT_COPY_LINEAR;
+    amdgpu_reg_write(AMDGPU_SDMA0_COPY_CNTL, (flags << 16) | cmd);
+
+    dma->busy = 1;
+    dma->bytes_transferred += size;
+    dma->transfer_count++;
+
+    return 0;
+}
+
+int amdgpu_dma_copy(amdgpu_dma_engine_t *dma,
+                    uint32_t src_addr, uint32_t dst_addr,
+                    uint32_t size, int use_interrupt) {
+    if (!dma || !dma->initialized) return -1;
+
+    uint32_t flags = (use_interrupt ? 0x01 : 0x00) | 0x04; /* linear copy */
+    int ret = amdgpu_dma_submit_cmd(dma, src_addr, dst_addr, size, flags);
+
+    if (ret == 0 && !use_interrupt) {
+        ret = amdgpu_dma_wait(dma, 5000);
+    }
+
+    return ret;
+}
+
+int amdgpu_dma_copy_async(amdgpu_dma_engine_t *dma,
+                          uint32_t src_addr, uint32_t dst_addr, uint32_t size) {
+    return amdgpu_dma_copy(dma, src_addr, dst_addr, size, 1);
+}
+
+int amdgpu_dma_wait(amdgpu_dma_engine_t *dma, uint32_t timeout_ms) {
+    if (!dma || !dma->initialized || !amdgpu_dev.mmio_base) return -1;
+
+    uint32_t deadline = timeout_ms;
+    uint32_t elapsed = 0;
+
+    while (dma->busy && elapsed < deadline) {
+        uint32_t status = amdgpu_reg_read(AMDGPU_SDMA0_STATUS);
+        if (!(status & 0x01)) {
+            dma->busy = 0;
+            return 0;
+        }
+        io_wait();
+        elapsed++;
+    }
+
+    if (dma->busy) return -1; /* timeout */
+    return 0;
+}
+
+int amdgpu_dma_fence_signal(amdgpu_dma_engine_t *dma) {
+    if (!dma || !dma->initialized || !amdgpu_dev.mmio_base) return -1;
+
+    dma->fence_value++;
+    amdgpu_reg_write(AMDGPU_SDMA0_FENCE_DATA, dma->fence_value);
+
+    return 0;
+}
+
+int amdgpu_dma_fence_wait(amdgpu_dma_engine_t *dma, uint32_t fence_value, uint32_t timeout_ms) {
+    if (!dma || !dma->initialized || !amdgpu_dev.mmio_base) return -1;
+
+    uint32_t elapsed = 0;
+    while (elapsed < timeout_ms) {
+        uint32_t current = amdgpu_reg_read(AMDGPU_SDMA0_FENCE_DATA);
+        if (current >= fence_value) return 0;
+        io_wait();
+        elapsed++;
+    }
+    return -1;
+}
+
+void amdgpu_dma_shutdown(amdgpu_dma_engine_t *dma) {
+    if (!dma || !dma->initialized) return;
+
+    /* Disable SDMA */
+    if (amdgpu_dev.mmio_base) {
+        amdgpu_reg_write(AMDGPU_SDMA0_RB_CNTL, 0x00);
+    }
+
+    if (dma->pending) { kfree(dma->pending); dma->pending = NULL; }
+    amdgpu_ring_destroy(&dma->ring);
+
+    dma->pending_count = 0;
+    dma->initialized = 0;
+}
+
+/* ================================================================ */
+/*  10. 中断处理                                                       */
+/* ================================================================ */
+
+#define AMDGPU_IH_MAX_HANDLERS 32
+
+static struct {
+    uint32_t src_id;
+    void (*handler)(const amdgpu_iv_entry_t*);
+    uint32_t active;
+} g_ih_handlers[AMDGPU_IH_MAX_HANDLERS];
+
+static uint32_t g_ih_handler_count = 0;
+
+int amdgpu_ih_init(amdgpu_device_t *dev) {
+    if (!dev || !dev->mmio_base) return -1;
+
+    amdgpu_ih_t *ih = &dev->ih;
+    memset(ih, 0, sizeof(amdgpu_ih_t));
+
+    /* Initialize interrupt ring buffer */
+    ih->rptr = 0;
+    ih->wptr = 0;
+    ih->enabled = 0;
+    ih->interrupt_count = 0;
+
+    /* Set up handler table */
+    g_ih_handler_count = 0;
+    for (uint32_t i = 0; i < AMDGPU_IH_MAX_HANDLERS; i++) {
+        g_ih_handlers[i].active = 0;
+        g_ih_handlers[i].handler = NULL;
+    }
+
+    /* Configure interrupt controller */
+    amdgpu_reg_write(AMDGPU_IH_RB_CNTL, 0x00); /* disable first */
+    amdgpu_reg_write(AMDGPU_IH_RB_BASE, (uint32_t)(uintptr_t)&ih->ring[0]);
+    amdgpu_reg_write(AMDGPU_IH_RB_WPTR, 0);
+    amdgpu_reg_write(AMDGPU_IH_RB_RPTR, 0);
+    amdgpu_reg_write(AMDGPU_IH_INT_MASK, 0xFFFFFFFF); /* mask all initially */
+
+    klog_info("[AMDGPU] Interrupt handler initialized");
+    return 0;
+}
+
+int amdgpu_ih_enable(amdgpu_device_t *dev) {
+    if (!dev || !dev->mmio_base) return -1;
+
+    /* Enable all common interrupt sources */
+    uint32_t mask = ~(AMDGPU_IH_SRCID_VSYNC |
+                      AMDGPU_IH_SRCID_PAGE_FLIP |
+                      AMDGPU_IH_SRCID_CMD_COMPLETE |
+                      AMDGPU_IH_SRCID_SDMA_TRAP |
+                      AMDGPU_IH_SRCID_THERMAL_TRIP |
+                      AMDGPU_IH_SRCID_HPD |
+                      AMDGPU_IH_SRCID_GPU_FAULT);
+
+    amdgpu_reg_write(AMDGPU_IH_INT_MASK, mask);
+    amdgpu_reg_write(AMDGPU_IH_RB_CNTL, 0x01); /* RB enable + interrupt enable */
+
+    dev->ih.enabled = 1;
+    klog_info("[AMDGPU] Interrupts enabled");
+    return 0;
+}
+
+int amdgpu_ih_disable(amdgpu_device_t *dev) {
+    if (!dev || !dev->mmio_base) return -1;
+
+    amdgpu_reg_write(AMDGPU_IH_RB_CNTL, 0x00);
+    amdgpu_reg_write(AMDGPU_IH_INT_MASK, 0xFFFFFFFF);
+    dev->ih.enabled = 0;
+    return 0;
+}
+
+int amdgpu_ih_process(amdgpu_device_t *dev) {
+    if (!dev || !dev->mmio_base || !dev->ih.enabled) return 0;
+
+    amdgpu_ih_t *ih = &dev->ih;
+    int processed = 0;
+
+    /* Read pending interrupts from ring buffer */
+    while (ih->rptr != ih->wptr) {
+        amdgpu_iv_entry_t *iv = &ih->ring[ih->rptr];
+        ih->rptr = (ih->rptr + 1) % AMDGPU_IH_RING_SIZE;
+        ih->interrupt_count++;
+        processed++;
+
+        /* Update counters */
+        switch (iv->src_id) {
+        case AMDGPU_IH_SRCID_VSYNC:      ih->vsync_count++; break;
+        case AMDGPU_IH_SRCID_PAGE_FLIP:  ih->page_flip_count++; break;
+        case AMDGPU_IH_SRCID_CMD_COMPLETE: ih->cmd_complete_count++; break;
+        case AMDGPU_IH_SRCID_SDMA_TRAP:  ih->sdma_trap_count++; break;
+        case AMDGPU_IH_SRCID_THERMAL_TRIP: ih->thermal_trip_count++; break;
+        case AMDGPU_IH_SRCID_HPD:
+        case AMDGPU_IH_SRCID_HPD1:
+        case AMDGPU_IH_SRCID_HPD2:
+        case AMDGPU_IH_SRCID_HPD3:
+            ih->hpd_count++;
+            break;
+        case AMDGPU_IH_SRCID_GPU_FAULT:
+            ih->gpu_fault_count++;
+            klog_err("[AMDGPU] GPU fault detected! (src_data=0x%08X)", iv->src_data);
+            break;
+        default:
+            break;
+        }
+
+        /* Dispatch to registered handlers */
+        for (uint32_t i = 0; i < g_ih_handler_count; i++) {
+            if (g_ih_handlers[i].active &&
+                g_ih_handlers[i].src_id == iv->src_id &&
+                g_ih_handlers[i].handler) {
+                g_ih_handlers[i].handler(iv);
+            }
+        }
+
+        /* Handle hotplug */
+        if (iv->src_id >= AMDGPU_IH_SRCID_HPD &&
+            iv->src_id <= AMDGPU_IH_SRCID_HPD3) {
+            amdgpu_multihead_scan_displays(dev);
+        }
+
+        /* Handle thermal trip */
+        if (iv->src_id == AMDGPU_IH_SRCID_THERMAL_TRIP) {
+            amdgpu_thermal_check(dev);
+        }
+    }
+
+    /* Update RPTR to acknowledge interrupts */
+    amdgpu_reg_write(AMDGPU_IH_RB_RPTR, ih->rptr);
+    amdgpu_reg_write(AMDGPU_IH_INT_ACK, 0x01);
+
+    return processed;
+}
+
+void amdgpu_ih_register_handler(uint32_t src_id, void (*handler)(const amdgpu_iv_entry_t*)) {
+    if (!handler) return;
+
+    /* Check for duplicate */
+    for (uint32_t i = 0; i < g_ih_handler_count; i++) {
+        if (g_ih_handlers[i].active && g_ih_handlers[i].src_id == src_id) {
+            g_ih_handlers[i].handler = handler;
+            return;
+        }
+    }
+
+    /* Add new handler */
+    if (g_ih_handler_count < AMDGPU_IH_MAX_HANDLERS) {
+        g_ih_handlers[g_ih_handler_count].src_id = src_id;
+        g_ih_handlers[g_ih_handler_count].handler = handler;
+        g_ih_handlers[g_ih_handler_count].active = 1;
+        g_ih_handler_count++;
+    }
+}
+
+void amdgpu_ih_unregister_handler(uint32_t src_id) {
+    for (uint32_t i = 0; i < g_ih_handler_count; i++) {
+        if (g_ih_handlers[i].active && g_ih_handlers[i].src_id == src_id) {
+            g_ih_handlers[i].active = 0;
+            g_ih_handlers[i].handler = NULL;
+            return;
+        }
+    }
+}
+
+int amdgpu_ih_wait_vsync(uint32_t crtc_id, uint32_t timeout_ms) {
+    if (!amdgpu_dev.ih.enabled) return -1;
+    (void)crtc_id;
+    (void)timeout_ms;
+
+    /* In a real driver, this would wait on a vsync interrupt.
+     * Here we simulate by reading the CRTC status. */
+    uint32_t crtc_base = AMDGPU_DC_CRTC_BASE(crtc_id);
+    uint32_t timeout;
+    for (timeout = 0; timeout < timeout_ms * 10; timeout++) {
+        uint32_t status = amdgpu_reg_read(crtc_base + 0x01); /* CRTC_STATUS */
+        if (status & 0x08) { /* vsync active */
+            io_wait(); /* wait for it to clear */
+            return 0;
+        }
+        io_wait();
+    }
+    return -1;
+}
+
+int amdgpu_ih_wait_page_flip(uint32_t crtc_id, uint32_t timeout_ms) {
+    if (!amdgpu_dev.ih.enabled) return -1;
+    (void)crtc_id;
+
+    uint32_t timeout;
+    for (timeout = 0; timeout < timeout_ms * 10; timeout++) {
+        if (amdgpu_dev.ih.page_flip_count > 0) {
+            amdgpu_dev.ih.page_flip_count--;
+            return 0;
+        }
+        io_wait();
+    }
+    return -1;
+}

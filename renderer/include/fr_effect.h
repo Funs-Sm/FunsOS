@@ -8,6 +8,12 @@
 
 #include "stdint.h"
 
+/* Ensure fr_color_t is available */
+#ifndef FR_COLOR_T_DEFINED
+#define FR_COLOR_T_DEFINED
+typedef struct { uint8_t r, g, b, a; } fr_color_t;
+#endif
+
 /* 前向声明 */
 struct fr_context;
 
@@ -46,24 +52,14 @@ typedef struct {
 #define FR_GRADIENT_DIR_DIAGONAL    2   /* 左上到右下 */
 #define FR_GRADIENT_DIR_ANTIDIAG    3   /* 右上到左下 */
 
-/* 颜色停止点 */
+/* 颜色停止点 (旧版兼容，fr_gradient.h 有更完整的 fr_grad_stop_t) */
 typedef struct {
     float position;         /* 位置 0.0 - 1.0 */
     fr_color_t color;       /* 该位置的颜色 */
 } fr_gradient_stop_t;
 
-/* 最多16个颜色停止点 */
-#define FR_MAX_GRADIENT_STOPS   16
-
-/* 渐变配置 */
-typedef struct {
-    uint32_t type;                              /* 渐变类型 */
-    uint32_t direction;                         /* 方向(线性渐变) */
-    int cx, cy;                                 /* 径向中心点 */
-    int radius;                                 /* 径向半径 */
-    fr_gradient_stop_t stops[FR_MAX_GRADIENT_STOPS];
-    uint32_t stop_count;                        /* 停止点数量 */
-} fr_gradient_t;
+/* fr_gradient_t 的完整定义在 fr_gradient.h 中 */
+typedef struct fr_gradient_full fr_gradient_t;
 
 /* ---- Alpha 混合 ---- */
 

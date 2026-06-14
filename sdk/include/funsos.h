@@ -22,7 +22,7 @@
 /* 操作系统信息（与内核 version.h 保持一致） */
 #define FUNSOS_OS_NAME    "FUNSOS"
 #define FUNSOS_KERNEL_NAME "FunsCore"
-#define FUNSOS_KERNEL_VERSION "0.3"
+#define FUNSOS_KERNEL_VERSION "0.5"
 
 /* ---- 功能特性宏 ----
  * 用于在编译时检测当前 SDK/内核支持的功能。

@@ -1,4 +1,9 @@
 #include "gfx.h"
+#include "kheap.h"
+#include "string.h"
+
+static uint32_t gfx_current_backend = GFX_BACKEND_SOFTWARE;
+static gfx_backend_ctx_t gfx_fr_context = 0;
 
 static int32_t clamp_int(int32_t v, int32_t lo, int32_t hi) {
     if (v < lo) return lo;
@@ -343,4 +348,78 @@ void gfx_blit(gfx_context_t *dst, int32_t dx, int32_t dy, gfx_context_t *src, gf
             gfx_write_pixel(dst, ddx, ddy, pixel);
         }
     }
+}
+
+/* ---- Renderer backend management ---- */
+
+void gfx_set_backend(uint32_t backend) {
+    if (backend <= GFX_BACKEND_AUTO) {
+        gfx_current_backend = backend;
+    }
+}
+
+uint32_t gfx_get_backend(void) {
+    return gfx_current_backend;
+}
+
+void gfx_set_backend_context(gfx_backend_ctx_t fr_ctx) {
+    gfx_fr_context = fr_ctx;
+}
+
+gfx_backend_ctx_t gfx_get_backend_context(void) {
+    return gfx_fr_context;
+}
+
+/* ---- FunRender compatibility wrappers ---- */
+
+void gfx_fill_rect_fr(gfx_context_t *ctx, gfx_rect_t rect, gfx_color_t color) {
+    if (gfx_current_backend == GFX_BACKEND_FUNRENDER && gfx_fr_context) {
+        /* Delegate to FunRender: fr_context_fill_rect(gfx_fr_context, rect, color) */
+        /* For now, fall back to software rendering */
+    }
+    gfx_fill_rect(ctx, rect, color);
+}
+
+void gfx_draw_rect_fr(gfx_context_t *ctx, gfx_rect_t rect, gfx_color_t color) {
+    if (gfx_current_backend == GFX_BACKEND_FUNRENDER && gfx_fr_context) {
+        /* Delegate to FunRender */
+    }
+    gfx_draw_rect(ctx, rect, color);
+}
+
+void gfx_draw_line_fr(gfx_context_t *ctx, int32_t x0, int32_t y0, int32_t x1, int32_t y1, gfx_color_t color) {
+    if (gfx_current_backend == GFX_BACKEND_FUNRENDER && gfx_fr_context) {
+        /* Delegate to FunRender */
+    }
+    gfx_draw_line(ctx, x0, y0, x1, y1, color);
+}
+
+void gfx_blit_fr(gfx_context_t *dst, int32_t dx, int32_t dy, gfx_context_t *src, gfx_rect_t src_rect) {
+    if (gfx_current_backend == GFX_BACKEND_FUNRENDER && gfx_fr_context) {
+        /* Delegate to FunRender */
+    }
+    gfx_blit(dst, dx, dy, src, src_rect);
+}
+
+/* ---- FunRender-backed surface creation ---- */
+
+gfx_context_t *gfx_create_fr_surface(uint32_t w, uint32_t h) {
+    gfx_context_t *ctx = (gfx_context_t *)kmalloc(sizeof(gfx_context_t));
+    if (!ctx) return 0;
+
+    uint32_t *buf = (uint32_t *)kmalloc(w * h * 4);
+    if (!buf) {
+        kfree(ctx);
+        return 0;
+    }
+    memset(buf, 0, w * h * 4);
+
+    gfx_init(ctx, buf, w, h, w * 4, 32);
+    return ctx;
+}
+
+void gfx_destroy_fr_surface(gfx_context_t *ctx) {
+    if (!ctx) return;
+    if (ctx->buffer) kfree(ctx->buffer);
+    kfree(ctx);
 }

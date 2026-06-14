@@ -7,6 +7,7 @@
 #include "fr_context.h"
 #include "fr_transform.h"
 #include "string.h"
+#include "../lib/math.h"
 
 /* ---- 恒等矩阵 ---- */
 

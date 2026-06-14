@@ -18,6 +18,7 @@
 
 stage2_entry:
     MOV ESP, 0x70000             ; small stack just for stage 2
+    CLD                          ; clear direction flag for REP INSW
     MOV AX, 0x10
     MOV DS, AX
     MOV ES, AX
@@ -48,10 +49,53 @@ stage2_entry:
     MOV EDI, 0x190000
     CALL pio_read_sector
     JNC .probe_ok
-    ; PIO probe failed - the kernel may be small enough that the
-    ; loader already loaded it all.  Jump directly to kernel entry.
+    ; PIO probe failed - try resetting the IDE controller and retry
     MOV ESI, s2_msg_probe_fail
     CALL s2_print
+
+    ; Software reset: set SRST bit in Device Control register
+    MOV DX, 0x3F6
+    MOV AL, 0x04
+    OUT DX, AL
+    ; Wait 10us (read status a few times for delay)
+    MOV DX, 0x1F7
+    MOV ECX, 16
+.reset_delay:
+    IN AL, DX
+    LOOP .reset_delay
+    ; Clear SRST
+    MOV DX, 0x3F6
+    XOR AL, AL
+    OUT DX, AL
+    ; Wait for controller to come back
+    MOV EBP, 8000000
+.reset_wait:
+    MOV DX, 0x1F7
+    IN AL, DX
+    TEST AL, 0x80
+    JNZ .reset_wait_busy
+    TEST AL, 0x40
+    JNZ .reset_done
+.reset_wait_busy:
+    DEC EBP
+    JNZ .reset_wait
+    JMP .reset_giveup
+.reset_done:
+    ; Small additional delay
+    MOV ECX, 100
+.reset_delay2:
+    IN AL, DX
+    LOOP .reset_delay2
+
+    ; Retry PIO probe
+    MOV ESI, KERNEL_CONT_LBA
+    MOV EDI, 0x190000
+    CALL pio_read_sector
+    JNC .probe_ok
+
+.reset_giveup:
+    ; Second attempt also failed - the kernel may be small enough
+    ; that the loader already loaded it all.  Jump directly to kernel entry.
     MOV ESI, s2_msg_small
     CALL s2_print
     JMP .s2_done
@@ -107,7 +151,7 @@ pio_read_sector:
 
     ; Wait for BSY=0 and DRDY=1 (with timeout)
     MOV DX, 0x1F7
-    MOV EBP, 1000000              ; timeout counter
+    MOV EBP, 4000000              ; timeout counter (increased)
 .wait_rdy:
     IN AL, DX
     TEST AL, 0x80
@@ -122,10 +166,18 @@ pio_read_sector:
 
     ; Drive/head: 0xE0 (master + LBA mode) | (LBA bits 24-27)
     MOV EAX, ESI
+    SHR EAX, 24           ; Extract bits 24-27 of LBA
     AND AL, 0x0F
     OR AL, 0xE0
     MOV DX, 0x1F6
     OUT DX, AL
+
+    ; 400ns delay after drive select: read status register 4 times
+    MOV DX, 0x1F7
+    IN AL, DX
+    IN AL, DX
+    IN AL, DX
+    IN AL, DX
 
     ; Features register = 0
     MOV DX, 0x1F1
@@ -160,7 +212,7 @@ pio_read_sector:
     OUT DX, AL
 
     ; Wait for DRQ (with timeout)
-    MOV EBP, 1000000
+    MOV EBP, 4000000
 .wait_drq:
     MOV DX, 0x1F7
     IN AL, DX
@@ -168,6 +220,8 @@ pio_read_sector:
     JNZ .pio_err                  ; BSY set after command = error
     TEST AL, 0x08
     JNZ .drq_ok
+    TEST AL, 0x01
+    JNZ .pio_err                  ; ERR bit set
     DEC EBP
     JNZ .wait_drq
     JMP .pio_err                  ; timeout
@@ -183,6 +237,10 @@ pio_read_sector:
     RET
 
 .pio_err:
+    ; Read error register for diagnostics
+    MOV DX, 0x1F1
+    IN AL, DX
+    MOV [s2_last_error], AL
     POPAD
     STC
     RET
@@ -228,7 +286,8 @@ s2_lba:         DD 0
 s2_dst:         DD 0
 s2_remaining:   DD 0
 s2_status:      DB 0
-                TIMES 3 DB 0   ; align to 4 bytes
+s2_last_error:  DB 0
+                TIMES 2 DB 0   ; align to 4 bytes
 
 s2_msg_start:   DB 'stage2: starting kernel load', 13, 10, 0
 s2_msg_probe:   DB 'stage2: PIO probe', 13, 10, 0
@@ -239,4 +298,4 @@ s2_msg_ok:      DB 'stage2: kernel fully loaded, jumping to entry', 13, 10, 0
 s2_msg_small:   DB 'stage2: kernel small, skipping PIO', 13, 10, 0
 
 KERNEL_CONT_LBA      EQU 1178
-KERNEL_CONT_SECTORS  EQU 7000     ; ~3.5MB more (total covers ~4.2MB kernel)
+KERNEL_CONT_SECTORS  EQU 34000    ; ~16.6MB more (covers full kernel up to ~17MB)

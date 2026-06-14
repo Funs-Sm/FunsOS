@@ -35,4 +35,10 @@ void wm_draw_taskbar(gfx_context_t *ctx);
 void wm_arrange_cascade(void);
 void wm_arrange_tile(void);
 
+/* ---- Bridge to new desktop system ---- */
+int wm_register_with_desktop(void);
+int wm_sync_to_desktop(void);
+void wm_set_desktop_context(void *desktop_ctx);
+void *wm_get_desktop_context(void);
+
 #endif

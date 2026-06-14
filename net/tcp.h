@@ -69,6 +69,39 @@ typedef struct pcb_t pcb_t;
 #define TCP_SOCK_FLAG_QUICKACK     0x2000
 #define TCP_SOCK_FLAG_FASTOPEN     0x4000
 
+/* ---- Congestion Control Algorithms (RFC 5681 / RFC 8312) ---- */
+#define TCP_CC_RENO        0
+#define TCP_CC_NEWRENO     1
+#define TCP_CC_CUBIC       2
+
+/* CUBIC-specific per-connection state (RFC 8312) */
+typedef struct {
+    uint32_t  tcp_friendliness;   /* 1 = use TCP-friendly region */
+    uint32_t  fast_convergence;   /* 1 = apply fast convergence heuristic */
+    float     beta_cubic;         /* multiplicative decrease factor (default 0.7) */
+    float     C;                  /* CUBIC scaling constant (default 0.4) */
+    uint32_t  W_max;              /* window size just before last loss event */
+    uint32_t  W_last_max;         /* W_max before the most recent decrease */
+    uint32_t  epoch_start;        /* start time of current epoch (ms) */
+    uint32_t  origin_point;       /* time origin = epoch_start */
+    uint32_t  dMin;               /* minimum RTT observed (ms) */
+    uint32_t  cwnd_cnt;           /* ACKs received since last cwnd update */
+    uint32_t  K;                  /* time to grow from 0 to W_max: cubic_root(W_max * beta_cubic / C) */
+    uint32_t  last_cwnd;          /* cwnd value at last ACK (for CUBIC) */
+    uint32_t  tcp_cwnd;           /* TCP-friendly cwnd estimate */
+} tcp_cubic_state_t;
+
+/* Global CC statistics */
+typedef struct {
+    uint32_t reno_slow_starts;
+    uint32_t reno_fast_retrans;
+    uint32_t newreno_partial_acks;
+    uint32_t newreno_recoveries;
+    uint32_t cubic_epochs;
+    uint32_t cubic_fast_convergences;
+    uint32_t cubic_tcp_friendly_wins;
+} tcp_cc_stats_t;
+
 #define TCP_RCVBUF_SIZE  (64 * 1024)
 #define TCP_SNDBUF_SIZE  (64 * 1024)
 #define TCP_BACKLOG_MAX  128
@@ -125,6 +158,10 @@ typedef struct tcp_socket {
     uint32_t partial_bytes_acked;
     uint32_t dup_acks;
     uint8_t  fast_recovery;
+
+    /* Congestion control algorithm selection */
+    uint8_t   cc_algo;           /* TCP_CC_RENO / TCP_CC_NEWRENO / TCP_CC_CUBIC */
+    tcp_cubic_state_t cubic;     /* CUBIC state (valid when cc_algo==TCP_CC_CUBIC) */
 
     /* RTT estimation (RFC 6298) */
     uint32_t srtt;
@@ -280,5 +317,16 @@ int  tcp_state_is_listen(uint32_t state);
 int  tcp_state_is_closed(uint32_t state);
 void tcp_state_log_transition(tcp_socket_t *sock, uint32_t from, uint32_t to);
 int  tcp_describe_segment(tcp_header_t *hdr, char *out, uint32_t out_size);
+
+/* ---- Congestion Control API ---- */
+void  tcp_cc_set_algo(tcp_socket_t *sock, uint8_t algo);
+uint8_t tcp_cc_get_algo(tcp_socket_t *sock);
+const char *tcp_cc_get_name(uint8_t algo);
+int tcp_cc_init_cubic(tcp_socket_t *sock);
+void tcp_cc_on_ack(tcp_socket_t *sock, uint32_t acked_bytes);
+void tcp_cc_on_loss(tcp_socket_t *sock);
+void tcp_cc_on_rto(tcp_socket_t *sock);
+void tcp_cc_on_dup_ack(tcp_socket_t *sock);
+const tcp_cc_stats_t *tcp_cc_get_stats(void);
 
 #endif

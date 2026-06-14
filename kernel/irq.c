@@ -96,9 +96,10 @@ void irq_handler(regs_t *regs) {
             handler(regs);
         }
         (void)data;
-    }
 
-    pic_eoi(irq);
+        pic_eoi(irq);
+    }
+    /* If irq >= 16, ignore (spurious or invalid) - do NOT send EOI */
 }
 
 void irq_register_handler(uint8_t irq, void (*handler)(regs_t *)) {

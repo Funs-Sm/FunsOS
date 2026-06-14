@@ -7,6 +7,7 @@
 #include "fr_context.h"
 #include "fr_effect.h"
 #include "string.h"
+#include "../lib/math.h"
 
 /* ---- 内部辅助函数 ---- */
 
@@ -606,45 +607,34 @@ void fr_effect_render_gradient(fr_context_t *ctx,
                 ty < 0 || ty >= ctx->height) continue;
 
             float t;
-            if (gradient->type == FR_GRADIENT_LINEAR) {
-                /* 线性渐变 */
-                switch (gradient->direction) {
-                case FR_GRADIENT_DIR_HORIZONTAL:
-                    t = (float)px / (float)(w > 1 ? w - 1 : 1);
-                    break;
-                case FR_GRADIENT_DIR_VERTICAL:
-                    t = (float)py / (float)(h > 1 ? h - 1 : 1);
-                    break;
-                case FR_GRADIENT_DIR_DIAGONAL:
-                    t = (float)(px + py) /
-                        (float)((w + h) > 1 ? (w + h - 2) : 1);
-                    break;
-                case FR_GRADIENT_DIR_ANTIDIAG:
-                    /* 右上到左下: t = ((w-px-1) + py) / (w+h-2) */
-                    t = (float)((w - px - 1) + py) /
-                        (float)((w + h - 2) > 1 ? (w + h - 2) : 1);
-                    break;
-                default:
-                    t = (float)px / (float)(w > 1 ? w - 1 : 1);
-                    break;
+            if (gradient->type == FR_GRAD_TYPE_LINEAR) {
+                /* 线性渐变 - use params.linear for direction */
+                float x1 = gradient->params.linear.x1;
+                float y1 = gradient->params.linear.y1;
+                float x2 = gradient->params.linear.x2;
+                float y2 = gradient->params.linear.y2;
+                float dx = x2 - x1;
+                float dy = y2 - y1;
+                float len2 = dx * dx + dy * dy;
+                if (len2 < 1e-6f) { t = 0.0f; }
+                else {
+                    float proj = ((px - x1) * dx + (py - y1) * dy) / len2;
+                    t = proj < 0.0f ? 0.0f : (proj > 1.0f ? 1.0f : proj);
                 }
-            } else {
+            } else if (gradient->type == FR_GRAD_TYPE_RADIAL) {
                 /* 径向渐变 */
-                int cx = gradient->cx;
-                int cy = gradient->cy;
-                int radius = gradient->radius;
-                if (radius <= 0) radius = 1;
+                float cx = gradient->params.radial.cx;
+                float cy = gradient->params.radial.cy;
+                float radius = gradient->params.radial.radius;
+                if (radius <= 0) radius = 1.0f;
 
-                int dx = px - cx;
-                int dy = py - cy;
-                float dist = 0.0f;
-
-                /* 使用整数 sqrt 近似 */
-                if (dx < 0) dx = -dx;
-                if (dy < 0) dy = -dy;
-                dist = (float)dx + (float)dy; /* 曼哈顿距离近似 */
-                t = dist / (float)radius;
+                float ddx = (float)px - cx;
+                float ddy = (float)py - cy;
+                float dist = (float)sqrt(ddx * ddx + ddy * ddy);
+                t = dist / radius;
                 if (t > 1.0f) t = 1.0f;
+            } else {
+                t = 0.0f;
             }
 
             fr_color_t c = fr_effect_gradient_sample(gradient, t);

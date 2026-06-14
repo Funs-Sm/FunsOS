@@ -24,8 +24,23 @@ _start:
     MOV GS, AX
     MOV SS, AX
 
-    LGDT [_gdt_ptr]
-    LIDT [_idt_ptr]
+    ; Zero BSS section before any C code runs.
+    ; Without this, BSS variables (gdt_ptr, idt_ptr, etc.) contain
+    ; garbage from memory, causing LGDT/LIDT to load invalid tables.
+    EXTERN __bss_start
+    EXTERN __bss_end
+    MOV EDI, __bss_start
+    MOV ECX, __bss_end
+    SUB ECX, EDI
+    XOR EAX, EAX
+    REP STOSB
+
+    ; Do NOT load GDT/IDT here - the BSS was just zeroed, so
+    ; gdt_ptr/idt_ptr are 0.  Loading them would set up invalid
+    ; tables.  init_gdt() and init_idt() in C will set them up
+    ; properly and execute LGDT/LIDT themselves.
+    ; The segment registers (0x10) still use the descriptor cache
+    ; from the loader's GDT, which is valid until init_gdt() replaces it.
 
     CALL _kernel_main
 

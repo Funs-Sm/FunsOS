@@ -311,3 +311,375 @@ int drm_accel_copy(drm_framebuffer_t *fb, uint32_t sx, uint32_t sy,
     sw_copy(fb, sx, sy, dx, dy, w, h);
     return 0;
 }
+
+/* ---- DRM framebuffer management ---- */
+
+drm_framebuffer_t *drm_fb_add(drm_driver_t *drv, uint32_t width, uint32_t height,
+                               uint32_t bpp, uint32_t pitch, uint32_t flags) {
+    if (!drv) return (void *)0;
+    if (drv->fb_count >= 16) return (void *)0;
+
+    drm_framebuffer_t *fb = &drv->framebuffers[drv->fb_count];
+    memset(fb, 0, sizeof(drm_framebuffer_t));
+
+    fb->id = drm_next_fb_id++;
+    fb->width = width;
+    fb->height = height;
+    fb->bpp = bpp;
+    fb->depth = bpp;
+    fb->pitch = pitch ? pitch : (width * (bpp / 8));
+    fb->size = fb->pitch * height;
+
+    if (flags & DRM_DUMB_BUF_WC) {
+        /* Write-combining buffer */
+    }
+
+    if (drv->fb_create) {
+        int ret = drv->fb_create(fb);
+        if (ret == 0) {
+            drv->fb_count++;
+            return fb;
+        }
+    }
+
+    fb->vaddr = (uint32_t *)kmalloc(fb->size);
+    if (!fb->vaddr) return (void *)0;
+    fb->paddr = 0;
+
+    drv->fb_count++;
+    return fb;
+}
+
+int drm_fb_remove(drm_driver_t *drv, drm_framebuffer_t *fb) {
+    if (!drv || !fb) return -1;
+
+    for (uint32_t i = 0; i < drv->fb_count; i++) {
+        if (&drv->framebuffers[i] == fb) {
+            if (drv->fb_destroy) {
+                drv->fb_destroy(fb);
+            } else if (fb->vaddr && fb->paddr == 0) {
+                kfree(fb->vaddr);
+            }
+
+            /* Shift remaining framebuffers */
+            if (i < drv->fb_count - 1) {
+                memmove(&drv->framebuffers[i], &drv->framebuffers[i + 1],
+                    (drv->fb_count - i - 1) * sizeof(drm_framebuffer_t));
+            }
+            memset(&drv->framebuffers[drv->fb_count - 1], 0, sizeof(drm_framebuffer_t));
+            drv->fb_count--;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+drm_framebuffer_t *drm_fb_lookup(drm_driver_t *drv, uint32_t id) {
+    if (!drv) return (void *)0;
+    for (uint32_t i = 0; i < drv->fb_count; i++) {
+        if (drv->framebuffers[i].id == id) {
+            return &drv->framebuffers[i];
+        }
+    }
+    return (void *)0;
+}
+
+int drm_fb_modify(drm_framebuffer_t *fb, uint32_t width, uint32_t height,
+                  uint32_t bpp, uint32_t pitch) {
+    if (!fb) return -1;
+
+    uint32_t new_pitch = pitch ? pitch : (width * (bpp / 8));
+    uint32_t new_size = new_pitch * height;
+
+    if (fb->paddr == 0 && fb->vaddr) {
+        /* Heap-allocated, resize possible */
+        uint32_t *new_buf = (uint32_t *)kmalloc(new_size);
+        if (!new_buf) return -1;
+        memset(new_buf, 0, new_size);
+
+        uint32_t copy_w = (fb->width < width) ? fb->width : width;
+        uint32_t copy_h = (fb->height < height) ? fb->height : height;
+        uint32_t src_pitch32 = fb->pitch / 4;
+        uint32_t dst_pitch32 = new_pitch / 4;
+
+        for (uint32_t y = 0; y < copy_h; y++) {
+            for (uint32_t x = 0; x < copy_w; x++) {
+                new_buf[y * dst_pitch32 + x] = fb->vaddr[y * src_pitch32 + x];
+            }
+        }
+
+        kfree(fb->vaddr);
+        fb->vaddr = new_buf;
+    }
+
+    fb->width = width;
+    fb->height = height;
+    fb->bpp = bpp;
+    fb->depth = bpp;
+    fb->pitch = new_pitch;
+    fb->size = new_size;
+
+    return 0;
+}
+
+/* ---- DRM dumb buffer allocation ---- */
+
+drm_framebuffer_t *drm_fb_alloc_dumb(drm_driver_t *drv, uint32_t width, uint32_t height,
+                                      uint32_t bpp, uint32_t flags) {
+    if (!drv) return (void *)0;
+    if (drv->fb_count >= 16) return (void *)0;
+
+    drm_framebuffer_t *fb = &drv->framebuffers[drv->fb_count];
+    memset(fb, 0, sizeof(drm_framebuffer_t));
+
+    fb->id = drm_next_fb_id++;
+    fb->width = width;
+    fb->height = height;
+    fb->bpp = bpp;
+    fb->depth = bpp;
+    fb->pitch = width * (bpp / 8);
+    /* Align pitch to 64 bytes */
+    if (fb->pitch % 64) {
+        fb->pitch = (fb->pitch + 63) & ~63;
+    }
+    fb->size = fb->pitch * height;
+
+    /* Allocate physically contiguous memory from the heap */
+    fb->vaddr = (uint32_t *)kmalloc(fb->size);
+    if (!fb->vaddr) return (void *)0;
+    memset(fb->vaddr, 0, fb->size);
+    fb->paddr = 0;
+
+    drv->fb_count++;
+    return fb;
+}
+
+int drm_fb_free_dumb(drm_driver_t *drv, drm_framebuffer_t *fb) {
+    return drm_fb_remove(drv, fb);
+}
+
+/* ---- DRM connector detection ---- */
+
+int drm_connector_detect(drm_connector_t *conn) {
+    if (!conn) return -1;
+
+    conn->last_status = conn->status;
+
+    /* For now, use a simple probing approach */
+    /* In real hardware, this would read EDID/DDC */
+    if (conn->driver_private) {
+        /* Driver-specific detection would go here */
+    }
+
+    /* Default: mark as connected if modes are available */
+    if (conn->mode_count > 0) {
+        conn->status = DRM_MODE_CONNECTED;
+    } else {
+        conn->status = DRM_MODE_DISCONNECTED;
+    }
+
+    /* Fire hotplug callback if status changed */
+    if (conn->status != conn->last_status && conn->hotplug_callback) {
+        uint32_t event = (conn->status == DRM_MODE_CONNECTED) ?
+            DRM_HOTPLUG_CONNECTED : DRM_HOTPLUG_DISCONNECTED;
+        conn->hotplug_callback(conn, event);
+    }
+
+    return 0;
+}
+
+int drm_connector_detect_all(drm_driver_t *drv) {
+    if (!drv) return -1;
+    for (uint32_t i = 0; i < drv->connector_count; i++) {
+        drm_connector_detect(&drv->connectors[i]);
+    }
+    return 0;
+}
+
+int drm_connector_set_hotplug_callback(drm_connector_t *conn, drm_hotplug_callback_t cb) {
+    if (!conn) return -1;
+    conn->hotplug_callback = cb;
+    return 0;
+}
+
+void drm_hotplug_poll(drm_driver_t *drv) {
+    if (!drv) return;
+
+    static uint32_t poll_tick = 0;
+    poll_tick++;
+
+    for (uint32_t i = 0; i < drv->connector_count; i++) {
+        drm_connector_t *conn = &drv->connectors[i];
+        if (conn->poll_interval_ms == 0) continue;
+
+        if (poll_tick - conn->last_poll_tick >= conn->poll_interval_ms) {
+            drm_connector_detect(conn);
+            conn->last_poll_tick = poll_tick;
+        }
+    }
+}
+
+int drm_connector_get_modes(drm_connector_t *conn) {
+    if (!conn) return -1;
+
+    /* Re-detect to ensure modes are up to date */
+    drm_connector_detect(conn);
+
+    return (int32_t)conn->mode_count;
+}
+
+drm_mode_t *drm_connector_find_mode(drm_connector_t *conn, uint32_t width,
+                                     uint32_t height, uint32_t refresh) {
+    if (!conn) return (void *)0;
+
+    for (uint32_t i = 0; i < conn->mode_count; i++) {
+        drm_mode_t *mode = &conn->modes[i];
+        if (mode->hdisplay == width && mode->vdisplay == height) {
+            if (refresh == 0 || mode->clock * 1000 / (mode->htotal * mode->vtotal) == refresh) {
+                return mode;
+            }
+        }
+    }
+    return (void *)0;
+}
+
+/* ---- DRM mode setting ---- */
+
+int drm_mode_validate(drm_crtc_t *crtc, drm_mode_t *mode) {
+    if (!crtc || !mode) return -1;
+
+    /* Basic validation */
+    if (mode->hdisplay < 320 || mode->vdisplay < 200) return -1;
+    if (mode->hdisplay > 7680 || mode->vdisplay > 4320) return -1;
+    if (mode->clock < 10000 || mode->clock > 1200000) return -1;
+
+    /* Validate timing parameters */
+    if (mode->hsync_start <= mode->hdisplay) return -1;
+    if (mode->hsync_end <= mode->hsync_start) return -1;
+    if (mode->htotal <= mode->hsync_end) return -1;
+    if (mode->vsync_start <= mode->vdisplay) return -1;
+    if (mode->vsync_end <= mode->vsync_start) return -1;
+    if (mode->vtotal <= mode->vsync_end) return -1;
+
+    return 0;
+}
+
+int drm_crtc_set_mode_with_fb(drm_crtc_t *crtc, drm_mode_t *mode, drm_framebuffer_t *fb) {
+    if (!crtc || !mode) return -1;
+
+    if (drm_mode_validate(crtc, mode) != 0) {
+        return -1;
+    }
+
+    /* Find the driver for this CRTC */
+    for (uint32_t i = 0; i < drm_driver_count; i++) {
+        drm_driver_t *drv = drm_drivers[i];
+        if (!drv) continue;
+
+        for (uint32_t j = 0; j < drv->crtc_count; j++) {
+            if (&drv->crtcs[j] == crtc) {
+                if (drv->crtc_set_mode) {
+                    int ret = drv->crtc_set_mode(crtc, mode);
+                    if (ret != 0) return ret;
+                }
+                crtc->mode = mode;
+                crtc->width = mode->hdisplay;
+                crtc->height = mode->vdisplay;
+                crtc->enabled = 1;
+
+                if (fb) {
+                    crtc->fb_id = fb->id;
+                }
+
+                return 0;
+            }
+        }
+    }
+
+    return -1;
+}
+
+int drm_crtc_disable(drm_crtc_t *crtc) {
+    if (!crtc) return -1;
+
+    for (uint32_t i = 0; i < drm_driver_count; i++) {
+        drm_driver_t *drv = drm_drivers[i];
+        if (!drv) continue;
+
+        for (uint32_t j = 0; j < drv->crtc_count; j++) {
+            if (&drv->crtcs[j] == crtc) {
+                crtc->enabled = 0;
+                crtc->mode = (void *)0;
+                crtc->fb_id = 0;
+                return 0;
+            }
+        }
+    }
+    return -1;
+}
+
+int drm_crtc_enable(drm_crtc_t *crtc, drm_mode_t *mode) {
+    if (!crtc) return -1;
+    if (mode) {
+        return drm_crtc_set_mode_with_fb(crtc, mode, (void *)0);
+    }
+    crtc->enabled = 1;
+    return 0;
+}
+
+int drm_mode_equal(drm_mode_t *a, drm_mode_t *b) {
+    if (!a || !b) return 0;
+    return (a->hdisplay == b->hdisplay &&
+            a->vdisplay == b->vdisplay &&
+            a->clock == b->clock &&
+            a->flags == b->flags &&
+            a->htotal == b->htotal &&
+            a->vtotal == b->vtotal) ? 1 : 0;
+}
+
+void drm_crtc_get_current_mode(drm_crtc_t *crtc, drm_mode_t *mode) {
+    if (!crtc || !mode) return;
+    if (crtc->mode) {
+        memcpy(mode, crtc->mode, sizeof(drm_mode_t));
+    } else {
+        memset(mode, 0, sizeof(drm_mode_t));
+    }
+}
+
+/* ---- DRM vsync/page flip support ---- */
+
+int drm_page_flip_with_flags(drm_crtc_t *crtc, drm_framebuffer_t *fb, uint32_t flags) {
+    if (!crtc || !fb) return -1;
+
+    if (flags & DRM_PAGE_FLIP_VSYNC) {
+        /* Wait for vertical blank before flipping */
+        if (drm_wait_vblank(crtc) != 0) {
+            /* If vblank wait not supported, proceed anyway */
+        }
+    }
+
+    return drm_page_flip(crtc, fb);
+}
+
+int drm_wait_vblank(drm_crtc_t *crtc) {
+    if (!crtc) return -1;
+
+    for (uint32_t i = 0; i < drm_driver_count; i++) {
+        drm_driver_t *drv = drm_drivers[i];
+        if (!drv) continue;
+
+        for (uint32_t j = 0; j < drv->crtc_count; j++) {
+            if (&drv->crtcs[j] == crtc) {
+                /* In a real driver, this would wait for vblank interrupt.
+                 * For now, use a polling-based approach. */
+                volatile uint32_t wait = 16666; /* ~60Hz refresh */
+                while (wait > 0) {
+                    __asm__ volatile("pause");
+                    wait--;
+                }
+                return 0;
+            }
+        }
+    }
+    return -1;
+}

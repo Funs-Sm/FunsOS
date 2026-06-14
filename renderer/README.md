@@ -1,10 +1,11 @@
 # FunRender - 独立 UI 渲染引擎
 
 <p align="center">
-  <img src="https://img.shields.io/badge/FunRender-v1.1-blue" alt="Version"/>
+  <img src="https://img.shields.io/badge/FunRender-v1.2-blue" alt="Version"/>
   <img src="https://img.shields.io/badge/Status-Stable-green" alt="Status"/>
   <img src="https://img.shields.io/badge/Widgets-30%2B-purple" alt="Widget Count"/>
-  <img src="https://img.shields.io/badge/Themes-6-yellow" alt="Theme Count"/>
+  <img src="https://img.shields.io/badge/Themes-9-yellow" alt="Theme Count"/>
+  <img src="https://img.shields.io/badge/Modules-22-orange" alt="Module Count"/>
   <img src="https://img.shields.io/badge/Kernel_Independent-Yes-success" alt="Kernel Independent"/>
 </p>
 
@@ -15,8 +16,8 @@
 
 ---
 
-**版权所有 (c) 2025-2026 Funs Liu. All Rights Reserved.**
-Copyright (c) 2025-2026 Funs Liu. All Rights Reserved.
+**Copyright (c) 2025-2026 Funs Liu. Licensed under the MIT License.**
+Copyright (c) 2025-2026 Funs Liu. Licensed under the MIT License.
 
 ---
 
@@ -291,7 +292,7 @@ typedef struct fr_widget {
 
 ## 主题系统
 
-FunRender 内置 **6 套主题**，每套主题定义了一整套视觉变量：
+FunRender 内置 **9 套主题**，每套主题定义了一整套视觉变量：
 
 ### 主题列表
 
@@ -300,9 +301,21 @@ FunRender 内置 **6 套主题**，每套主题定义了一整套视觉变量：
 | **Default (默认)** | `themes/default.h` | 蓝色调经典主题，类似 Windows 7 Aero 风格 | 日常使用、默认首选 |
 | **Dark (暗色)** | `themes/dark.h` | 深灰/近黑背景，护眼暗色主题 | 夜间使用、开发者偏好 |
 | **Light (亮色)** | `themes/light.h` | 白色明亮主题，极简扁平风格 | 日间使用、简约美学 |
-| **Blue (蓝色)** | *(可扩展)* | 深蓝专业色调 | 企业/商务应用 |
-| **Green (绿色)** | *(可扩展)* | 自然绿色调 | 环保/健康类应用 |
-| **High Contrast (高对比度)** | *(可扩展)* | 黑白高对比度 | 无障碍辅助功能 |
+| **Ocean (海洋)** | `themes/ocean.h` | 深海蓝背景，青色强调色调 | 清爽专业风格 |
+| **Forest (森林)** | `themes/forest.h` | 自然绿色调，大地色背景 | 环保/健康类应用 |
+| **Sunset (日落)** | `themes/sunset.h` | 暖色橙色强调，暖灰底色，大圆角 | 温馨舒适风格 |
+| **Monochrome (高对比度)** | `themes/monochrome.h` | 纯黑白高对比度，大字粗边框 | 无障碍辅助功能 |
+| **Cyberpunk (赛博朋克)** | `themes/cyberpunk.h` | 深黑背景，霓虹粉/青强调，等宽字体 | 开发者/科技风格 |
+| **Retro (复古蒸汽波)** | `themes/retro.h` | 粉彩柔和色调，大圆角，紫色强调 | 怀旧/创意风格 |
+
+### 主题高级功能 (v1.2 新增)
+
+| 功能 | 描述 |
+|------|------|
+| **主题预览** | `fr_theme_preview()` 提取 8 种关键颜色用于 UI 预览 |
+| **主题导出/导入** | 二进制格式 (FRTH) 导出导入，支持主题备份与分享 |
+| **主题混合** | `fr_theme_blend()` 按比例混合两个主题的颜色、字体与度量值 |
+| **自动检测** | `fr_theme_auto_detect()` 基于时间自动选择深色/浅色主题 |
 
 ### 主题变量
 
@@ -729,12 +742,19 @@ int main(int argc, char **argv) {
 | **`funrender.h`** | 总头文件 — 一键包含所有子模块；定义基础类型 (fr_handle_t, fr_rect_t, fr_color_t)；声明核心 API (fr_init, fr_shutdown, fr_render, fr_create_*, fr_set_*, fr_on_*) |
 | **`fr_context.h`** | 渲染上下文类型定义 (fr_context_t)；帧缓冲管理接口；状态栈操作 |
 | **`fr_widgets.h`** | 全部 30 种控件类型定义与常量；控件基类 `fr_widget_t` 及各控件扩展结构体 (fr_button_t, fr_label_t, fr_textbox_t ... fr_color_picker_t)；控件状态标志 |
+| **`fr_widgets_extra.h`** | 扩展控件类型：增强进度条、增强工具栏、增强状态栏、标签容器、层级树视图、颜色选择器、MDI 区域 |
 | **`fr_layout.h`** | 布局管理器类型与接口；HBox/VBox/Grid/Anchor 布局策略 |
-| **`fr_theme.h`** | 主题系统类型 (fr_theme_t)；主题变量定义；主题切换/查询 API |
+| **`fr_theme.h`** | 主题系统类型 (fr_theme_t)；主题变量定义；主题切换/查询/预览/混合/导入导出 API |
 | **`fr_animation.h`** | 动画系统类型 (fr_anim_t)；动画类型枚举；缓动函数枚举；动画控制 API |
 | **`fr_events.h`** | 事件系统类型 (fr_event_t)；事件类型枚举；事件处理器类型定义；事件轮询/等待 API |
 | **`fr_compositor.h`** | 合成器类型 (fr_compositor_t)；Alpha 混合模式枚举；脏区域跟踪 API；Z-order 管理接口 |
 | **`fr_input.h`** | 输入系统类型；键盘/鼠标/触摸事件数据结构；输入设备抽象接口 |
+| **`fr_particle.h`** | (v1.2 新增) 粒子系统类型；粒子发射器/力场/粒子类型定义 |
+| **`fr_path.h`** | (v1.2 新增) 矢量路径类型；路径命令/填充规则/布尔运算接口 |
+| **`fr_gradient.h`** | (v1.2 新增) 渐变类型；线性/径向/锥形/网格渐变定义与渲染 |
+| **`fr_shape.h`** | (v1.2 新增) 预定义形状类型；圆角矩形/星形/多边形/箭头/气泡/拼图 |
+| **`fr_texture.h`** | (v1.2 新增) 纹理管理；格式转换/Mipmap/图集/缓存/采样器接口 |
+| **`fr_transform.h`** | 2D 仿射变换矩阵类型与操作接口 |
 
 ### 源文件 (`src/`)
 
@@ -752,11 +772,16 @@ int main(int argc, char **argv) {
 | **`text.c`** | Unicode 文本测量；自动换行算法；光标位置计算；文本渲染 |
 | **`canvas.c`** | 2D 画布绘图原语：像素/线/矩形/圆/多边形/渐变/图像 Blit |
 | **`window.c`** | 顶级窗口生命周期管理；非客户区 (标题栏/边框) 绘制与事件处理；窗口拖拽/缩放 |
-| **`effect.c`** | 视觉效果引擎：阴影/模糊/发光/反射/波纹/色彩调整/渐变叠加/边框效果 |
-| **`transform.c`** | 2D 仿射变换：平移/缩放/旋转/倾斜/镜像/矩阵组合/逆变换 |
-| **`font_ext.c`** | 扩展字体系统：度量/对齐/样式 (粗体/斜体/下划线/删除线/描边/阴影/发光/渐变) |
-| **`gpu_bridge.c`** | GPU 加速桥接：命令缓冲区/纹理管理/批量绘制/DMA 传输/同步/能力查询 |
-| **`clipboard.c`** | 剪贴板集成：纯文本/富文本/图像/文件路径/多条目历史/格式协商 |
+| **`effect.c`** | (v0.5 新增) 视觉效果引擎：阴影/模糊/发光/反射/波纹/色彩调整/渐变叠加/边框效果 |
+| **`transform.c`** | (v0.5 新增) 2D 仿射变换：平移/缩放/旋转/倾斜/镜像/矩阵组合/逆变换 |
+| **`font_ext.c`** | (v0.5 新增) 扩展字体系统：度量/对齐/样式 (粗体/斜体/下划线/删除线/描边/阴影/发光/渐变) |
+| **`gpu_bridge.c`** | (v0.5 新增) GPU 加速桥接：命令缓冲区/纹理管理/批量绘制/DMA 传输/同步/能力查询 |
+| **`clipboard.c`** | (v0.5 新增) 剪贴板集成：纯文本/富文本/图像/文件路径/多条目历史/格式协商 |
+| **`particle.c`** | (v1.2 新增) 粒子系统：发射器/重力/风力/湍流/火花/烟雾/火焰/雨/雪效果 |
+| **`path.c`** | (v1.2 新增) 矢量路径渲染：SVG 路径命令 (M/L/C/Q/A/Z)、描边、填充、布尔运算 |
+| **`gradient.c`** | (v1.2 新增) 高级渐变：线性/径向/锥形/网格渐变、多色标、抖动渲染 |
+| **`shape.c`** | (v1.2 新增) 形状库：圆角矩形/星形/多边形/箭头/气泡/拼图块 |
+| **`texture.c`** | (v1.2 新增) 纹理管理：格式转换/Mipmap/纹理图集/纹理缓存/采样器 |
 
 ### 主题文件 (`themes/`)
 
@@ -765,6 +790,12 @@ int main(int argc, char **argv) {
 | **`default.h`** | 默认蓝白主题 — 经典 Windows 风格，蓝色强调色，适度圆角与阴影 |
 | **`dark.h`** | 暗色主题 — 深灰背景 (#1e1e1e)，浅色文字，柔和的强调色，护眼设计 |
 | **`light.h`** | 亮色主题 — 纯白背景，扁平化设计，细边框，无阴影或极浅阴影 |
+| **`ocean.h`** | (v1.2 新增) 海洋主题 — 深海蓝背景，青色强调，清爽专业风格 |
+| **`forest.h`** | (v1.2 新增) 森林主题 — 自然绿色调，大地色背景，环保风格 |
+| **`sunset.h`** | (v1.2 新增) 日落主题 — 暖色橙色强调，暖灰底色，大圆角温馨风格 |
+| **`monochrome.h`** | (v1.2 新增) 高对比度 — 纯黑白，大字粗边框，无障碍辅助功能 |
+| **`cyberpunk.h`** | (v1.2 新增) 赛博朋克 — 深黑背景，霓虹粉/青，等宽字体，科技风格 |
+| **`retro.h`** | (v1.2 新增) 复古蒸汽波 — 粉彩柔和色调，大圆角，紫色强调，怀旧风格 |
 
 ---
 
@@ -772,14 +803,27 @@ int main(int argc, char **argv) {
 ## 许可证
 
 ```
-Copyright (c) 2025-2026 Funs Liu. All Rights Reserved.
-版权所有 (c) 2025-2026 Funs Liu。
+MIT License
 
-FunRender 是 FunsOS 项目的一部分，遵循项目整体许可证。
-仅供学习和研究目的使用。
+Copyright (c) 2025-2026 Funs Liu
 
-FunRender is part of the FunsOS project and follows the project-wide license.
-For educational and research purposes only.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ---

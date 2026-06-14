@@ -9,9 +9,16 @@
 #include "default.h"
 #include "dark.h"
 #include "light.h"
+#include "ocean.h"
+#include "forest.h"
+#include "sunset.h"
+#include "monochrome.h"
+#include "cyberpunk.h"
+#include "retro.h"
+#include "stdio.h"
 
 /* 主题注册表 */
-#define FR_MAX_THEMES 12
+#define FR_MAX_THEMES 18
 static fr_theme_t g_themes[FR_MAX_THEMES];
 static uint32_t g_theme_count = 0;
 static fr_theme_t *g_active_theme = NULL;
@@ -36,6 +43,12 @@ static fr_widget_override_t g_overrides[FR_MAX_OVERRIDES];
 static uint32_t g_override_count = 0;
 
 /* 前向声明 - 内置主题函数 */
+static fr_theme_t fr_theme_ocean(void);
+static fr_theme_t fr_theme_forest(void);
+static fr_theme_t fr_theme_sunset(void);
+static fr_theme_t fr_theme_monochrome(void);
+static fr_theme_t fr_theme_cyberpunk(void);
+static fr_theme_t fr_theme_retro(void);
 static fr_theme_t fr_theme_blue(void);
 static fr_theme_t fr_theme_green(void);
 static fr_theme_t fr_theme_high_contrast(void);
@@ -77,6 +90,37 @@ void fr_theme_system_init(void)
 
     {
         fr_theme_t t = fr_theme_high_contrast();
+        fr_theme_register(&t);
+    }
+
+    /* 注册新的扩展主题 */
+    {
+        fr_theme_t t = fr_theme_ocean();
+        fr_theme_register(&t);
+    }
+
+    {
+        fr_theme_t t = fr_theme_forest();
+        fr_theme_register(&t);
+    }
+
+    {
+        fr_theme_t t = fr_theme_sunset();
+        fr_theme_register(&t);
+    }
+
+    {
+        fr_theme_t t = fr_theme_monochrome();
+        fr_theme_register(&t);
+    }
+
+    {
+        fr_theme_t t = fr_theme_cyberpunk();
+        fr_theme_register(&t);
+    }
+
+    {
+        fr_theme_t t = fr_theme_retro();
         fr_theme_register(&t);
     }
 
@@ -610,4 +654,244 @@ fr_color_t fr_theme_get_widget_color(uint32_t widget_type, const char *color_nam
 
     /* 回退到主题默认值 */
     return fr_theme_color(color_name);
+}
+
+/* ================================================================
+ *  主题预览生成
+ * ================================================================ */
+
+/*
+ * fr_theme_preview - 生成主题预览颜色样本
+ *
+ * 从主题中提取关键颜色并以预览数组形式返回,
+ * 用于在主题选择器中显示色彩概览。
+ * 参数:
+ *   theme     - 要生成预览的主题指针
+ *   colors    - 输出颜色数组 (至少 8 个元素)
+ *   count     - colors 数组大小
+ * 返回: 实际填充的数量
+ */
+int fr_theme_preview(const fr_theme_t *theme, fr_color_t *colors, int count)
+{
+    if (theme == NULL || colors == NULL || count < 1)
+        return 0;
+
+    int n = 0;
+
+    /* 提取关键颜色: 背景、前景、强调色、标题栏等 */
+    if (n < count) { colors[n++] = theme->colors.window_bg; }
+    if (n < count) { colors[n++] = theme->colors.window_fg; }
+    if (n < count) { colors[n++] = theme->colors.accent; }
+    if (n < count) { colors[n++] = theme->colors.title_bar_bg; }
+    if (n < count) { colors[n++] = theme->colors.button_bg; }
+    if (n < count) { colors[n++] = theme->colors.error; }
+    if (n < count) { colors[n++] = theme->colors.warning; }
+    if (n < count) { colors[n++] = theme->colors.success; }
+
+    return n;
+}
+
+/* ================================================================
+ *  主题导出/导入
+ * ================================================================ */
+
+/* 主题文件魔数 */
+#define FR_THEME_FILE_MAGIC  0x46525448  /* "FRTH" */
+#define FR_THEME_FILE_VERSION 1
+
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    fr_theme_t theme;
+} fr_theme_file_t;
+
+/*
+ * fr_theme_export - 将主题导出为二进制文件
+ *
+ * 将指定名称的主题保存到文件, 便于分享和备份。
+ * 参数:
+ *   theme_name - 要导出的主题名称
+ *   filepath   - 输出文件路径
+ * 返回: 0 成功, -1 失败
+ */
+int fr_theme_export(const char *theme_name, const char *filepath)
+{
+    fr_theme_t *theme = fr_theme_find(theme_name);
+    if (theme == NULL)
+        return -1;
+
+    /* 打开文件进行写入 */
+    FILE *f = fopen(filepath, "w");
+    if (f == NULL)
+        return -1;
+
+    fr_theme_file_t tf;
+    tf.magic = FR_THEME_FILE_MAGIC;
+    tf.version = FR_THEME_FILE_VERSION;
+    tf.theme = *theme;
+
+    size_t written = fwrite(&tf, 1, sizeof(fr_theme_file_t), f);
+    fclose(f);
+
+    return (written == sizeof(fr_theme_file_t)) ? 0 : -1;
+}
+
+/*
+ * fr_theme_import - 从文件导入主题
+ *
+ * 从二进制文件加载主题并注册到主题系统。
+ * 参数:
+ *   filepath - 要加载的主题文件路径
+ * 返回: 0 成功, -1 失败
+ */
+int fr_theme_import(const char *filepath)
+{
+    FILE *f = fopen(filepath, "r");
+    if (f == NULL)
+        return -1;
+
+    fr_theme_file_t tf;
+    size_t n = fread(&tf, 1, sizeof(fr_theme_file_t), f);
+    fclose(f);
+
+    if (n != sizeof(fr_theme_file_t))
+        return -1;
+
+    if (tf.magic != FR_THEME_FILE_MAGIC)
+        return -1;
+
+    if (tf.version > FR_THEME_FILE_VERSION)
+        return -1;
+
+    /* 注册加载的主题 */
+    return fr_theme_register(&tf.theme);
+}
+
+/* ================================================================
+ *  主题混合 (Blending)
+ * ================================================================ */
+
+/*
+ * fr_theme_blend - 混合两个主题
+ *
+ * 按指定比例混合两个主题的所有颜色、字体和度量值,
+ * 生成一个新的中间主题并注册到系统。
+ * 参数:
+ *   name_a  - 第一个主题的名称
+ *   name_b  - 第二个主题的名称
+ *   ratio   - 混合比例 (0.0=全A, 1.0=全B, 0.5=各半)
+ *   result_name - 结果主题的名称
+ * 返回: 0 成功, -1 失败
+ */
+int fr_theme_blend(const char *name_a, const char *name_b,
+                   float ratio, const char *result_name)
+{
+    fr_theme_t *a = fr_theme_find(name_a);
+    fr_theme_t *b = fr_theme_find(name_b);
+
+    if (a == NULL || b == NULL)
+        return -1;
+
+    if (ratio < 0.0f) ratio = 0.0f;
+    if (ratio > 1.0f) ratio = 1.0f;
+
+    fr_theme_t result;
+
+    /* 设置结果主题名称 */
+    {
+        int i;
+        for (i = 0; i < 63 && result_name[i]; i++)
+            result.name[i] = result_name[i];
+        result.name[i] = '\0';
+    }
+
+    /* 混合颜色 */
+#define BLEND_COLOR(field) do { \
+    fr_color_t ca = a->colors.field; \
+    fr_color_t cb = b->colors.field; \
+    result.colors.field.r = (uint8_t)(ca.r + (cb.r - ca.r) * ratio); \
+    result.colors.field.g = (uint8_t)(ca.g + (cb.g - ca.g) * ratio); \
+    result.colors.field.b = (uint8_t)(ca.b + (cb.b - ca.b) * ratio); \
+    result.colors.field.a = (uint8_t)(ca.a + (cb.a - ca.a) * ratio); \
+} while(0)
+
+    BLEND_COLOR(window_bg); BLEND_COLOR(window_fg); BLEND_COLOR(window_border);
+    BLEND_COLOR(title_bar_bg); BLEND_COLOR(title_bar_fg); BLEND_COLOR(title_bar_border);
+    BLEND_COLOR(button_bg); BLEND_COLOR(button_fg);
+    BLEND_COLOR(button_hover); BLEND_COLOR(button_pressed); BLEND_COLOR(button_border);
+    BLEND_COLOR(input_bg); BLEND_COLOR(input_fg); BLEND_COLOR(input_border);
+    BLEND_COLOR(input_focus_border);
+    BLEND_COLOR(menu_bg); BLEND_COLOR(menu_fg); BLEND_COLOR(menu_hover); BLEND_COLOR(menu_border);
+    BLEND_COLOR(scrollbar_bg); BLEND_COLOR(scrollbar_thumb); BLEND_COLOR(scrollbar_hover);
+    BLEND_COLOR(progress_bg); BLEND_COLOR(progress_fill);
+    BLEND_COLOR(accent); BLEND_COLOR(accent_hover);
+    BLEND_COLOR(error); BLEND_COLOR(warning); BLEND_COLOR(success);
+    BLEND_COLOR(disabled_bg); BLEND_COLOR(disabled_fg); BLEND_COLOR(shadow);
+#undef BLEND_COLOR
+
+    /* 混合字体 - 使用线性插值 */
+    {
+        /* 字体名称: ratio < 0.5 用 A 的字体, >= 0.5 用 B 的 */
+        fr_theme_fonts_t *fa = (ratio < 0.5f) ? &a->fonts : &b->fonts;
+        result.fonts = *fa;
+        result.fonts.default_size = (int)(a->fonts.default_size + (b->fonts.default_size - a->fonts.default_size) * ratio);
+        result.fonts.title_size = (int)(a->fonts.title_size + (b->fonts.title_size - a->fonts.title_size) * ratio);
+        result.fonts.small_size = (int)(a->fonts.small_size + (b->fonts.small_size - a->fonts.small_size) * ratio);
+    }
+
+    /* 混合度量 */
+    result.metrics.border_radius = (int)(a->metrics.border_radius + (b->metrics.border_radius - a->metrics.border_radius) * ratio);
+    result.metrics.border_width = (int)(a->metrics.border_width + (b->metrics.border_width - a->metrics.border_width) * ratio);
+    result.metrics.shadow_radius = (int)(a->metrics.shadow_radius + (b->metrics.shadow_radius - a->metrics.shadow_radius) * ratio);
+    result.metrics.shadow_offset_x = (int)(a->metrics.shadow_offset_x + (b->metrics.shadow_offset_x - a->metrics.shadow_offset_x) * ratio);
+    result.metrics.shadow_offset_y = (int)(a->metrics.shadow_offset_y + (b->metrics.shadow_offset_y - a->metrics.shadow_offset_y) * ratio);
+    result.metrics.padding = (int)(a->metrics.padding + (b->metrics.padding - a->metrics.padding) * ratio);
+    result.metrics.spacing = (int)(a->metrics.spacing + (b->metrics.spacing - a->metrics.spacing) * ratio);
+    result.metrics.title_bar_height = (int)(a->metrics.title_bar_height + (b->metrics.title_bar_height - a->metrics.title_bar_height) * ratio);
+    result.metrics.scrollbar_width = (int)(a->metrics.scrollbar_width + (b->metrics.scrollbar_width - a->metrics.scrollbar_width) * ratio);
+
+    /* 注册混合结果 */
+    return fr_theme_register(&result);
+}
+
+/* ================================================================
+ *  主题自动检测 (基于时间)
+ * ================================================================ */
+
+/*
+ * fr_theme_auto_detect - 基于当前时间自动选择深色/浅色主题
+ *
+ * 在 6:00-18:00 之间返回亮色主题名称,
+ * 在 18:00-次日6:00 之间返回暗色主题名称。
+ * 参数:
+ *   dark_name  - 暗色主题名称 (输出, 至少 64 字节)
+ *   light_name - 亮色主题名称 (输出, 至少 64 字节)
+ *   current_hour - 当前小时 (0-23), -1 表示使用系统时间
+ * 返回: 0 使用 dark_name, 1 使用 light_name
+ */
+int fr_theme_auto_detect(char *dark_name, char *light_name, int current_hour)
+{
+    /* 默认主题名称 */
+    const char *dn = "dark";
+    const char *ln = "light";
+
+    /* 如果传入了 current_hour < 0, 使用系统时间 */
+    if (current_hour < 0) {
+        /* 系统时间暂不可用, 默认白天 */
+        current_hour = 12;
+    }
+
+    /* 复制主题名称到输出缓冲区 */
+    {
+        int i;
+        for (i = 0; i < 63 && dn[i]; i++)
+            dark_name[i] = dn[i];
+        dark_name[i] = '\0';
+        for (i = 0; i < 63 && ln[i]; i++)
+            light_name[i] = ln[i];
+        light_name[i] = '\0';
+    }
+
+    /* 6:00-18:00 = 亮色, 18:00-6:00 = 暗色 */
+    return (current_hour >= 6 && current_hour < 18) ? 1 : 0;
 }

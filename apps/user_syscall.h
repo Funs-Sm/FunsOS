@@ -42,6 +42,7 @@
 #define SYS_SETSOCKOPT    36
 #define SYS_GETSOCKOPT    37
 #define SYS_SENDFILE      38
+#define SYS_GET_TICKS     140
 #define SYS_MOUNT         42
 #define SYS_EXECVE        43
 
@@ -331,6 +332,11 @@ static inline int sys_getsockopt(int fd, int level, int optname, void *optval, u
 static inline int sys_sendfile(int out_fd, int in_fd, unsigned long long *offset, unsigned int count)
 {
     return syscall4(SYS_SENDFILE, out_fd, in_fd, (int)offset, (int)count);
+}
+
+static inline uint32_t sys_get_ticks(void)
+{
+    return (uint32_t)syscall0(SYS_GET_TICKS);
 }
 
 #endif

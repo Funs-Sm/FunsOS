@@ -286,3 +286,12 @@ void usb_hotplug_poll(void) {
         }
     }
 }
+
+/* Wrapper for drivers/usb/usb.h API compatibility */
+int32_t usb_control_msg(usb_device_t *dev, uint8_t request_type,
+                        uint8_t request, uint16_t value, uint16_t index,
+                        void *buf, uint16_t len) {
+    if (!dev) return -1;
+    return usb_control_transfer(dev->address, request_type, request,
+                                value, index, buf, len);
+}
