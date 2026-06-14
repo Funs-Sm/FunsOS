@@ -166,6 +166,29 @@ pcb_t *process_create_kernel(const char *name, void (*entry)(void))
     return proc;
 }
 
+/* Adopt the currently running kernel context as a proper process.
+ * This allows the scheduler to save/restore kernel_main's context
+ * when switching to user processes. */
+pcb_t *process_adopt_current(const char *name)
+{
+    pcb_t *proc = create_process_common(name);
+    if (!proc) return NULL;
+
+    /* Use the current kernel stack (entry.asm's boot stack) */
+    uint32_t esp;
+    asm volatile("mov %%esp, %0" : "=r"(esp));
+    proc->kernel_stack = 0x100000 + 32768;  /* top of entry.asm's boot stack */
+    proc->kernel_esp = esp;                  /* current ESP */
+    proc->user_stack = 0;
+    proc->page_dir = vmm_get_current_dir();
+    proc->state = PROCESS_RUNNING;
+    proc->sched_policy = PROCESS_NORMAL;
+    proc->priority = SCHED_PRIORITY_MIN;
+    proc->effective_priority = SCHED_PRIORITY_MIN;
+
+    return proc;
+}
+
 pcb_t *process_create(const char *name, uint8_t *elf_data, uint32_t elf_size)
 {
     if (!elf_validate(elf_data, elf_size)) return (void *)0;

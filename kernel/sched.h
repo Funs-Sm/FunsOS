@@ -39,6 +39,7 @@ typedef struct {
 
 void sched_init(void);
 void sched_create_idle_task(void);
+void sched_set_current(pcb_t *proc);
 void sched_add(pcb_t *proc);
 void sched_remove(pcb_t *proc);
 void sched_tick(void);

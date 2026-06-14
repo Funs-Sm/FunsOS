@@ -51,6 +51,7 @@ typedef struct {
     const char *src;
     uint32_t pos;
     token_t current;
+    int line;
 } lexer_t;
 
 /* Keywords */
@@ -75,6 +76,7 @@ static void lex_next(lexer_t *lex) {
     /* Skip whitespace */
     while (lex->src[lex->pos] == ' ' || lex->src[lex->pos] == '\t' ||
            lex->src[lex->pos] == '\n' || lex->src[lex->pos] == '\r') {
+        if (lex->src[lex->pos] == '\n') lex->line++;
         lex->pos++;
     }
 
@@ -98,6 +100,7 @@ static void lex_next(lexer_t *lex) {
     if (c == '/' && c2 == '*') {
         lex->pos += 2;
         while (lex->src[lex->pos] && !(lex->src[lex->pos] == '*' && lex->src[lex->pos + 1] == '/')) {
+            if (lex->src[lex->pos] == '\n') lex->line++;
             lex->pos++;
         }
         if (lex->src[lex->pos]) lex->pos += 2;
@@ -285,6 +288,7 @@ static void lex_next(lexer_t *lex) {
 static void lex_init(lexer_t *lex, const char *src) {
     lex->src = src;
     lex->pos = 0;
+    lex->line = 1;
     lex_next(lex);
 }
 
@@ -301,7 +305,7 @@ typedef enum {
     AST_FUNC_DECL, AST_FUNC_CALL,
     AST_ARRAY_ACCESS, AST_DEREF, AST_ADDR,
     AST_TERNARY, AST_SIZEOF, AST_CAST,
-    AST_INC_DEC
+    AST_INC_DEC, AST_SWITCH, AST_CASE, AST_DEFAULT
 } ast_type_t;
 
 typedef struct ast_node {
@@ -311,11 +315,12 @@ typedef struct ast_node {
     char str_val[256];
     struct ast_node *left;
     struct ast_node *right;
-    struct ast_node *cond;    /* for ternary, for-loop, if */
-    struct ast_node *body;    /* for loops, functions */
+    struct ast_node *cond;    /* for ternary, for-loop, if, switch */
+    struct ast_node *body;    /* for loops, functions, case body */
     struct ast_node *else_body;
     struct ast_node *next;    /* linked list in block */
     token_type_t op;          /* for binary/unary ops */
+    int line;                 /* source line number */
 } ast_node_t;
 
 static ast_node_t *ast_new(ast_type_t type) {
@@ -343,6 +348,7 @@ static void ast_free(ast_node_t *node) {
 typedef struct {
     lexer_t lex;
     int error;
+    int error_line;
 } parser_t;
 
 static ast_node_t *parse_expr(parser_t *p);
@@ -355,6 +361,9 @@ static int expect(parser_t *p, token_type_t t) {
         return 1;
     }
     p->error = 1;
+    p->error_line = p->lex.line;
+    printf("Error at line %d: expected token type %d, got '%s'\n",
+           p->lex.line, (int)t, p->lex.current.value);
     return 0;
 }
 
@@ -831,7 +840,26 @@ static ast_node_t *parse_stmt(parser_t *p) {
         lex_next(&p->lex);
         ast_node_t *n = ast_new(AST_FOR);
         expect(p, TOK_LPAREN);
-        n->left = parse_expr(p);   /* init */
+        /* Init: could be a variable declaration or an expression */
+        if (is_type_token(p)) {
+            /* Parse as variable declaration */
+            ast_node_t *decl = ast_new(AST_VAR_DECL);
+            while (is_type_token(p)) {
+                lex_next(&p->lex);
+            }
+            if (p->lex.current.type == TOK_IDENT) {
+                strncpy(decl->name, p->lex.current.value, 63);
+                decl->name[63] = '\0';
+                lex_next(&p->lex);
+            }
+            if (p->lex.current.type == TOK_ASSIGN) {
+                lex_next(&p->lex);
+                decl->left = parse_expr(p);
+            }
+            n->left = decl;
+        } else {
+            n->left = parse_expr(p);   /* init */
+        }
         expect(p, TOK_SEMI);
         n->cond = parse_expr(p);   /* condition */
         expect(p, TOK_SEMI);
@@ -886,12 +914,26 @@ static ast_node_t *parse_stmt(parser_t *p) {
 
         if (p->lex.current.type == TOK_LPAREN) {
             lex_next(&p->lex);
-            /* Parse parameters (skip them for now) */
-            int paren_depth = 1;
-            while (paren_depth > 0 && p->lex.current.type != TOK_EOF) {
-                if (p->lex.current.type == TOK_LPAREN) paren_depth++;
-                else if (p->lex.current.type == TOK_RPAREN) paren_depth--;
-                if (paren_depth > 0) lex_next(&p->lex);
+            /* Parse parameters as "type name" pairs */
+            char params[8][64];
+            int n_params = 0;
+            while (p->lex.current.type != TOK_RPAREN && p->lex.current.type != TOK_EOF) {
+                /* Skip type keywords */
+                while (is_type_token(p)) {
+                    lex_next(&p->lex);
+                }
+                /* Parameter name */
+                if (p->lex.current.type == TOK_IDENT && n_params < 8) {
+                    strncpy(params[n_params], p->lex.current.value, 63);
+                    params[n_params][63] = '\0';
+                    n_params++;
+                    lex_next(&p->lex);
+                }
+                if (p->lex.current.type == TOK_COMMA) {
+                    lex_next(&p->lex);
+                } else {
+                    break;
+                }
             }
             if (p->lex.current.type == TOK_RPAREN) lex_next(&p->lex);
 
@@ -900,6 +942,16 @@ static ast_node_t *parse_stmt(parser_t *p) {
                 ast_node_t *n = ast_new(AST_FUNC_DECL);
                 strncpy(n->name, name, 63);
                 n->name[63] = '\0';
+                n->int_val = n_params;
+                /* Store params in a linked list via left pointer */
+                ast_node_t **ptail = &n->left;
+                for (int i = 0; i < n_params; i++) {
+                    ast_node_t *pn = ast_new(AST_IDENT);
+                    strncpy(pn->name, params[i], 63);
+                    pn->name[63] = '\0';
+                    *ptail = pn;
+                    ptail = &pn->next;
+                }
                 lex_next(&p->lex);
                 n->body = parse_block(p);
                 expect(p, TOK_RBRACE);
@@ -910,6 +962,61 @@ static ast_node_t *parse_stmt(parser_t *p) {
         /* Not a function definition, restore and parse as expression */
         p->lex.pos = save_pos;
         p->lex.current = save_tok;
+    }
+
+    /* Switch statement */
+    if (p->lex.current.type == TOK_KEYWORD && strcmp(p->lex.current.value, "switch") == 0) {
+        lex_next(&p->lex);
+        ast_node_t *n = ast_new(AST_SWITCH);
+        expect(p, TOK_LPAREN);
+        n->cond = parse_expr(p);
+        expect(p, TOK_RPAREN);
+        expect(p, TOK_LBRACE);
+        /* Parse case/default clauses as linked list via body */
+        ast_node_t **ctail = &n->body;
+        while (p->lex.current.type != TOK_RBRACE && p->lex.current.type != TOK_EOF) {
+            if (p->lex.current.type == TOK_KEYWORD && strcmp(p->lex.current.value, "case") == 0) {
+                lex_next(&p->lex);
+                ast_node_t *c = ast_new(AST_CASE);
+                c->left = parse_expr(p);
+                expect(p, TOK_COLON);
+                /* Parse statements until next case/default/} */
+                ast_node_t **stail = &c->body;
+                while (p->lex.current.type != TOK_RBRACE &&
+                       !(p->lex.current.type == TOK_KEYWORD &&
+                         (strcmp(p->lex.current.value, "case") == 0 ||
+                          strcmp(p->lex.current.value, "default") == 0)) &&
+                       p->lex.current.type != TOK_EOF) {
+                    ast_node_t *s = parse_stmt(p);
+                    if (s) { *stail = s; stail = &s->next; }
+                    else break;
+                }
+                *ctail = c;
+                ctail = &c->next;
+            } else if (p->lex.current.type == TOK_KEYWORD && strcmp(p->lex.current.value, "default") == 0) {
+                lex_next(&p->lex);
+                ast_node_t *c = ast_new(AST_DEFAULT);
+                expect(p, TOK_COLON);
+                /* Parse statements until next case/default/} */
+                ast_node_t **stail = &c->body;
+                while (p->lex.current.type != TOK_RBRACE &&
+                       !(p->lex.current.type == TOK_KEYWORD &&
+                         (strcmp(p->lex.current.value, "case") == 0 ||
+                          strcmp(p->lex.current.value, "default") == 0)) &&
+                       p->lex.current.type != TOK_EOF) {
+                    ast_node_t *s = parse_stmt(p);
+                    if (s) { *stail = s; stail = &s->next; }
+                    else break;
+                }
+                *ctail = c;
+                ctail = &c->next;
+            } else {
+                /* Skip unexpected tokens */
+                lex_next(&p->lex);
+            }
+        }
+        expect(p, TOK_RBRACE);
+        return n;
     }
 
     /* Expression statement */
@@ -936,6 +1043,7 @@ typedef struct {
     int32_t int_val;
     void *ptr_val;
     char str_val[256];
+    int scope_depth;
 } ci_var_t;
 
 typedef struct {
@@ -957,6 +1065,10 @@ typedef struct {
     /* String storage */
     char *strings[CI_MAX_STRINGS];
     uint32_t string_count;
+    /* Scope stack */
+    int scope_depth;
+    /* Error reporting */
+    int error_line;
 } interp_t;
 
 static interp_t ci_interp;
@@ -966,7 +1078,8 @@ void cinterp_init(void) {
 }
 
 static ci_var_t *find_var(const char *name) {
-    for (uint32_t i = 0; i < ci_interp.var_count; i++) {
+    /* Search from end to find most recent (innermost scope) first */
+    for (int32_t i = (int32_t)ci_interp.var_count - 1; i >= 0; i--) {
         if (strcmp(ci_interp.vars[i].name, name) == 0) {
             return &ci_interp.vars[i];
         }
@@ -976,10 +1089,7 @@ static ci_var_t *find_var(const char *name) {
 
 static ci_var_t *create_var(const char *name, val_type_t type) {
     if (ci_interp.var_count >= CI_MAX_VARS) return 0;
-    /* Check if already exists */
-    ci_var_t *existing = find_var(name);
-    if (existing) return existing;
-
+    /* Allow shadowing: always create new entry at current scope depth */
     ci_var_t *v = &ci_interp.vars[ci_interp.var_count++];
     strncpy(v->name, name, 63);
     v->name[63] = '\0';
@@ -987,6 +1097,7 @@ static ci_var_t *create_var(const char *name, val_type_t type) {
     v->int_val = 0;
     v->ptr_val = 0;
     v->str_val[0] = '\0';
+    v->scope_depth = ci_interp.scope_depth;
     return v;
 }
 
@@ -1008,6 +1119,20 @@ static char *store_string(const char *s) {
     memcpy(copy, s, len + 1);
     ci_interp.strings[ci_interp.string_count++] = copy;
     return copy;
+}
+
+static void scope_push(void) {
+    ci_interp.scope_depth++;
+}
+
+static void scope_pop(void) {
+    if (ci_interp.scope_depth <= 0) return;
+    ci_interp.scope_depth--;
+    /* Remove all variables at the old scope depth */
+    while (ci_interp.var_count > 0 &&
+           ci_interp.vars[ci_interp.var_count - 1].scope_depth > ci_interp.scope_depth) {
+        ci_interp.var_count--;
+    }
 }
 
 /* Forward declaration */
@@ -1274,19 +1399,28 @@ static int32_t eval_expr(ast_node_t *node) {
             /* User-defined function */
             ci_func_t *func = find_func(fname);
             if (func && func->body) {
-                /* Save current variables */
-                ci_var_t saved_vars[CI_MAX_VARS];
-                uint32_t saved_count = ci_interp.var_count;
-                memcpy(saved_vars, ci_interp.vars, sizeof(ci_interp.vars));
-
-                /* Set up parameters */
-                ci_interp.var_count = 0;
+                /* Evaluate all arguments first (in caller's scope) */
+                int32_t arg_vals[8];
                 ast_node_t *arg = node->body;
-                for (uint32_t i = 0; i < func->n_params && arg; i++) {
-                    int32_t val = eval_expr(arg);
-                    ci_var_t *pv = create_var(func->params[i], VAL_INT);
-                    if (pv) pv->int_val = val;
+                uint32_t n_args = 0;
+                while (arg && n_args < func->n_params) {
+                    arg_vals[n_args] = eval_expr(arg);
+                    n_args++;
                     arg = arg->next;
+                }
+
+                /* Save current scope depth and variables count */
+                int saved_scope_depth = ci_interp.scope_depth;
+                uint32_t saved_var_count = ci_interp.var_count;
+
+                /* Create a new scope for the function */
+                ci_interp.scope_depth = 0;
+                ci_interp.var_count = 0;
+
+                /* Set up parameters as local variables */
+                for (uint32_t i = 0; i < n_args; i++) {
+                    ci_var_t *pv = create_var(func->params[i], VAL_INT);
+                    if (pv) pv->int_val = arg_vals[i];
                 }
 
                 /* Execute function body */
@@ -1296,9 +1430,9 @@ static int32_t eval_expr(ast_node_t *node) {
                 int32_t result = ci_interp.return_val;
                 ci_interp.returning = 0;
 
-                /* Restore variables */
-                memcpy(ci_interp.vars, saved_vars, sizeof(ci_interp.vars));
-                ci_interp.var_count = saved_count;
+                /* Restore scope */
+                ci_interp.scope_depth = saved_scope_depth;
+                ci_interp.var_count = saved_var_count;
 
                 return result;
             }
@@ -1382,14 +1516,17 @@ static void exec_stmt(ast_node_t *node) {
         }
 
         case AST_IF:
+            scope_push();
             if (eval_expr(node->cond)) {
                 exec_stmt(node->body);
             } else if (node->else_body) {
                 exec_stmt(node->else_body);
             }
+            scope_pop();
             break;
 
         case AST_WHILE:
+            scope_push();
             while (eval_expr(node->cond) && !ci_interp.returning) {
                 ci_interp.breaking = 0;
                 ci_interp.continuing = 0;
@@ -1403,9 +1540,11 @@ static void exec_stmt(ast_node_t *node) {
                     continue;
                 }
             }
+            scope_pop();
             break;
 
         case AST_DO_WHILE:
+            scope_push();
             do {
                 ci_interp.breaking = 0;
                 ci_interp.continuing = 0;
@@ -1418,11 +1557,19 @@ static void exec_stmt(ast_node_t *node) {
                     ci_interp.continuing = 0;
                 }
             } while (eval_expr(node->cond) && !ci_interp.returning);
+            scope_pop();
             break;
 
         case AST_FOR: {
-            /* Save and create scope for init */
-            if (node->left) eval_expr(node->left);
+            scope_push();
+            /* Init: could be a var decl or expression */
+            if (node->left) {
+                if (node->left->type == AST_VAR_DECL) {
+                    exec_stmt(node->left);
+                } else {
+                    eval_expr(node->left);
+                }
+            }
             while (1) {
                 if (node->cond && !eval_expr(node->cond)) break;
                 ci_interp.breaking = 0;
@@ -1438,15 +1585,18 @@ static void exec_stmt(ast_node_t *node) {
                 if (node->right) eval_expr(node->right);
                 if (ci_interp.returning) break;
             }
+            scope_pop();
             break;
         }
 
         case AST_BLOCK: {
+            scope_push();
             ast_node_t *stmt = node->body;
             while (stmt && !ci_interp.returning && !ci_interp.breaking && !ci_interp.continuing) {
                 exec_stmt(stmt);
                 stmt = stmt->next;
             }
+            scope_pop();
             break;
         }
 
@@ -1471,7 +1621,59 @@ static void exec_stmt(ast_node_t *node) {
                 strncpy(f->name, node->name, 63);
                 f->name[63] = '\0';
                 f->body = node->body;
-                f->n_params = 0;
+                f->n_params = (uint32_t)node->int_val;
+                /* Extract parameter names from linked list in left */
+                ast_node_t *pn = node->left;
+                for (uint32_t i = 0; i < f->n_params && pn; i++) {
+                    strncpy(f->params[i], pn->name, 63);
+                    f->params[i][63] = '\0';
+                    pn = pn->next;
+                }
+            }
+            break;
+        }
+
+        case AST_SWITCH: {
+            int32_t switch_val = eval_expr(node->cond);
+            ast_node_t *clause = node->body;
+            int matched = 0;
+            int fell_through = 0;
+            ast_node_t *default_clause = 0;
+
+            /* First pass: find matching case */
+            while (clause && !ci_interp.returning) {
+                if (clause->type == AST_CASE) {
+                    int32_t case_val = eval_expr(clause->left);
+                    if (case_val == switch_val) {
+                        matched = 1;
+                        fell_through = 1;
+                    }
+                } else if (clause->type == AST_DEFAULT) {
+                    default_clause = clause;
+                }
+                if (fell_through) break;
+                clause = clause->next;
+            }
+
+            /* If no case matched, try default */
+            if (!matched && default_clause) {
+                clause = default_clause;
+                fell_through = 1;
+            }
+
+            /* Execute from matched clause onwards (fall-through) */
+            while (clause && fell_through && !ci_interp.returning) {
+                /* Execute statements in this clause */
+                ast_node_t *stmt = clause->body;
+                while (stmt && !ci_interp.returning && !ci_interp.breaking && !ci_interp.continuing) {
+                    exec_stmt(stmt);
+                    stmt = stmt->next;
+                }
+                if (ci_interp.breaking) {
+                    ci_interp.breaking = 0;
+                    break;
+                }
+                clause = clause->next;
             }
             break;
         }
@@ -1489,6 +1691,7 @@ int cinterp_exec(const char *code) {
     parser_t parser;
     lex_init(&parser.lex, code);
     parser.error = 0;
+    parser.error_line = 0;
 
     while (parser.lex.current.type != TOK_EOF && !parser.error) {
         ast_node_t *stmt = parse_stmt(&parser);
@@ -1498,6 +1701,10 @@ int cinterp_exec(const char *code) {
         } else {
             break;
         }
+    }
+
+    if (parser.error && parser.error_line > 0) {
+        ci_interp.error_line = parser.error_line;
     }
 
     return parser.error ? -1 : 0;
@@ -1536,7 +1743,7 @@ static int ci_read_line(char *buf, uint32_t size) {
 
 void cinterp_repl(void) {
     printf("C Interpreter REPL (type 'exit' to quit)\n");
-    printf("Supports: int/char vars, if/else, while, for, functions, printf\n\n");
+    printf("Supports: int/char vars, if/else, while, for, switch/case, functions, printf\n\n");
 
     char line[512];
     char code_buf[4096];

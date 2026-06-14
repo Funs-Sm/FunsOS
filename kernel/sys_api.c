@@ -8,6 +8,7 @@
 #include "pmm.h"
 #include "vfs.h"
 #include "process.h"
+#include "sched.h"
 #include "timer.h"
 #include "version.h"
 #include "display_server.h"
@@ -172,9 +173,32 @@ uint32_t sys_get_pid(void) {
 
 int sys_spawn(const char *path, const char *args) {
     if (!path) return -1;
-    /* 尝试通过 process_create 创建进程 - 简化实现 */
+
+    /* Open the executable file via VFS */
+    file_t *file = NULL;
+    if (vfs_open(path, 0, &file) != 0 || !file) return -1;
+
+    /* Get file size from inode */
+    uint32_t size = file->inode ? file->inode->size : 0;
+    if (size == 0 || size > 16 * 1024 * 1024) { vfs_close(file); return -1; }
+
+    /* Read the entire file into a kernel buffer */
+    uint8_t *buf = (uint8_t *)kmalloc(size);
+    if (!buf) { vfs_close(file); return -1; }
+    int nread = vfs_read(file, buf, size);
+    vfs_close(file);
+    if (nread <= 0) { kfree(buf); return -1; }
+
+    /* Create a new process from the ELF data */
+    pcb_t *proc = process_create(path, buf, (uint32_t)nread);
+    kfree(buf);
+    if (!proc) return -1;
+
+    /* Add to scheduler */
+    sched_add(proc);
+
     (void)args;
-    return -1;  /* 暂不支持完整进程创建 */
+    return proc->pid;
 }
 
 int sys_terminate(uint32_t pid) {

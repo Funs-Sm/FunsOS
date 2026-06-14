@@ -30,6 +30,7 @@
 #include "fb_console.h"
 #include "shell.h"
 #include "keyboard.h"
+#include "mouse.h"
 #include "rtc.h"
 #include "boot_info.h"
 #include "driver_manager.h"
@@ -128,6 +129,18 @@ void kernel_main(void) {
     init_syscall();
     klog_info("Scheduler and process subsystem initialized");
 
+    /* Register kernel_main as a proper kernel process so the scheduler
+     * can save/restore its context when switching to user processes. */
+    {
+        extern pcb_t *process_adopt_current(const char *name);
+        pcb_t *init_proc = process_adopt_current("init");
+        if (init_proc) {
+            sched_add(init_proc);
+            sched_set_current(init_proc);
+            klog_info("Init process registered (pid=%d)", init_proc->pid);
+        }
+    }
+
     net_init();
     arp_init();
     ip_init();
@@ -202,6 +215,7 @@ void kernel_main(void) {
     klog_info("VFS, initrd and tarfs initialized");
 
     keyboard_init();
+    mouse_init();
     rtc_init();
     driver_manager_init();
     disk_manager_init();

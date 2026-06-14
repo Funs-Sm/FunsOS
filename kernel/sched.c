@@ -158,6 +158,10 @@ void sched_create_idle_task(void) {
     }
 }
 
+void sched_set_current(pcb_t *proc) {
+    sched.current = proc;
+}
+
 void sched_add(pcb_t *proc) {
     if (!proc) return;
 
@@ -216,6 +220,11 @@ void sched_tick(void) {
     sched_wakeup_sleepers();
 
     if (!sched.current) {
+        /* No process currently running - try to schedule the first one */
+        if (pick_next_process() || sched.idle_task) {
+            sched.in_schedule = 0;
+            schedule();
+        }
         return;
     }
 
@@ -304,18 +313,12 @@ void schedule(void) {
          * the stack was set up so that RET jumps to
          * process_first_run which enters user mode via iret. */
         context_switch(&prev->kernel_esp, next->kernel_esp);
-    } else if (!prev && next) {
-        /* First ever context switch - no prev to save, just jump */
-        asm volatile(
-            "mov %0, %%esp\n\t"
-            "pop %%edi\n\t"
-            "pop %%esi\n\t"
-            "pop %%ebx\n\t"
-            "pop %%ebp\n\t"
-            "ret\n\t"
-            : : "r"(next->kernel_esp) : "memory"
-        );
     }
+    /* If prev == NULL (kernel_main on boot stack), we don't context-switch.
+     * The new process will be picked up on the next timer tick when
+     * kernel_main is interrupted and the scheduler runs again.
+     * Since sched.current is now set to 'next', the next tick will
+     * properly save kernel_main's state and switch to the new process. */
 }
 
 void sched_block(pcb_t *proc, int reason) {
@@ -396,7 +399,8 @@ int sched_set_priority(pcb_t *proc, uint32_t priority) {
 
 void sched_yield(void) {
     pcb_t *current = sched_get_current();
-    if (current && current->sched_policy & PROCESS_NORMAL) {
+    if (!current) return;  /* No current process - nothing to yield */
+    if (current->sched_policy & PROCESS_NORMAL) {
         if (current->queue_level > 0 && current->ticks_used < current->time_slice / 2) {
             current->queue_level--;
         }

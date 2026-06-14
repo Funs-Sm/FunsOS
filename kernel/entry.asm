@@ -95,5 +95,5 @@ message_canary: DB 'FATAL: Stack buffer overflow detected!', 0
 [SECTION .bss]
 
 ALIGN 16
-resb 8192
+resb 32768
 stack_top:
