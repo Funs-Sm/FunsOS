@@ -1,6 +1,6 @@
 #!/bin/bash
 echo "=========================================="
-echo "  Funs Core v0.5 - Quick Run Script"
+echo "  Funs Core v0.6 - Quick Run Script"
 echo "=========================================="
 echo
 

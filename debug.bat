@@ -1,6 +1,6 @@
 @echo off
 echo ==========================================
-echo   Funs Core v0.5 - Debug Script
+echo   Funs Core v0.6 - Debug Script
 echo ==========================================
 echo.
 

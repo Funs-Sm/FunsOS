@@ -99,7 +99,7 @@ void funsos_surface_set_pixel(funsos_surface_t *surf, int x, int y, funsos_color
     surf->pixels[y * surf->width + x] = color;
 }
 
-int funsos_blit_surface(funsos_window_t win, funsos_surface_t *surf, int dx, int dy)
+int funsos_blit_surface(uint32_t win_handle, funsos_surface_t *surf, int dx, int dy)
 {
     funsos_gfx_context_t win_ctx;
     uint32_t sw, sh;
@@ -111,7 +111,7 @@ int funsos_blit_surface(funsos_window_t win, funsos_surface_t *surf, int dx, int
 
     /* 获取窗口图形上下文 */
     {
-        void *ctx_ptr = funsos_get_window_context(win);
+        void *ctx_ptr = funsos_get_window_context(win_handle);
         if (ctx_ptr == NULL)
             return -1;
         funsos_memcpy(&win_ctx, ctx_ptr, sizeof(funsos_gfx_context_t));
@@ -876,13 +876,13 @@ int funsos_unload_font(funsos_font_t font)
     return 0;
 }
 
-int funsos_draw_text_ex(funsos_window_t win, funsos_font_t font, int x, int y,
+int funsos_draw_text_ex(uint32_t win_handle, funsos_font_t font, int x, int y,
                         const char *text, funsos_color_t color, uint32_t style)
 {
     (void)font;
     (void)style;
     /* 回退到系统文本绘制 */
-    return funsos_draw_text(win, x, y, text, color);
+    return funsos_draw_text(win_handle, x, y, text, color);
 }
 
 int funsos_measure_text(funsos_font_t font, const char *text,

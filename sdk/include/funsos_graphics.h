@@ -9,11 +9,8 @@
 
 #include "stdint.h"
 
-/* 前向声明: funsos_window_t 完整定义在 funsos_window.h */
-#ifndef FUNSOS_WINDOW_T_DEFINED
-#define FUNSOS_WINDOW_T_DEFINED
-typedef struct funsos_window funsos_window_t;
-#endif
+/* 前向声明: funsos_window 完整定义在 funsos_window.h */
+struct funsos_window;
 
 /* ---- 颜色定义 ---- */
 #define FUNSOS_COLOR_BLACK      0x000000
@@ -77,35 +74,35 @@ typedef struct {
  * 参数: win - 窗口句柄; x, y, w, h - 矩形位置和尺寸; color - 颜色
  * 返回: 0 成功, -1 失败
  */
-int funsos_draw_rect(funsos_window_t win, int x, int y, int w, int h, funsos_color_t color);
+int funsos_draw_rect(uint32_t win_handle, int x, int y, int w, int h, funsos_color_t color);
 
 /*
  * 在窗口上绘制文本
  * 参数: win - 窗口句柄; x, y - 文本位置; text - 文本内容; fg - 前景色
  * 返回: 0 成功, -1 失败
  */
-int funsos_draw_text(funsos_window_t win, int x, int y, const char *text, funsos_color_t fg);
+int funsos_draw_text(uint32_t win_handle, int x, int y, const char *text, funsos_color_t fg);
 
 /*
  * 在窗口上绘制直线
  * 参数: win - 窗口句柄; x1, y1 - 起点; x2, y2 - 终点; color - 颜色
  * 返回: 0 成功, -1 失败
  */
-int funsos_draw_line(funsos_window_t win, int x1, int y1, int x2, int y2, funsos_color_t color);
+int funsos_draw_line(uint32_t win_handle, int x1, int y1, int x2, int y2, funsos_color_t color);
 
 /*
  * 用指定颜色填充整个窗口
  * 参数: win - 窗口句柄; bg - 背景色
  * 返回: 0 成功, -1 失败
  */
-int funsos_fill_window(funsos_window_t win, funsos_color_t bg);
+int funsos_fill_window(uint32_t win_handle, funsos_color_t bg);
 
 /*
  * 获取窗口的图形上下文
  * 参数: win - 窗口句柄
  * 返回: 图形上下文指针, NULL 表示失败
  */
-void *funsos_get_window_context(funsos_window_t win);
+void *funsos_get_window_context(uint32_t win_handle);
 
 /*
  * 绘制圆形轮廓
@@ -306,7 +303,7 @@ void funsos_surface_set_pixel(funsos_surface_t *surf, int x, int y, funsos_color
  * 参数: win - 目标窗口; surf - 源表面; dx, dy - 目标位置
  * 返回: 0 成功, -1 失败
  */
-int funsos_blit_surface(funsos_window_t win, funsos_surface_t *surf, int dx, int dy);
+int funsos_blit_surface(uint32_t win_handle, funsos_surface_t *surf, int dx, int dy);
 
 /* ---- 纹理(Texture)管理 ---- */
 
@@ -481,7 +478,7 @@ int funsos_unload_font(funsos_font_t font);
  *       text - 文本内容; color - 颜色; style - 样式标志
  * 返回: 绘制的字符数, -1 失败
  */
-int funsos_draw_text_ex(funsos_window_t win, funsos_font_t font,
+int funsos_draw_text_ex(uint32_t win_handle, funsos_font_t font,
                         int x, int y, const char *text,
                         funsos_color_t color, uint32_t style);
 

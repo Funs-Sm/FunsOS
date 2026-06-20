@@ -1,6 +1,6 @@
 #!/bin/bash
 echo "=========================================="
-echo "  Funs Core v0.5 - Package Script"
+echo "  Funs Core v0.6 - Package Script"
 echo "=========================================="
 echo
 
@@ -13,7 +13,7 @@ if [ $? -ne 0 ]; then
 fi
 
 # Create package directory
-PKG_DIR="funs-core-0.5"
+PKG_DIR="funs-core-0.6"
 rm -rf "$PKG_DIR"
 mkdir -p "$PKG_DIR/boot"
 mkdir -p "$PKG_DIR/kernel"
@@ -31,7 +31,7 @@ chmod +x "$PKG_DIR/run.sh" "$PKG_DIR/debug.sh"
 # Create README
 echo "[3/4] Creating README..."
 cat > "$PKG_DIR/README.txt" << 'READMEEOF'
-Funs Core v0.5
+Funs Core v0.6
 ================
 
 A 32-bit x86 operating system kernel.

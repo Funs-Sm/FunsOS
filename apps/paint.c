@@ -2,6 +2,7 @@
 #include "string.h"
 #include "gui_common.h"
 #include "gfx_adapter.h"
+#include "mini_sdl.h"
 
 #define WIN_W 640
 #define WIN_H 500
@@ -98,6 +99,7 @@ static void clear_canvas(void)
 
 static void draw_window(void)
 {
+    /* Drawing primitives available via mini_sdl: sdl_draw_line, sdl_draw_circle, sdl_fill_circle, sdl_draw_triangle */
     int i, j;
     fb_draw_rect(win_x, win_y, WIN_W, WIN_H, COLOR_BORDER);
     fb_draw_rect(win_x + 2, win_y + 2, WIN_W - 4, TITLE_H, COLOR_TITLEBAR);

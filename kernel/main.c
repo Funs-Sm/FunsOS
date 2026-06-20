@@ -70,6 +70,7 @@
 
 #include "vga_text.h"
 #include "serial.h"
+#include "service_registry.h"
 
 static inline void sti(void) {
     asm volatile("sti");
@@ -463,7 +464,6 @@ void kernel_main(void) {
     /* 初始化统一系统服务 */
     klog_info("Initializing unified system services...");
     extern int system_services_init(void);
-    extern int register_core_services(void);
     if (system_services_init() == 0) {
         register_core_services();
         klog_info("System services framework initialized");
@@ -494,6 +494,8 @@ void kernel_main(void) {
         klog_info("GUI: VBE not available, falling back to shell");
         shell_run();
     }
+
+    print_service_status();
 
     /* 不应到达此处 */
     klog_info("System halted");

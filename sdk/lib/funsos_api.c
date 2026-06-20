@@ -177,72 +177,74 @@ static inline int syscall5(int num, int a1, int a2, int a3, int a4, int a5)
 
 funsos_window_t funsos_create_window(int x, int y, int w, int h, const char *title)
 {
-    return (funsos_window_t)syscall5(SYS_CREATE_WINDOW,
-                                      x, y, w, h, (int)title);
+    funsos_window_t win = {0};
+    win.handle = (uint32_t)syscall5(SYS_CREATE_WINDOW,
+                                     x, y, w, h, (int)title);
+    return win;
 }
 
 int funsos_destroy_window(funsos_window_t win)
 {
-    return syscall1(SYS_DESTROY_WINDOW, (int)win);
+    return syscall1(SYS_DESTROY_WINDOW, (int)win.handle);
 }
 
 int funsos_set_window_title(funsos_window_t win, const char *title)
 {
-    return syscall2(SYS_SET_TITLE, (int)win, (int)title);
+    return syscall2(SYS_SET_TITLE, (int)win.handle, (int)title);
 }
 
 int funsos_invalidate_window(funsos_window_t win)
 {
-    return syscall1(SYS_INVALIDATE, (int)win);
+    return syscall1(SYS_INVALIDATE, (int)win.handle);
 }
 
 void funsos_show_window(funsos_window_t win)
 {
-    syscall1(SYS_SHOW_WINDOW, (int)win);
+    syscall1(SYS_SHOW_WINDOW, (int)win.handle);
 }
 
 void funsos_hide_window(funsos_window_t win)
 {
-    syscall1(SYS_HIDE_WINDOW, (int)win);
+    syscall1(SYS_HIDE_WINDOW, (int)win.handle);
 }
 
 void funsos_move_window(funsos_window_t win, int x, int y)
 {
-    syscall3(SYS_MOVE_WINDOW, (int)win, x, y);
+    syscall3(SYS_MOVE_WINDOW, (int)win.handle, x, y);
 }
 
 void funsos_resize_window(funsos_window_t win, int w, int h)
 {
-    syscall3(SYS_RESIZE_WINDOW, (int)win, w, h);
+    syscall3(SYS_RESIZE_WINDOW, (int)win.handle, w, h);
 }
 
-void *funsos_get_window_context(funsos_window_t win)
+void *funsos_get_window_context(uint32_t win_handle)
 {
-    return (void *)syscall1(SYS_GET_CONTEXT, (int)win);
+    return (void *)syscall1(SYS_GET_CONTEXT, (int)win_handle);
 }
 
 /* ================================================================
  *  图形绘制 API 实现
  * ================================================================ */
 
-int funsos_draw_rect(funsos_window_t win, int x, int y, int w, int h, funsos_color_t color)
+int funsos_draw_rect(uint32_t win_handle, int x, int y, int w, int h, funsos_color_t color)
 {
-    return syscall5(SYS_DRAW_RECT, (int)win, x, y, w, (int)color);
+    return syscall5(SYS_DRAW_RECT, (int)win_handle, x, y, w, (int)color);
 }
 
-int funsos_draw_text(funsos_window_t win, int x, int y, const char *text, funsos_color_t fg)
+int funsos_draw_text(uint32_t win_handle, int x, int y, const char *text, funsos_color_t fg)
 {
-    return syscall4(SYS_DRAW_TEXT, (int)win, x, y, (int)text);
+    return syscall4(SYS_DRAW_TEXT, (int)win_handle, x, y, (int)text);
 }
 
-int funsos_draw_line(funsos_window_t win, int x1, int y1, int x2, int y2, funsos_color_t color)
+int funsos_draw_line(uint32_t win_handle, int x1, int y1, int x2, int y2, funsos_color_t color)
 {
-    return syscall5(SYS_DRAW_LINE, (int)win, x1, y1, x2, (int)color);
+    return syscall5(SYS_DRAW_LINE, (int)win_handle, x1, y1, x2, (int)color);
 }
 
-int funsos_fill_window(funsos_window_t win, funsos_color_t bg)
+int funsos_fill_window(uint32_t win_handle, funsos_color_t bg)
 {
-    return syscall2(SYS_FILL_WINDOW, (int)win, (int)bg);
+    return syscall2(SYS_FILL_WINDOW, (int)win_handle, (int)bg);
 }
 
 /* 以下 2D 绘图函数直接操作图形上下文缓冲区（用户态实现） */
@@ -312,13 +314,13 @@ void funsos_draw_rounded_rect(funsos_gfx_context_t *ctx, funsos_rect_t rect, int
     if (ctx == NULL) return;
 
     /* 4 条直线 */
-    funsos_draw_line((funsos_window_t)0, rect.x + radius, rect.y,
+    funsos_draw_line(0, rect.x + radius, rect.y,
                      rect.x + rect.w - radius, rect.y, color);
-    funsos_draw_line((funsos_window_t)0, rect.x + radius, rect.y + rect.h,
+    funsos_draw_line(0, rect.x + radius, rect.y + rect.h,
                      rect.x + rect.w - radius, rect.y + rect.h, color);
-    funsos_draw_line((funsos_window_t)0, rect.x, rect.y + radius,
+    funsos_draw_line(0, rect.x, rect.y + radius,
                      rect.x, rect.y + rect.h - radius, color);
-    funsos_draw_line((funsos_window_t)0, rect.x + rect.w, rect.y + radius,
+    funsos_draw_line(0, rect.x + rect.w, rect.y + radius,
                      rect.x + rect.w, rect.y + rect.h - radius, color);
 
     /* 4 个圆角 */
@@ -838,7 +840,7 @@ int funsos_audio_init(void)
     return syscall0(SYS_AUDIO_INIT);
 }
 
-int funsos_audio_get_device(uint32_t index, funsos_audio_device_t *info)
+int funsos_audio_get_device(uint32_t index, audio_device_t *info)
 {
     /* 通过 ioctl 获取设备信息 */
     return syscall3(SYS_IOCTL, -1, 10, (int)info);
@@ -967,6 +969,13 @@ int funs_app_cleanup(void)
  *  Global Hotkey Registration API Implementation
  * ================================================================ */
 
+/* Hotkey callback and ID types */
+typedef void (*funsos_hotkey_callback_t)(uint32_t key, uint32_t mods, void *user_data);
+typedef int funsos_hotkey_id_t;
+
+#define FUNSOS_HOTKEY_EXISTS (-2)
+#define FUNSOS_HOTKEY_FULL   (-3)
+
 /* Maximum number of hotkeys the SDK can track simultaneously */
 #define MAX_HOTKEYS 16
 
@@ -1051,6 +1060,11 @@ int funs_is_hotkey_registered(uint32_t key, uint32_t mods)
  *  Dialog / Message Box API Implementation
  * ================================================================ */
 
+/* Message box type constants */
+#define FUNSOS_MB_YESNO        0x04
+#define FUNSOS_MB_ICON_QUESTION 0x20
+#define FUNSOS_IDYES           6
+
 /*
  * funs_message_box() - Show a modal message dialog box
  */
@@ -1059,7 +1073,7 @@ int funs_message_box(funsos_window_t parent, const char *title,
 {
     /* Pack parameters: parent | type in param1, title in param2, message via buffer */
     /* Simplified: pass type as primary parameter */
-    return syscall3(SYS_MESSAGE_BOX, (int)parent, (int)type, (int)message);
+    return syscall3(SYS_MESSAGE_BOX, (int)parent.handle, (int)type, (int)message);
 }
 
 /*
@@ -1081,7 +1095,7 @@ int funs_input_dialog(funsos_window_t parent, const char *title,
 {
     if (buf == NULL || bufsize == 0) return -1;
     /* The kernel fills buf with user input; returns length or negative error */
-    int ret = syscall4(SYS_MESSAGE_BOX, (int)parent,
+    int ret = syscall4(SYS_MESSAGE_BOX, (int)parent.handle,
                        (int)prompt, (int)buf, (int)bufsize);
     return ret;
 }
@@ -1192,7 +1206,7 @@ uint32_t funs_clipboard_has_data(void)
 
 static struct {
     int                    active;
-    funsos_event_filter_t  filter_fn;
+    event_filter_t         filter_fn;
     void                  *filter_data;
     int                   priority;
 } filter_table[MAX_EVENT_FILTERS];
@@ -1202,7 +1216,7 @@ static int filters_bypassed = 0;  /* Global bypass flag */
 /*
  * funs_install_event_filter() - Install an event filter function
  */
-int funs_install_event_filter(funsos_event_filter_t filter,
+int funs_install_event_filter(event_filter_t filter,
                                void *user_data, int priority)
 {
     if (filter == NULL) return -1;
@@ -1299,8 +1313,10 @@ funsos_window_t funsos_create_window_ex(int x, int y, int w, int h,
                                         const char *title, uint32_t style)
 {
     /* Pass style as additional parameter to extended create syscall */
-    return (funsos_window_t)syscall6(SYS_WINDOW_EX, x, y, w, h,
-                                      (int)title, (int)style);
+    funsos_window_t win = {0};
+    win.handle = (uint32_t)syscall6(SYS_WINDOW_EX, x, y, w, h,
+                                     (int)title, (int)style);
+    return win;
 }
 
 /*
@@ -1308,7 +1324,7 @@ funsos_window_t funsos_create_window_ex(int x, int y, int w, int h,
  */
 int funsos_set_window_state(funsos_window_t win, int state)
 {
-    return syscall2(SYS_WINDOW_STATE, (int)win, state);
+    return syscall2(SYS_WINDOW_STATE, (int)win.handle, state);
 }
 
 /*
@@ -1316,7 +1332,7 @@ int funsos_set_window_state(funsos_window_t win, int state)
  */
 int funsos_get_window_state(funsos_window_t win)
 {
-    return syscall2(SYS_WINDOW_STATE, (int)win, -1);  /* -1 = query mode */
+    return syscall2(SYS_WINDOW_STATE, (int)win.handle, -1);  /* -1 = query mode */
 }
 
 /*
@@ -1324,7 +1340,7 @@ int funsos_get_window_state(funsos_window_t win)
  */
 int funsos_focus_window(funsos_window_t win)
 {
-    return syscall1(SYS_FOCUS_WINDOW, (int)win);
+    return syscall1(SYS_FOCUS_WINDOW, (int)win.handle);
 }
 
 /*
@@ -1332,7 +1348,7 @@ int funsos_focus_window(funsos_window_t win)
  */
 void funsos_raise_window(funsos_window_t win)
 {
-    syscall1(SYS_RAISE_WINDOW, (int)win);
+    syscall1(SYS_RAISE_WINDOW, (int)win.handle);
 }
 
 /*
@@ -1341,5 +1357,5 @@ void funsos_raise_window(funsos_window_t win)
 int funsos_get_window_rect(funsos_window_t win, funsos_rect_t *rect)
 {
     if (rect == NULL) return -1;
-    return syscall2(SYS_GET_WIN_RECT, (int)win, (int)rect);
+    return syscall2(SYS_GET_WIN_RECT, (int)win.handle, (int)rect);
 }

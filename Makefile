@@ -39,7 +39,7 @@ LIB_ASM    = lib/memops.asm lib/atomic.asm lib/string_asm.asm lib/setjmp.asm
 ALL_ASM = $(KERNEL_ASM) $(LIB_ASM)
 
 # Driver C sources (all subdirs except gpu, which is added separately)
-DRIVER_C = $(wildcard drivers/*.c) $(wildcard drivers/block/*.c) $(wildcard drivers/char/*.c) $(wildcard drivers/net/*.c) $(wildcard drivers/usb/*.c) $(wildcard drivers/video/*.c)
+DRIVER_C = $(wildcard drivers/*.c) $(wildcard drivers/block/*.c) $(wildcard drivers/char/*.c) $(filter-out drivers/net/wifi_stub.c,$(wildcard drivers/net/*.c)) $(wildcard drivers/usb/*.c) $(wildcard drivers/video/*.c)
 DRIVERS_GPU_C = $(wildcard drivers/gpu/*.c)
 DRIVERS_NET_C = $(wildcard drivers/net/*.c)
 DRIVERS_AUDIO_C = $(wildcard drivers/audio/*.c)
@@ -48,7 +48,7 @@ DRIVERS_AUDIO_C = $(wildcard drivers/audio/*.c)
 FS_C = $(wildcard fs/*.c)
 
 # Network C sources
-NET_C = $(filter-out net/wireless.c, $(wildcard net/*.c))
+NET_C = $(filter-out net/wifi_stub.c, $(wildcard net/*.c))
 
 # GUI C sources
 GUI_C = $(wildcard gui/*.c)

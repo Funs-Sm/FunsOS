@@ -2,8 +2,8 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/SDK_Version-1.2.0-blue" alt="SDK Version"/>
-  <img src="https://img.shields.io/badge/Target_OS-FunsOS_0.5-green" alt="Target OS"/>
-  <img src="https://img.shields.io/badge/Kernel-FunsCore_v0.5-orange" alt="Kernel Version"/>
+  <img src="https://img.shields.io/badge/Target_OS-FunsOS_0.6-green" alt="Target OS"/>
+  <img src="https://img.shields.io/badge/Kernel-FunsCore_v0.6-orange" alt="Kernel Version"/>
   <img src="https://img.shields.io/badge/APIs-200%2B_Syscalls-red" alt="API Count"/>
   <img src="https://img.shields.io/badge/Examples-20%2B-purple" alt="Examples Count"/>
 </p>
@@ -142,7 +142,7 @@ sdk/
 // 目标操作系统信息
 #define FUNSOS_OS_NAME       "FUNSOS"
 #define FUNSOS_KERNEL_NAME   "FunsCore"
-#define FUNSOS_KERNEL_VERSION "0.5"
+#define FUNSOS_KERNEL_VERSION "0.6"
 ```
 
 ---
