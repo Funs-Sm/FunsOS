@@ -24,6 +24,7 @@
 #include "version.h"
 #include "fpu.h"
 #include "vfs.h"
+#include "ramfs.h"
 #include "devfs.h"
 #include "initrd.h"
 #include "vesa.h"
@@ -209,6 +210,7 @@ void kernel_main(void) {
     }
 
     vfs_init();
+    ramfs_init();
     devfs_init();
     initrd_init(0, 0);
     tarfs_init();
@@ -403,7 +405,25 @@ void kernel_main(void) {
              * mode. */
             vga_text_mode3_switch();
             vga_text_init();
+
+            /* Print test patterns */
+            vga_print("VGA font test: ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789\n");
+            vga_print("Special chars: !@#$%^&*()_+-=[]{}|;':\",./<>?\n");
             vga_print(OS_STRING " initialized\n");
+
+            serial_print(COM1, "[VGA-TEXT] Font test output done\n");
+
+            /* Dump VGA buffer to serial before diagnostic */
+            vga_text_dump_screen();
+
+            /* Run comprehensive font diagnostic: prints full ASCII table
+             * on screen and reads back CGRAM font data via serial */
+            serial_print(COM1, "[VGA-TEXT] Running font diagnostic...\n");
+            vga_text_font_diagnostic();
+
+            /* Final screen dump after diagnostic */
+            vga_text_dump_screen();
+
             klog_info("Using VGA text mode console (VBE unavailable)");
             console_initialized = 1;
         }
@@ -430,7 +450,10 @@ void kernel_main(void) {
     klog_info("Verifying keyboard interrupt is ready...");
     {
         extern void pic_unmask(uint8_t irq);
-        pic_unmask(1); /* 确保键盘中断(IRQ1)未被屏蔽 */
+        extern void ioapic_set_routing(uint8_t irq, uint8_t vector, uint8_t cpu);
+        pic_unmask(1); /* 确保键盘中断(IRQ1)在PIC上未被屏蔽 */
+        /* Also route through IOAPIC if present (vector 33 = IRQ 1 + 32) */
+        ioapic_set_routing(1, 33, 0);
     }
 
     /* 启用中断 - 必须在GUI启动之前 */

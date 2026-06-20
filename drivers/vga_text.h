@@ -32,8 +32,10 @@ void vga_text_set_color(uint8_t fg, uint8_t bg);
 void vga_text_clear(void);
 void vga_text_set_cursor(int row, int col);
 void vga_text_get_cursor(int *row, int *col);
+void vga_text_dump_screen(void);
 void vga_text_scroll(void);
 void vga_text_print_hex(uint32_t val);
 void vga_text_print_dec(uint32_t val);
+void vga_text_font_diagnostic(void);
 
 #endif

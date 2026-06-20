@@ -57,4 +57,39 @@ void   dns_handle_response(const uint8_t *msg, uint32_t len,
 const dns_cache_entry_t *dns_get_cache(uint32_t *count);
 void   dns_clear_cache(void);
 
+/* ------------------------------------------------------------------- */
+/*  反向DNS解析                                                         */
+/* ------------------------------------------------------------------- */
+
+int dns_reverse_lookup(ipv4_addr_t addr, char *out_name, uint32_t cap);
+
+/* ------------------------------------------------------------------- */
+/*  DNS hosts文件支持                                                   */
+/* ------------------------------------------------------------------- */
+
+#define DNS_HOSTS_MAX 32
+typedef struct dns_host {
+    char       name[DNS_MAX_NAME];
+    ipv4_addr_t ip;
+    uint8_t    used;
+} dns_host_t;
+
+int  dns_add_host(const char *name, ipv4_addr_t ip);
+int  dns_remove_host(const char *name);
+void dns_clear_hosts(void);
+
+/* ------------------------------------------------------------------- */
+/*  DNS查询统计                                                        */
+/* ------------------------------------------------------------------- */
+
+typedef struct dns_stats {
+    uint32_t total_queries;
+    uint32_t cache_hits;
+    uint32_t cache_misses;
+    uint32_t server_timeouts;
+    uint32_t parse_errors;
+} dns_stats_t;
+
+dns_stats_t dns_get_stats(void);
+
 #endif

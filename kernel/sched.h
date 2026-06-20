@@ -13,6 +13,7 @@
 #define PROCESS_REAL_TIME 0x0001
 #define PROCESS_NORMAL    0x0002
 #define PROCESS_IDLE      0x0004
+#define PROCESS_CFS       0x0008  /* CFS完全公平调度策略 */
 
 #define BLOCK_REASON_NONE   0
 #define BLOCK_REASON_IO     1
@@ -66,5 +67,66 @@ static inline void sched_block_current(int reason) {
     pcb_t *p = sched_get_current();
     if (p) sched_block(p, reason);
 }
+
+/* ============================================================
+ * CFS (Completely Fair Scheduler) 完全公平调度器
+ * ============================================================ */
+
+#define CFS_MAX_PROCS 256
+
+typedef struct cfs_node {
+    pcb_t          *proc;
+    uint64_t        vruntime;   /* 虚拟运行时间 */
+    struct cfs_node *next;
+} cfs_node_t;
+
+void sched_cfs_init(void);
+void sched_cfs_enqueue(pcb_t *proc);
+pcb_t *sched_cfs_dequeue(void);
+uint64_t sched_calc_vruntime(pcb_t *proc, uint64_t delta_exec);
+void sched_cfs_tick(pcb_t *proc);
+int sched_set_policy_cfs(pcb_t *proc);
+
+/* ============================================================
+ * 负载均衡模块
+ * ============================================================ */
+
+#define SCHED_LOAD_WINDOW 100 /* 采样窗口大小 */
+
+typedef struct load_stat {
+    uint32_t cpu_load[SCHED_LOAD_WINDOW]; /* CPU利用率0-100 */
+    uint32_t window_pos;
+    uint32_t avg_load;
+} load_stat_t;
+
+void sched_load_sample(uint32_t load);
+uint32_t sched_get_avg_load(void);
+
+/* ============================================================
+ * 进程组调度模块
+ * ============================================================ */
+
+#define MAX_PROCESS_GROUPS 16
+
+typedef struct process_group {
+    pid_t    pgid;
+    pid_t    leader_pid;
+    uint32_t member_count;
+    uint32_t cpu_share;  /* 组CPU配额(1024基准) */
+    uint8_t  used;
+} process_group_t;
+
+int  sched_create_process_group(pid_t leader);
+int  sched_add_to_group(pid_t pid, pid_t pgid);
+int  sched_remove_from_group(pid_t pid);
+process_group_t *sched_get_group(pid_t pgid);
+
+/* ============================================================
+ * 调度器调试接口
+ * ============================================================ */
+
+void sched_dump_queue(int queue_index); /* 打印指定队列内容 */
+void sched_set_debug_level(int level);  /* 0=off, 1=basic, 2=verbose */
+int  sched_get_debug_level(void);
 
 #endif

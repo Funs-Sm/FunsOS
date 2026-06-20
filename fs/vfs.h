@@ -2,6 +2,7 @@
 #define VFS_H
 
 #include "stdint.h"
+#include "../kernel/permission.h"
 
 #define FS_TYPE_RAMFS  0
 #define FS_TYPE_FAT32  1
@@ -107,6 +108,7 @@ struct inode_t {
     inode_ops_t *ops;
     void *private_data;
     dentry_t *dentries;
+    acl_t *acl;              /* 扩展访问控制列表 (可选) */
 };
 
 struct dentry_t {
@@ -116,6 +118,9 @@ struct dentry_t {
     dentry_t *next_sibling;
     inode_t *inode;
     uint32_t mount_point;
+    /* Dentry cache LRU list pointers (separate from tree links). */
+    dentry_t *cache_prev;
+    dentry_t *cache_next;
 };
 
 typedef struct mount_t {

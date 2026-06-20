@@ -92,9 +92,10 @@ int32_t devfs_register(const char *name, uint32_t type, uint32_t major, uint32_t
         }
         memset(inode, 0, sizeof(inode_t));
         inode->ino = (major << 8) | minor;
-        inode->mode = FILE_MODE_READ | FILE_MODE_WRITE;
         if (type == DEVICE_BLOCK) {
-            inode->mode |= FILE_MODE_DIR;
+            inode->mode = FILE_MODE_DIR | FILE_MODE_READ | FILE_MODE_WRITE;
+        } else {
+            inode->mode = FILE_MODE_REG | FILE_MODE_READ | FILE_MODE_WRITE;
         }
         inode->sb = devfs_root_inode->sb;
         inode->private_data = dev;

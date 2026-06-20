@@ -1,85 +1,123 @@
 ; loader.asm - Real-mode loader
 ;
 ; Loaded by boot.asm from disk sector 2 onward, into 0x0000:0x1000.
-; Runs entirely in 16-bit real mode (we only briefly flip into
-; protected mode at the very end to copy and jump to the kernel).
+; Runs in 16-bit real mode, briefly switching to protected mode for
+; each chunk copy to move kernel data above 1 MiB.
 ;
 ; Responsibilities:
 ;   1. Detect memory map (INT 15h E820 / E801 / 88h)
 ;   2. Enable the A20 line
 ;   3. Set a VESA video mode (best effort, fall back to VGA mode 13h)
-;   4. Load the kernel image from disk using LBA (INT 13h AH=42h)
-;      into low memory 0x10000-0x9FFFF (576 KB)
-;   5. Load stage2.bin (a tiny 32-bit loader) to 0x80000 in low memory
-;   6. Switch to 32-bit protected mode
-;   7. Copy 0x10000-0x9FFFF to 0x100000-0x190000 (kernel dest)
-;   8. Far jump to stage2 at 0x80000, which finishes loading the rest
-;      of the kernel and jumps into it.
+;   4. Read kernel info from sector 1 (sector count, total bytes)
+;   5. Load kernel image from disk using LBA (INT 13h AH=42h) in
+;      chunks to a bounce buffer at 0x10000, then switch to PM to
+;      copy each chunk to its linked address 0x100000+.
+;   6. After all kernel data is loaded, enter PM and jump to the
+;      kernel entry at 0x100000.
 
 [BITS 16]
 [ORG 0x1000]
 
 loader_start:
     CLI
+    ; Direct serial output to verify loader is executing
+    MOV DX, 0x3F8
+    MOV AL, 'X'
+    OUT DX, AL
+    MOV AL, 13
+    OUT DX, AL
+    MOV AL, 10
+    OUT DX, AL
+
     MOV AX, CS
     MOV DS, AX
     MOV ES, AX
     MOV SS, AX
-    MOV SP, 0x2000
+    MOV SP, 0x9000          ; safe stack below EBDA, above memory map/VBE scratch
     STI
 
     MOV SI, msg_mem_detect
     CALL print_string_16
 
-    MOV DI, 0x0500 + 12
-    XOR BX, BX
-    MOV WORD [0x0500], 0
-    MOV WORD [0x0502], 0
-    MOV WORD [0x0504], 0
-    MOV WORD [0x0506], 0
-    MOV WORD [0x0508], 0
-    MOV WORD [0x050A], 0
+    MOV AL, 0x31
+    CALL debug_char
+
+    MOV AL, '['
+    CALL print_char_16
+
+    ; boot_info_t at 0x0500 (kernel reads mem_upper at 0x50C)
+    MOV DI, 0x0A00          ; E820 entries placed at 0x0A00
+    XOR EBX, EBX            ; E820 continuation = 0
+    MOV DWORD [0x0500], 0
+    MOV DWORD [0x0504], 0
+    MOV DWORD [0x0508], 0
+    MOV DWORD [0x050C], 0
+    MOV DWORD [0x0510], 0
+    MOV DWORD [0x0514], 0
 
 e820_loop:
-    MOV AX, 0xE820
-    MOV CX, 24
-    MOV DX, 0x534D
-    MOV [DI + 20], DX
+    CMP DI, 0x0A00
+    JNE .skip_e820_dbg
+    MOV AL, 0x32
+    CALL debug_char
+.skip_e820_dbg:
+    MOV EAX, 0x0000E820
+    MOV ECX, 24
+    MOV EDX, 0x534D4150     ; 'SMAP'
     INT 0x15
     JC e820_done
-    CMP AX, 0x534D
+    CMP EAX, 0x534D4150
     JNE e820_done
-    TEST BL, BL
+    TEST EBX, EBX
     JZ e820_done
 
-    INC WORD [0x0508]
-    ADD WORD [0x0504], 24
+    INC WORD [0x0508]       ; entry count
+    ADD WORD [0x0514], 24   ; mmap_length
     ADD DI, 24
 
     JMP e820_loop
 
 e820_done:
-    CMP WORD [0x0508], 0
-    JNE a20_enable
-    ; No e820 entries: try e801 fallback
+    MOV AL, 0x33
+    CALL debug_char
+
+    MOV AL, ']'
+    CALL print_char_16
+
+    ; Try INT 15h E801 to obtain usable memory above 1 MB.
+    ; AX = KB between 1 MB and 16 MB, BX = 64 KB blocks above 16 MB.
     MOV AX, 0xE801
     INT 0x15
-    JC e881_fallback
-    MOV [0x050C], AX
-    MOV [0x050E], BX
-    JMP a20_enable
+    JC .e88_fallback
+    MOVZX EAX, AX
+    MOVZX EBX, BX
+    SHL EBX, 6              ; convert 64 KB blocks -> KB
+    ADD EAX, EBX
+    JMP .store_upper
 
-e881_fallback:
+.e88_fallback:
     MOV AH, 0x88
     INT 0x15
-    JC a20_enable
-    MOV [0x050C], AX
-    MOV WORD [0x050E], 0
+    JC .default_mem
+    MOVZX EAX, AX
+    JMP .store_upper
+
+.default_mem:
+    MOV EAX, 31 * 1024      ; fallback: assume ~32 MB
+
+.store_upper:
+    MOV [0x050C], EAX       ; boot_info.mem_upper (KB)
+    MOV DWORD [0x0504], 640 ; boot_info.mem_lower (KB)
+    MOV WORD [0x0510], 0x0A00 ; boot_info.mmap_addr
+
     JMP a20_enable
 
 a20_enable:
     MOV SI, msg_a20
     CALL print_string_16
+
+    MOV AL, 0x34
+    CALL debug_char
 
     IN AL, 0x92
     OR AL, 0x02
@@ -116,38 +154,35 @@ a20_wait_kbd1:
     HLT
 
 a20_done:
+    MOV AL, 0x35
+    CALL debug_char
     MOV SI, msg_vesa
     CALL print_string_16
 
-    ; Try VESA modes: 640x480x32 first (most stable)
     MOV AX, 0x4F02
     MOV BX, 0x4112
     INT 10h
     CMP AX, 0x004F
     JE vesa_ok
 
-    ; 800x600x32
     MOV AX, 0x4F02
     MOV BX, 0x4115
     INT 10h
     CMP AX, 0x004F
     JE vesa_ok
 
-    ; 1024x768x32
     MOV AX, 0x4F02
     MOV BX, 0x4118
     INT 10h
     CMP AX, 0x004F
     JE vesa_ok
 
-    ; 1280x1024x32
     MOV AX, 0x4F02
     MOV BX, 0x411B
     INT 10h
     CMP AX, 0x004F
     JE vesa_ok
 
-    ; Non-32bpp fallbacks
     MOV AX, 0x4F02
     MOV BX, 0x4117
     INT 10h
@@ -164,307 +199,304 @@ a20_done:
     INT 0x10
 
 vesa_ok:
+    MOV AL, 0x36
+    CALL debug_char
     MOV [vesa_mode], BX
 
-    ; ---- Store VBE mode info at 0x700 for kernel ----
-    ; First, get VBE mode info block via INT 10h AX=4F01h
-    ; We use buffer at 0x0900 (256 bytes) for the mode info block
     MOV CX, BX
-    AND CX, 0x3FFF           ; Remove LFB/clear display flags
+    AND CX, 0x3FFF
     MOV AX, 0x4F01
     PUSH ES
     PUSH 0
-    POP ES                    ; ES = 0
-    MOV DI, 0x0900            ; ES:DI = 0x0900
+    POP ES
+    MOV DI, 0x0900
     INT 10h
 
-    ; Check if VBE info was returned successfully
-    ; NOTE: ES is still 0 here (POP ES moved after reads)
     CMP AX, 0x004F
     JNE .vesa_no_info
 
-    ; Extract VBE info from mode info block at ES:0x0900.
-    ; ES is still 0 (POP ES deferred), so ES:0x0900 = linear 0x0900.
     MOV DWORD [ES:0x700], 0xB007F1E0
-
     MOVZX EAX, CX
-    MOV [ES:0x704], EAX          ; vbe_mode
-
-    MOV EAX, [ES:0x0900 + 0x28]  ; PhysBasePtr
-    MOV [ES:0x708], EAX          ; fb_addr
-
-    MOVZX EAX, WORD [ES:0x0900 + 0x12]  ; XResolution
-    MOV [ES:0x70C], EAX          ; fb_width
-
-    MOVZX EAX, WORD [ES:0x0900 + 0x14]  ; YResolution
-    MOV [ES:0x710], EAX          ; fb_height
-
-    MOVZX EAX, BYTE [ES:0x0900 + 0x19]  ; BitsPerPixel
-    MOV [ES:0x714], EAX          ; fb_bpp
-
-    MOVZX EAX, WORD [ES:0x0900 + 0x10]  ; BytesPerScanLine
-    MOV [ES:0x718], EAX          ; fb_pitch
-
-    POP ES                        ; restore ES after all VBE reads done
+    MOV [ES:0x704], EAX
+    MOV EAX, [ES:0x0900 + 0x28]
+    MOV [ES:0x708], EAX
+    MOVZX EAX, WORD [ES:0x0900 + 0x12]
+    MOV [ES:0x70C], EAX
+    MOVZX EAX, WORD [ES:0x0900 + 0x14]
+    MOV [ES:0x710], EAX
+    MOVZX EAX, BYTE [ES:0x0900 + 0x19]
+    MOV [ES:0x714], EAX
+    MOVZX EAX, WORD [ES:0x0900 + 0x10]
+    MOV [ES:0x718], EAX
+    POP ES
     JMP .vesa_info_done
 
 .vesa_no_info:
-    POP ES                        ; restore ES on error path too
+    POP ES
 
 .vesa_info_done:
 
+    MOV AL, 0x37
+    CALL debug_char
+
+;------------------------------------------------------------------
+; Load 8x16 ROM font into VGA character generator RAM (plane 2).
+; Must be done in real mode via BIOS INT 10h AH=11h before we
+; switch to protected mode.  Without this, the CGRAM contains
+; garbage from the VBE graphics mode and text output is garbled.
+;------------------------------------------------------------------
+    MOV AX, 0x1112          ; INT 10h AH=11h AL=12h: load 8x16 ROM font
+    MOV BL, 0              ; block 0 of character generator
+    MOV BH, 16             ; 16 bytes per character (8x16 font)
+    INT 10h
+
+;------------------------------------------------------------------
+; Switch to VGA text mode 3 (80x25) before entering protected mode.
+; This ensures:
+;   - CRTC registers are correctly programmed for text output
+;   - Standard 8x16 ROM font is loaded into CGRAM (plane 2)
+;   - Text buffer at 0xB8000 is cleared and ready
+;   - All timing/sequencer registers are in known-good state
+;
+; The kernel will use this text-mode display when VBE is unavailable.
+;------------------------------------------------------------------
+    MOV AX, 0x0003          ; INT 10h: set video mode = text mode 3 (80x25)
+    INT 10h
+
+;------------------------------------------------------------------
+; Read kernel info block from sector 1 (written by mkimg.py)
+;------------------------------------------------------------------
+    MOV SI, msg_kern_info
+    CALL print_string_16
+
+    MOV WORD [dap_count], 1
+    MOV WORD [dap_offset], 0x0600
+    MOV WORD [dap_segment], 0x0000
+    MOV DWORD [dap_lba], 1
+    MOV DWORD [dap_lba + 4], 0
+    MOV SI, dap_packet
+    MOV AH, 0x42
+    MOV DL, [boot_drive]
+    INT 0x13
+    JNC .got_info_blk
+
+    MOV DWORD [kern_total_sectors], KERNEL_FALLBACK_SECTORS
+    JMP .info_done
+
+.got_info_blk:
+    CMP DWORD [0x0600], 0xB007F00D
+    JNE .fallback_info
+    MOV EAX, [0x0604]
+    MOV [kern_total_sectors], EAX
+    JMP .info_done
+
+.fallback_info:
+    MOV DWORD [kern_total_sectors], KERNEL_FALLBACK_SECTORS
+
+.info_done:
+    MOV AL, 0x38
+    CALL debug_char
     MOV SI, msg_load_kernel
     CALL print_string_16
 
-    ; Check LBA support
+    MOV DWORD [kern_lba], KERNEL_LBA
+    MOV DWORD [kern_dst], 0x100000
+    MOV EAX, [kern_total_sectors]
+    MOV [kern_remaining], EAX
+
     MOV AH, 0x41
     MOV BX, 0x55AA
     MOV DL, [boot_drive]
     INT 0x13
-    JC load_kernel_chs
+    JC .kern_chs_load
     CMP BX, 0xAA55
-    JNE load_kernel_chs
+    JNE .kern_chs_load
 
 ;---------------------------------------------------------------------
-; LBA load: read KERNEL_TOTAL_SECTORS sectors starting at
-; KERNEL_LBA into 0x10000-0x9FFFF (576 KB), in chunks of CHUNK_SECS.
+; LBA kernel loading loop — load chunk to 0x10000, PM copy to
+; kern_dst, switch back to RM, repeat.
 ;---------------------------------------------------------------------
-load_kernel_lba:
-    MOV AX, KERNEL_TOTAL_SECTORS
-    MOV [kernel_sectors_left], AX
-    MOV WORD [kernel_lba], KERNEL_LBA
-    MOV WORD [kernel_lba + 2], 0
-    MOV WORD [kernel_dest_off], 0x0000
-    MOV WORD [kernel_dest_seg], 0x1000
+.kern_lba_load:
+    MOV AL, 0x39
+    CALL debug_char
+    CMP DWORD [kern_remaining], 0
+    JE .kern_loaded
 
-lba_chunk_loop:
-    MOV AX, [kernel_sectors_left]
-    TEST AX, AX
-    JZ kernel_lba_done
+    MOV EAX, [kern_remaining]
+    CMP EAX, CHUNK_SECS
+    JBE .lba_size_ok
+    MOV EAX, CHUNK_SECS
+.lba_size_ok:
+    MOV [dap_count], AX
+    MOV WORD [dap_offset], 0x0000
+    MOV WORD [dap_segment], 0x1000
+    MOV EAX, [kern_lba]
+    MOV [dap_lba], EAX
+    MOV DWORD [dap_lba + 4], 0
 
-    MOV CX, AX
-    CMP CX, CHUNK_SECS
-    JBE .lba_set_chunk
-    MOV CX, CHUNK_SECS
-.lba_set_chunk:
-    MOV [dap_count], CX
-    MOV AX, [kernel_dest_off]
-    MOV [dap_offset], AX
-    MOV AX, [kernel_dest_seg]
-    MOV [dap_segment], AX
-    MOV AX, [kernel_lba]
-    MOV [dap_lba], AX
-    MOV AX, [kernel_lba + 2]
-    MOV [dap_lba + 2], AX
     MOV SI, dap_packet
     MOV AH, 0x42
     MOV DL, [boot_drive]
-    PUSH CX
     INT 0x13
-    POP CX
-    JC load_kernel_chs
+    JC .kern_chs_load
 
-    ; Advance destination.  We added (CX * 512) bytes to the
-    ; current seg:off.  Compute the new seg:off correctly in 32-bit
-    ; form (current linear + delta), then convert back to seg:off.
-    ; Old: off += (CX << 9) and increment seg on carry - broken when
-    ; SHL overflows (e.g. 128 * 512 = 0x10000 -> low 16 bits = 0, no
-    ; carry from ADD so segment never advances).
-    PUSH CX                     ; save chunk size for LBA advance
-    MOVZX EAX, CX               ; EAX = CX
-    SHL EAX, 9                  ; EAX = CX * 512 (32-bit)
-    MOVZX EBX, WORD [kernel_dest_seg]
-    SHL EBX, 4                  ; EBX = seg * 16
-    MOVZX ECX, WORD [kernel_dest_off]
-    ADD EBX, ECX                ; EBX = current linear address
-    ADD EAX, EBX                ; EAX = new linear address
-    SHR EAX, 4
-    MOV [kernel_dest_seg], AX
-    AND EAX, 0xF
-    MOV [kernel_dest_off], AX
-    POP CX                      ; restore chunk size
+    CLI
+    LGDT [gdt_descriptor]
 
-    ; Advance LBA
-    MOV AX, [kernel_lba]
-    ADD AX, CX
-    MOV [kernel_lba], AX
-    JNC .lba_no_lba_wrap
-    ADD WORD [kernel_lba + 2], 1
-.lba_no_lba_wrap:
+    MOV EAX, CR0
+    OR AL, 1
+    MOV CR0, EAX
 
-    ; Decrement remaining
-    SUB [kernel_sectors_left], CX
-    JMP lba_chunk_loop
+    DB 0x66
+    DB 0xEA
+    DD .pm_copy
+    DW 0x08
 
-kernel_lba_done:
-    MOV SI, msg_kernel_lba_ok
-    CALL print_string_16
-    JMP load_stage2
+[BITS 32]
+.pm_copy:
+    MOV AX, 0x10
+    MOV DS, AX
+    MOV ES, AX
+    MOV FS, AX
+    MOV GS, AX
+    MOV SS, AX
+    MOV ESP, 0x90000
 
-;---------------------------------------------------------------------
-; CHS fallback.  Loads in chunks of 18 sectors.
-;---------------------------------------------------------------------
-load_kernel_chs:
+    MOVZX ECX, WORD [dap_count]
+    SHL ECX, 7
+    MOV ESI, 0x10000
+    MOV EDI, [kern_dst]
+    REP MOVSD
+
+    MOVZX EAX, WORD [dap_count]
+    SHL EAX, 9
+    ADD [kern_dst], EAX
+
+    JMP 0x18:.pm_to_rm
+
+[BITS 16]
+.pm_to_rm:
+    MOV EAX, CR0
+    AND AL, ~1
+    MOV CR0, EAX
+
+    JMP 0x0000:.rm_cont
+
+.rm_cont:
+    XOR AX, AX
+    MOV DS, AX
+    MOV ES, AX
+    MOV FS, AX
+    MOV GS, AX
+    MOV SS, AX
+    MOV SP, 0x2000
+    STI
+
+    MOVZX EAX, WORD [dap_count]
+    ADD DWORD [kern_lba], EAX
+    SUB DWORD [kern_remaining], EAX
+
+    JMP .kern_lba_load
+
+.kern_chs_load:
     MOV SI, msg_using_chs
     CALL print_string_16
-    MOV WORD [kernel_lba], KERNEL_LBA
-    MOV WORD [kernel_lba + 2], 0
-    MOV WORD [kernel_dest_off], 0x0000
-    MOV WORD [kernel_dest_seg], 0x1000
-    MOV WORD [kernel_sectors_left], KERNEL_TOTAL_SECTORS
-
-kernel_chs_loop:
-    CMP WORD [kernel_sectors_left], 0
-    JE kernel_chs_done
-
-    MOV CX, [kernel_sectors_left]
-    CMP CX, 18
-    JBE kset_chunk
-    MOV CX, 18
-
-kset_chunk:
-    MOV [kernel_chunk], CX
-
-    MOV AX, [kernel_lba]
-    XOR DX, DX
-    MOV BX, 1008
-    DIV BX
-    MOV [kchs_cyl], AX
-
-    MOV AX, DX
-    XOR DX, DX
-    MOV BX, 63
-    DIV BX
-    MOV [kchs_head], AX
-    MOV [kchs_sec], DX
-    INC BYTE [kchs_sec]
-
-    MOV AH, 0x02
-    MOV AL, BYTE [kernel_chunk]
-    MOV DL, [boot_drive]
-    MOV DH, BYTE [kchs_head]
-    MOV CH, BYTE [kchs_cyl]
-    MOV CL, BYTE [kchs_sec]
-    SHL BYTE [kchs_cyl + 1], 6
-    OR CL, BYTE [kchs_cyl + 1]
-    MOV BX, [kernel_dest_off]
-    MOV ES, [kernel_dest_seg]
-    PUSH CX
-    INT 0x13
-    POP CX
-    JC chs_err
-
-    MOVZX EAX, CL
-    SHL EAX, 9                  ; EAX = bytes
-    MOVZX EBX, WORD [kernel_dest_off]
-    ADD EAX, EBX                ; EAX = new off
-    MOV [kernel_dest_off], AX
-    ; Note: CHS uses 18-sector chunks (0x2400 bytes), so off will
-    ; never overflow 64KB before we wrap it.  Reset off to 0 and
-    ; bump segment if it crossed 0x10000 (carry set).
-    JNC kchs_no_seg_wrap
-    XOR AX, AX
-    MOV [kernel_dest_off], AX
-    ADD WORD [kernel_dest_seg], 0x1000
-kchs_no_seg_wrap:
-
-    MOV AX, [kernel_lba]
-    ADD AX, CX
-    MOV [kernel_lba], AX
-    JNC kchs_no_lba_wrap
-    ADD WORD [kernel_lba + 2], 1
-kchs_no_lba_wrap:
-
-    SUB [kernel_sectors_left], CX
-    JMP kernel_chs_loop
-
-chs_err:
-    MOV SI, msg_chs_err
-    CALL print_string_16
     CLI
     HLT
 
-kernel_chs_done:
-    MOV SI, msg_kernel_lba_ok
-    CALL print_string_16
-    JMP load_stage2
-
-;---------------------------------------------------------------------
-; Load stage2.bin (4 sectors from LBA STAGE2_LBA) to 0x80000 in low
-; memory.  Stage 2 is a tiny 32-bit loader that finishes loading the
-; rest of the kernel using PIO once we are in protected mode.
-;---------------------------------------------------------------------
-load_stage2:
-    MOV SI, msg_load_stage2
-    CALL print_string_16
-
-    MOV [dap_count], STAGE2_SECTORS
-    MOV [dap_offset], 0x0000
-    MOV WORD [dap_segment], 0x8000          ; 0x8000:0x0000 = 0x80000
-    MOV WORD [dap_lba], STAGE2_LBA
-    MOV WORD [dap_lba + 2], 0
-    MOV SI, dap_packet
-    MOV AH, 0x42
-    MOV DL, [boot_drive]
-    INT 0x13
-    JNC stage2_loaded
-    MOV SI, msg_stage2_err
-    CALL print_string_16
-    CLI
-    HLT
-
-stage2_loaded:
-    MOV SI, msg_stage2_ok
+.kern_loaded:
+    MOV AL, 0x41
+    CALL debug_char
+    MOV SI, msg_kern_loaded
     CALL print_string_16
 
     MOV SI, msg_pm
     CALL print_string_16
 
-    CLI                     ; Disable interrupts before entering PM
-
+    CLI
     LGDT [gdt_descriptor]
 
-    ; Enable protected mode
-    DB 0x0F, 0x20, 0xC0     ; MOV EAX, CR0
-    DB 0x66, 0x0D           ; OR EAX, imm32
-    DD 0x00000001           ; PE bit
-    DB 0x0F, 0x22, 0xC0     ; MOV CR0, EAX
+    MOV EAX, CR0
+    OR AL, 1
+    MOV CR0, EAX
 
-    ; Far jump to 32-bit pm_entry code
-    DB 0x66                  ; operand size prefix for 32-bit offset
-    DB 0xEA                  ; JMP far
-    DD pm_entry              ; offset (32-bit)
-    DW 0x0008                ; selector (code segment)
+    DB 0x66
+    DB 0xEA
+    DD pm_jump_kernel
+    DW 0x08
+
+[BITS 32]
+pm_jump_kernel:
+    MOV AX, 0x10
+    MOV DS, AX
+    MOV ES, AX
+    MOV FS, AX
+    MOV GS, AX
+    MOV SS, AX
+    MOV ESP, 0x90000
+
+    PUSH DWORD 0x08
+    PUSH DWORD 0x100000
+    RETF
+
+; All remaining code runs in real mode - ensure 16-bit encoding
+[BITS 16]
+
+debug_char:
+    PUSH AX
+    PUSH DX
+    PUSH CX
+    MOV DX, 0x3FD
+    MOV CX, 0xFFFF
+.dc_wait:
+    IN AL, DX
+    TEST AL, 0x20
+    JNZ .dc_ready
+    LOOP .dc_wait
+    JMP .dc_skip
+.dc_ready:
+    POP CX
+    POP DX
+    MOV DX, 0x3F8
+    POP AX
+    OUT DX, AL
+    RET
+.dc_skip:
+    POP CX
+    POP DX
+    ADD SP, 2
+    RET
 
 verify_a20:
     PUSH ES
     PUSH DS
     PUSH DI
     PUSH SI
+    PUSH AX
     PUSHF
     CLI
     XOR AX, AX
     MOV DS, AX
-    NOT AX
+    MOV AX, 0xFFFF
     MOV ES, AX
-    MOV SI, 0x7DF0
-    MOV DI, 0x7E0F
+    MOV SI, 0x0500
+    MOV DI, 0x0510          ; 0xFFFF:0x0510 == 0x100500, wraps to 0x00500 if A20 off
     MOV AL, [DS:SI]
     MOV AH, [ES:DI]
     MOV BYTE [DS:SI], 0xAA
-    CMP BYTE [ES:DI], 0xAA
-    JNE a20_on
-    MOV BYTE [DS:SI], 0x55
-    CMP BYTE [ES:DI], 0x55
+    MOV BYTE [ES:DI], 0x55
+    CMP BYTE [DS:SI], 0x55
     JNE a20_on
     MOV [DS:SI], AL
     MOV AL, 0
     JMP a20_done_ret
 a20_on:
     MOV [DS:SI], AL
+    MOV [ES:DI], AH
     MOV AL, 1
 a20_done_ret:
     POPF
+    POP AX
     POP SI
     POP DI
     POP DS
@@ -479,58 +511,49 @@ print_string_16:
     MOV BH, 0x00
     MOV BL, 0x07
     INT 0x10
-    ; Also write to COM1 (0x3F8) so we can capture via -serial file:
     PUSH DX
     PUSH AX
-    MOV DX, 0x3FD     ; Line Status Register
+    PUSH CX
+    MOV DX, 0x3FD
+    MOV CX, 0xFFFF
 .wait_tx:
     IN AL, DX
     TEST AL, 0x20
-    JZ .wait_tx
+    JNZ .tx_ready
+    LOOP .wait_tx
+    JMP .tx_skip
+.tx_ready:
+    POP CX
     POP AX
     MOV DX, 0x3F8
     OUT DX, AL
     POP DX
     JMP print_string_16
+.tx_skip:
+    POP CX
+    POP AX
+    POP DX
+    JMP print_string_16
 ps16_done:
     RET
 
-[BITS 32]
+; Print a single character in AL via BIOS TTY and COM1 (no polling)
+print_char_16:
+    PUSH AX
+    PUSH BX
+    PUSH DX
+    MOV AH, 0x0E
+    MOV BH, 0x00
+    MOV BL, 0x07
+    INT 0x10
+    MOV DX, 0x3F8
+    OUT DX, AL
+    POP DX
+    POP BX
+    POP AX
+    RET
 
-;---------------------------------------------------------------------
-; pm_entry - protected mode entry point.
-;  - Copy 0x10000-0x9FFFF (the kernel image we already read in real
-;    mode) to its linked address 0x100000-0x190000.
-;  - Far jump to stage2 at 0x80000, which finishes loading the rest
-;    of the kernel using PIO and then jumps into it.
-;---------------------------------------------------------------------
-pm_entry:
-    MOV AX, 0x10
-    MOV DS, AX
-    MOV ES, AX
-    MOV FS, AX
-    MOV GS, AX
-    MOV SS, AX
-    MOV ESP, 0x90000
-
-    ; Copy KERNEL_TOTAL_SECTORS*512 bytes from 0x10000 to 0x100000.
-    MOV ESI, 0x00010000
-    MOV EDI, 0x00100000
-    MOV ECX, KERNEL_TOTAL_DWORDS
-    REP MOVSD
-
-    ; Far jump to stage2 at linear address 0x80000 (32-bit code
-    ; segment 0x08).  stage2.asm's entry point is the first thing in
-    ; its .bin output, so its offset within stage2.bin is 0.
-    ; PUSH DWORD for CS too: the original PUSH WORD 0x08 caused a
-    ; stack-layout bug where EIP/CS ended up swapped (RETF pops
-    ; 4 bytes for EIP then 2 for CS, so a 2-byte CS push leaves the
-    ; dword reads misaligned).
-    PUSH DWORD 0x08              ; CS = 0x08 (low 16 used, upper 16 ignored)
-    PUSH DWORD 0x80000           ; EIP = 0x80000
-    RETF
-
-; ---- Data section ----
+; ---- GDT ----
 [BITS 16]
 
 gdt_start:
@@ -585,6 +608,7 @@ gdt_descriptor:
     DW gdt_end - gdt_start - 1
     DD gdt_start
 
+; ---- Data section ----
 boot_drive:         DB 0x80
 vesa_mode:          DW 0
 
@@ -592,14 +616,11 @@ msg_mem_detect:     DB 'Loader: Detecting memory...', 0x0D, 0x0A, 0
 msg_a20:            DB 'Loader: Enabling A20...', 0x0D, 0x0A, 0
 msg_a20_fail:       DB 'Loader: A20 enable FAILED', 0x0D, 0x0A, 0
 msg_vesa:           DB 'Loader: Setting VESA mode...', 0x0D, 0x0A, 0
+msg_kern_info:      DB 'Loader: Reading kernel info...', 0x0D, 0x0A, 0
 msg_load_kernel:    DB 'Loader: Loading kernel...', 0x0D, 0x0A, 0
-msg_kernel_lba_ok:  DB 'Loader: Kernel loaded into low memory', 0x0D, 0x0A, 0
-msg_load_stage2:    DB 'Loader: Loading stage 2...', 0x0D, 0x0A, 0
-msg_stage2_ok:      DB 'Loader: Stage 2 loaded', 0x0D, 0x0A, 0
-msg_stage2_err:     DB 'Loader: Stage 2 load FAILED', 0x0D, 0x0A, 0
+msg_kern_loaded:    DB 'Loader: Kernel fully loaded', 0x0D, 0x0A, 0
 msg_pm:             DB 'Loader: Entering protected mode...', 0x0D, 0x0A, 0
-msg_using_chs:      DB 'Loader: LBA not available, using CHS', 0x0D, 0x0A, 0
-msg_chs_err:        DB 'Loader: CHS read error', 0x0D, 0x0A, 0
+msg_using_chs:      DB 'Loader: LBA required, CHS not supported', 0x0D, 0x0A, 0
 
 dap_packet:
     DB 0x10
@@ -610,30 +631,11 @@ dap_segment:        DW 0
 dap_lba:            DD 0
                     DD 0
 
-kernel_lba:         DW 0
-kernel_lba_hi:      DW 0
-kernel_dest_off:    DW 0
-kernel_dest_seg:    DW 0
-kernel_sectors_left:DW 0
-kernel_chunk:       DW 0
-kchs_cyl:           DW 0
-                    DW 0
-kchs_head:          DW 0
-                    DW 0
-kchs_sec:           DW 0
-                    DW 0
+kern_total_sectors: DD 0
+kern_lba:           DD 0
+kern_dst:           DD 0
+kern_remaining:     DD 0
 
-; Layout constants (must match mkimg.py)
-;
-; Sector 0:   boot.bin   (MBR)
-; Sector 1:   reserved
-; Sectors 2-21: loader.bin  (20 sectors, 10 KB)  <- this file
-; Sectors 22-25: stage2.bin  (4 sectors, 2 KB)
-; Sectors 26+:  kernel.bin
-;
-KERNEL_LBA           EQU 26
-KERNEL_TOTAL_SECTORS EQU 1152     ; 1152 * 512 = 576 KB loaded by loader
-KERNEL_TOTAL_DWORDS  EQU (KERNEL_TOTAL_SECTORS * 512) / 4
-CHUNK_SECS           EQU 128     ; up to 128 sectors per LBA call (64 KB)
-STAGE2_LBA           EQU 22
-STAGE2_SECTORS       EQU 4
+KERNEL_LBA            EQU 26
+CHUNK_SECS            EQU 64
+KERNEL_FALLBACK_SECTORS EQU 1216

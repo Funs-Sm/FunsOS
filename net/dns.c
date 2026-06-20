@@ -5,6 +5,7 @@
 #include "timer.h"
 #include "sync.h"
 #include "stddef.h"
+#include "stdio.h"
 
 static dns_cache_entry_t cache[DNS_CACHE_SIZE];
 static dns_pending_t     pending[DNS_MAX_PENDING];
@@ -12,6 +13,12 @@ static ipv4_addr_t       server;
 static uint16_t          next_token = 0x1234;
 static mutex_t           dns_lock;
 static uint8_t           server_set;
+
+/* hosts文件支持 */
+static dns_host_t hosts[DNS_HOSTS_MAX];
+
+/* DNS查询统计 */
+static dns_stats_t stats;
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
@@ -171,6 +178,8 @@ static void pending_release(dns_pending_t *p) {
 void dns_init(void) {
     memset(cache, 0, sizeof(cache));
     memset(pending, 0, sizeof(pending));
+    memset(hosts, 0, sizeof(hosts));
+    memset(&stats, 0, sizeof(stats));
     server.addr = 0;
     server_set = 0;
     mutex_init(&dns_lock);
@@ -226,14 +235,29 @@ static int dns_send_query(const char *name, uint16_t *out_token) {
 
 int dns_resolve(const char *name, ipv4_addr_t *out) {
     if (!name || !out) return -1;
+    stats.total_queries++;
+
+    /* 优先查询hosts表 */
+    mutex_lock(&dns_lock);
+    for (uint32_t i = 0; i < DNS_HOSTS_MAX; i++) {
+        if (hosts[i].used && strcmp(hosts[i].name, name) == 0) {
+            *out = hosts[i].ip;
+            mutex_unlock(&dns_lock);
+            return 0;
+        }
+    }
+    mutex_unlock(&dns_lock);
+
     /* Check cache first. */
     mutex_lock(&dns_lock);
     dns_cache_entry_t *e = cache_lookup_unlocked(name);
     if (e && e->expires_ms > now_ms()) {
         *out = e->ip;
+        stats.cache_hits++;
         mutex_unlock(&dns_lock);
         return 0;
     }
+    stats.cache_misses++;
     mutex_unlock(&dns_lock);
 
     if (!server_set) return -1;
@@ -262,6 +286,7 @@ int dns_resolve(const char *name, ipv4_addr_t *out) {
     dns_pending_t *p = pending_find(token);
     if (p) pending_release(p);
     mutex_unlock(&dns_lock);
+    stats.server_timeouts++;
     return -2;
 }
 
@@ -341,4 +366,142 @@ void dns_handle_response(const uint8_t *msg, uint32_t len,
         }
         pos += rdlen;
     }
+}
+
+/* ------------------------------------------------------------------ */
+/*  反向DNS解析                                                        */
+/* ------------------------------------------------------------------ */
+
+int dns_reverse_lookup(ipv4_addr_t addr, char *out_name, uint32_t cap) {
+    if (!out_name || cap < DNS_MAX_NAME) return -1;
+
+    /* 将IP转换为 in-addr.arpa 格式 */
+    char ptr_query[DNS_MAX_NAME];
+    uint8_t *a = (uint8_t *)&addr.addr;
+    int n = snprintf(ptr_query, sizeof(ptr_query),
+                     "%u.%u.%u.%u.in-addr.arpa",
+                     a[3], a[2], a[1], a[0]);
+    if (n < 0 || (uint32_t)n >= sizeof(ptr_query)) {
+        stats.parse_errors++;
+        return -1;
+    }
+
+    /* 发送PTR查询（QTYPE=12） */
+    if (!server_set) return -1;
+    uint8_t buf[512];
+    uint32_t pos = 0;
+    wr16(buf + 0, 0x1234);            /* transaction id              */
+    wr16(buf + 2, 0x0100);            /* standard query, recursion desired */
+    wr16(buf + 4, 1);                 /* qdcount                      */
+    wr16(buf + 6, 0); wr16(buf + 8, 0);
+    wr16(buf + 10, 0); wr16(buf + 12, 0);
+    pos = 12;
+
+    int name_len = encode_name(ptr_query, buf + pos, sizeof(buf) - pos);
+    if (name_len < 0) {
+        stats.parse_errors++;
+        return -1;
+    }
+    pos += (uint32_t)name_len;
+    wr16(buf + pos, 12);  pos += 2;   /* QTYPE = PTR                   */
+    wr16(buf + pos, 1);   pos += 2;   /* QCLASS = IN                  */
+
+    uint16_t token = next_token++;
+    wr16(buf, token);
+
+    mutex_lock(&dns_lock);
+    dns_pending_t *p = pending_alloc(token);
+    if (!p) { mutex_unlock(&dns_lock); return -1; }
+    strncpy(p->qname, ptr_query, DNS_MAX_NAME - 1);
+    p->qname[DNS_MAX_NAME - 1] = 0;
+    p->qtype = 12;  /* PTR record */
+    p->qclass = 1;
+    p->server = server;
+    p->started_ms = now_ms();
+    p->resolved = 0;
+    mutex_unlock(&dns_lock);
+
+    net_interface_t *iface = net_get_default_interface();
+    if (!iface) return -1;
+    int r = udp_sendto(iface, server, DNS_PORT, 0, buf, pos);
+    if (r != 0) {
+        mutex_lock(&dns_lock);
+        pending_release(p);
+        mutex_unlock(&dns_lock);
+        return -1;
+    }
+
+    /* 等待响应 */
+    uint32_t start = now_ms();
+    while ((uint32_t)(now_ms() - start) < DNS_TIMEOUT_MS) {
+        dns_tick(now_ms());
+        mutex_lock(&dns_lock);
+        dns_pending_t *resp = pending_find(token);
+        if (resp && resp->resolved) {
+            strncpy(out_name, resp->qname, cap - 1);
+            out_name[cap - 1] = 0;
+            pending_release(resp);
+            mutex_unlock(&dns_lock);
+            return 0;
+        }
+        mutex_unlock(&dns_lock);
+        extern void thread_yield(void);
+        thread_yield();
+    }
+
+    stats.server_timeouts++;
+    mutex_lock(&dns_lock);
+    dns_pending_t *timeout_p = pending_find(token);
+    if (timeout_p) pending_release(timeout_p);
+    mutex_unlock(&dns_lock);
+    return -2;
+}
+
+/* ------------------------------------------------------------------ */
+/*  hosts文件支持                                                      */
+/* ------------------------------------------------------------------ */
+
+int dns_add_host(const char *name, ipv4_addr_t ip) {
+    if (!name || !name[0]) return -1;
+    mutex_lock(&dns_lock);
+    for (uint32_t i = 0; i < DNS_HOSTS_MAX; i++) {
+        if (!hosts[i].used) {
+            strncpy(hosts[i].name, name, DNS_MAX_NAME - 1);
+            hosts[i].name[DNS_MAX_NAME - 1] = 0;
+            hosts[i].ip = ip;
+            hosts[i].used = 1;
+            mutex_unlock(&dns_lock);
+            return 0;
+        }
+    }
+    mutex_unlock(&dns_lock);
+    return -1;
+}
+
+int dns_remove_host(const char *name) {
+    if (!name || !name[0]) return -1;
+    mutex_lock(&dns_lock);
+    for (uint32_t i = 0; i < DNS_HOSTS_MAX; i++) {
+        if (hosts[i].used && strcmp(hosts[i].name, name) == 0) {
+            memset(&hosts[i], 0, sizeof(dns_host_t));
+            mutex_unlock(&dns_lock);
+            return 0;
+        }
+    }
+    mutex_unlock(&dns_lock);
+    return -1;
+}
+
+void dns_clear_hosts(void) {
+    mutex_lock(&dns_lock);
+    memset(hosts, 0, sizeof(hosts));
+    mutex_unlock(&dns_lock);
+}
+
+/* ------------------------------------------------------------------ */
+/*  DNS查询统计                                                       */
+/* ------------------------------------------------------------------ */
+
+dns_stats_t dns_get_stats(void) {
+    return stats;
 }

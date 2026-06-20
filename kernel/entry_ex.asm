@@ -35,7 +35,7 @@ multiboot_header:
     DD _start               ; load_addr
     DD 0                    ; load_end_addr (filled by linker)
     DD 0                    ; bss_end_addr (filled by linker)
-    DD _start               ; entry_addr
+    DD _start_ex             ; entry_addr
 
     ; Video mode requests (flags bit 2)
     DD 0                    ; mode_type: 0 = linear graphics
@@ -80,7 +80,7 @@ multiboot2_header_start:
     DW 3                    ; type: entry address
     DW 0                    ; flags
     DD 12                   ; size
-    DD _start               ; entry point
+    DD _start_ex             ; entry point
 
     ; Framebuffer tag
     ALIGN 8
@@ -101,7 +101,7 @@ multiboot2_header_end:
 
 [SECTION .text]
 
-[GLOBAL _start]
+[GLOBAL _start_ex]
 [GLOBAL multiboot_magic]
 [GLOBAL multiboot_info]
 [GLOBAL cpu_features]
@@ -112,7 +112,7 @@ multiboot2_header_end:
 [EXTERN _idt_ptr]
 
 ; =============================================================================
-; _start - Kernel entry point
+; _start_ex - Multiboot-compliant kernel entry point (GRUB)
 ;
 ; Called by the bootloader (GRUB) with:
 ;   EAX = Multiboot magic number (0x2BADB002)
@@ -126,8 +126,11 @@ multiboot2_header_end:
 ;   5. BSS zeroing
 ;   6. Quick self-test
 ;   7. Jump to kernel_main
+;
+; NOTE: This entry point requires Multiboot-compliant bootloader (GRUB).
+; For the custom bootloader, kernel/entry.asm's _start is used instead.
 ; =============================================================================
-_start:
+_start_ex:
     CLI
 
     ; Save boot information

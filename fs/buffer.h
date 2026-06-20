@@ -27,4 +27,18 @@ int32_t cache_flush(uint32_t block);
 int32_t cache_flush_all(void);
 void cache_evict(void);
 
+/* 缓存统计结构体 */
+typedef struct cache_stats {
+    uint32_t hits;            /* 缓存命中次数 */
+    uint32_t misses;          /* 缓存未命中次数 */
+    uint32_t entries;         /* 当前缓存条目数 */
+    uint32_t hit_rate;        /* 命中率（百分比） */
+} cache_stats_t;
+
+/* 缓存高级操作 */
+cache_stats_t *cache_get_stats(void);
+int32_t cache_prefetch(uint32_t block_num);
+void cache_invalidate(uint32_t block_num);
+void cache_set_max_entries(uint32_t max);
+
 #endif

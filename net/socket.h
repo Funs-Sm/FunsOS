@@ -36,6 +36,13 @@
 #define SO_TYPE         0x1008
 #define SO_NONBLOCK     0x1010
 #define SO_NO_CHECK     0x400B
+#define SO_LINGER       0x0013
+#define SO_REUSEPORT    0x0200
+#define SO_RCVLOWAT     0x1005
+#define SO_SNDLOWAT     0x1006
+
+/* IP level options */
+#define IP_PKTINFO      8
 
 /* TCP level options */
 #define TCP_NODELAY     0x01
@@ -96,6 +103,35 @@ typedef struct socket {
     int32_t (*ops_setsockopt)(struct socket *, int, int, const void *, uint32_t);
     int32_t (*ops_getsockopt)(struct socket *, int, int, void *, uint32_t *);
 } socket_t;
+
+/* Socket错误队列 */
+#define SOCK_ERRQ_MAX 8
+typedef struct sock_err {
+    int32_t  errno_val;
+    uint8_t  pending;
+} sock_err_t;
+
+/* TCP连接池：允许已建立的连接被复用 */
+#define CONN_POOL_MAX 64
+typedef struct conn_pool_entry {
+    ipv4_addr_t remote_ip;
+    uint16_t    remote_port;
+    uint16_t    local_port;
+    int32_t     sock_fd;        /* 关联的socket fd, -1表示空闲 */
+    uint32_t    last_used;      /* 最后使用时间(ticks) */
+    uint8_t     in_use;
+} conn_pool_entry_t;
+
+/* 连接池管理函数 */
+void   conn_pool_init(void);
+int32_t conn_pool_lookup(ipv4_addr_t ip, uint16_t port);
+int32_t conn_pool_register(int32_t fd, ipv4_addr_t ip, uint16_t rport, uint16_t lport);
+void   conn_pool_release(int32_t fd);
+void   conn_pool_cleanup(uint32_t timeout_ticks); /* 清理超时连接 */
+
+/* Socket错误队列操作函数 */
+void sock_errq_enqueue(int fd, int32_t errno_val);
+int  sock_errq_dequeue(int fd, int32_t *errno_val);
 
 void socket_init(void);
 int32_t sys_socket(int domain, int type, int protocol);

@@ -1,226 +1,289 @@
-#ifndef FUNSOS_WINDOW_H
-#define FUNSOS_WINDOW_H
+#ifndef FUNSOS_WINDOW_SDK_H
+#define FUNSOS_WINDOW_SDK_H
 
 /*
- * FUNSOS 窗口管理 API
- * 提供窗口的创建、销毁、移动、调整大小等操作。
- * 基于 kernel/sys_api.h 和 gui/window.h 的窗口函数封装。
+ * funsos_window.h - FunsOS 窗口管理SDK头文件
+ *
+ * 为用户态程序提供窗口创建、管理和绘图的统一接口。
+ * 底层通过syscall与桌面服务通信。
  */
 
 #include "stdint.h"
+#include "stddef.h"
+#include "funsos_graphics.h"  /* 提供 funsos_surface_t 完整定义 */
 
-/* Forward declaration for funsos_rect_t (defined in funsos_graphics.h) */
-#ifndef FUNSOS_RECT_T_DEFINED
-#define FUNSOS_RECT_T_DEFINED
-typedef struct { int32_t x; int32_t y; int32_t w; int32_t h; } funsos_rect_t;
-#endif
+/* ---- 窗口属性标志 ---- */
+#define WIN_VISIBLE     0x01  /* 窗口可见 */
+#define WIN_FOCUSED     0x02  /* 窗口拥有焦点 */
+#define WIN_MAXIMIZED   0x04  /* 窗口已最大化 */
+#define WIN_MINIMIZED   0x08  /* 窗口已最小化 */
+#define WIN_RESIZABLE   0x10  /* 可调整大小 */
+#define WIN_DECORATED   0x20  /* 有标题栏装饰 */
+#define WIN_MODAL       0x40  /* 模态窗口 */
+#define WIN_TOPMOST     0x80  /* 始终置顶 */
+#define WIN_TRANSPARENT 0x100 /* 支持透明度 */
+#define WIN_NO_ACTIVATE 0x200 /* 创建时不激活 */
 
-/* ---- 窗口句柄类型 ---- */
-typedef void *funsos_window_t;
+/* ---- 光标类型常量 ---- */
+#define WIN_CURSOR_DEFAULT   0
+#define WIN_CURSOR_ARROW     1
+#define WIN_CURSOR_TEXT      2
+#define WIN_CURSOR_HAND      3
+#define WIN_CURSOR_CROSSHAIR 4
+#define WIN_CURSOR_MOVE      5
+#define WIN_CURSOR_SIZE_NS   6
+#define WIN_CURSOR_SIZE_EW   7
+#define WIN_CURSOR_SIZE_NWSE 8
+#define WIN_CURSOR_SIZE_NESW 9
+#define WIN_CURSOR_PROGRESS  10
+#define WIN_CURSOR_FORBIDDEN 11
+#define WIN_CURSOR_HELP      12
 
-/* ---- 窗口标志位 ---- */
-#define FUNSOS_WIN_VISIBLE     0x01  /* 窗口可见 */
-#define FUNSOS_WIN_BORDER      0x02  /* 显示边框 */
-#define FUNSOS_WIN_TITLE       0x04  /* 显示标题栏 */
-#define FUNSOS_WIN_RESIZABLE   0x08  /* 可调整大小 */
-#define FUNSOS_WIN_CLOSABLE    0x10  /* 可关闭 */
-#define FUNSOS_WIN_MINIMIZABLE 0x20  /* 可最小化 */
+/* ---- 窗口结构体 ---- */
+typedef struct funsos_window {
+    uint32_t handle;            /* 服务端句柄 */
+    char     title[128];        /* 窗口标题 */
+    int      x, y;              /* 窗口位置 */
+    int      width, height;     /* 窗口尺寸 */
+    uint32_t flags;             /* 属性标志 (WIN_*) */
+    funsos_surface_t *client_surface;  /* 客户区绘图表面 */
+    void    *user_data;         /* 用户自定义数据 */
+    /* 回调函数指针 */
+    void (*on_paint)(struct funsos_window *win, funsos_surface_t *surf);
+    void (*on_resize)(struct funsos_window *win, int w, int h);
+    void (*on_key)(struct funsos_window *win, int key, int action);
+    void (*on_mouse)(struct funsos_window *win, int x, int y, int btn, int act);
+    void (*on_close)(struct funsos_window *win);
+    void (*on_focus)(struct funsos_window *win, int focused);
+    uint8_t valid;              /* 结构体是否有效 */
+} funsos_window_t;
 
-/* ---- 窗口装饰样式选项 ---- */
-#define FUNSOS_STYLE_DEFAULT    0x0000  /* 默认样式（标题栏+边框+可关闭） */
-#define FUNSOS_STYLE_POPUP      0x0100  /* 弹出式窗口（无任务栏图标） */
-#define FUNSOS_STYLE_TOOL       0x0200  /* 工具窗口（窄标题栏） */
-#define FUNSOS_STYLE_SPLASH     0x0300  /* 启动画面（无标题栏，居中） */
-#define FUNSOS_STYLE_DIALOG     0x0400  /* 对话框样式（模态提示） */
-#define FUNSOS_STYLE_BORDERLESS 0x0500  /* 无边框窗口 */
-#define FUNSOS_STYLE_FIXED_SIZE 0x0600  /* 固定大小（不可调整） */
-#define FUNSOS_STYLE_TOPMOST    0x0800  /* 置顶窗口（始终在最前） */
-#define FUNSOS_STYLE_TASKBAR    0x1000  /* 显示在任务栏 */
+/* ================================================================
+ *  核心初始化
+ * ================================================================ */
 
-/* ---- 窗口状态定义 ---- */
-#define FUNSOS_WIN_STATE_NORMAL     0   /* 正常显示 */
-#define FUNSOS_WIN_STATE_MINIMIZED  1   /* 已最小化（到任务栏） */
-#define FUNSOS_WIN_STATE_MAXIMIZED  2   /* 已最大化（全屏幕但保留装饰） */
-#define FUNSOS_WIN_STATE_FULLSCREEN 3   /* 全屏模式（无装饰，独占显示） */
-#define FUNSOS_WIN_STATE_HIDDEN     4   /* 隐藏状态 */
-#define FUNSOS_WIN_STATE_ICONIFIED  5   /* 图标化（同 minimized 的别名） */
+/*
+ * 初始化窗口系统（分配内部数据结构）
+ */
+void window_system_init(void);
+
+/* ================================================================
+ *  窗口生命周期管理
+ * ================================================================ */
 
 /*
  * 创建新窗口
- * 参数: x, y - 窗口位置; w, h - 窗口尺寸; title - 窗口标题
- * 返回: 窗口句柄，失败返回 NULL
+ * 参数: title - 窗口标题; x,y - 位置; w,h - 尺寸; flags - 属性标志
+ * 返回: 窗口结构体指针, NULL 表示创建失败
  */
-funsos_window_t funsos_create_window(int x, int y, int w, int h, const char *title);
+funsos_window_t* window_create(const char *title, int x, int y,
+                               int w, int h, uint32_t flags);
 
 /*
- * 创建带样式的窗口（扩展版创建函数）
- * 参数: x, y - 窗口位置; w, h - 窗口尺寸; title - 窗口标题;
- *       style - 窗口样式 (FUNSOS_STYLE_* 组合)
- * 返回: 窗口句柄，失败返回 NULL
- */
-funsos_window_t funsos_create_window_ex(int x, int y, int w, int h,
-                                        const char *title, uint32_t style);
-
-/*
- * 销毁窗口
- * 参数: win - 窗口句柄
+ * 销毁窗口并释放资源
+ * 参数: win - 窗口指针
  * 返回: 0 成功, -1 失败
  */
-int funsos_destroy_window(funsos_window_t win);
+int window_destroy(funsos_window_t *win);
 
 /*
- * 设置窗口标题
- * 参数: win - 窗口句柄; title - 新标题
+ * 显示窗口（将可见标志设为真并通知服务端）
  * 返回: 0 成功, -1 失败
  */
-int funsos_set_window_title(funsos_window_t win, const char *title);
-
-/*
- * 请求窗口重绘
- * 参数: win - 窗口句柄
- * 返回: 0 成功, -1 失败
- */
-int funsos_invalidate_window(funsos_window_t win);
-
-/*
- * 显示窗口
- * 参数: win - 窗口句柄
- */
-void funsos_show_window(funsos_window_t win);
+int window_show(funsos_window_t *win);
 
 /*
  * 隐藏窗口
- * 参数: win - 窗口句柄
+ * 返回: 0 成功, -1 失败
  */
-void funsos_hide_window(funsos_window_t win);
+int window_hide(funsos_window_t *win);
+
+/*
+ * 设置窗口标题
+ * 参数: title - 新标题字符串(最长127字符)
+ * 返回: 0 成功, -1 失败
+ */
+int window_set_title(funsos_window_t *win, const char *title);
+
+/* ================================================================
+ *  几何操作
+ * ================================================================ */
 
 /*
  * 移动窗口到指定位置
- * 参数: win - 窗口句柄; x, y - 新位置
+ * 返回: 0 成功, -1 失败
  */
-void funsos_move_window(funsos_window_t win, int x, int y);
+int window_move(funsos_window_t *win, int x, int y);
 
 /*
  * 调整窗口大小
- * 参数: win - 窗口句柄; w, h - 新尺寸
- */
-void funsos_resize_window(funsos_window_t win, int w, int h);
-
-/*
- * 获取窗口的图形上下文（用于绘图）
- * 参数: win - 窗口句柄
- * 返回: 图形上下文指针
- */
-void *funsos_get_window_context(funsos_window_t win);
-
-/* ---- 窗口状态控制 ---- */
-
-/*
- * 设置窗口状态（最小化/最大化/全屏等）
- * 参数: win - 窗口句柄; state - 目标状态 (FUNSOS_WIN_STATE_* )
  * 返回: 0 成功, -1 失败
  */
-int funsos_set_window_state(funsos_window_t win, int state);
+int window_resize(funsos_window_t *win, int w, int h);
 
 /*
- * 获取当前窗口状态
- * 参数: win - 窗口句柄
- * 返回: 当前状态 (FUNSOS_WIN_STATE_* ), -1 表示无效句柄
- */
-int funsos_get_window_state(funsos_window_t win);
-
-/*
- * 使窗口获得焦点
- * 参数: win - 窗口句柄
+ * 同时设置位置和大小
  * 返回: 0 成功, -1 失败
  */
-int funsos_focus_window(funsos_window_t win);
+int window_set_bounds(funsos_window_t *win, int x, int y, int w, int h);
 
 /*
- * 将窗口置于最前端
- * 参数: win - 窗口句柄
+ * 获取窗口客户区矩形
+ * 参数: x,y,w,h - 输出客户区的位置和尺寸
  */
-void funsos_raise_window(funsos_window_t win);
+void window_get_client_rect(funsos_window_t *win, int *x, int *y,
+                            int *w, int *h);
+
+/* ================================================================
+ *  Z-Order 操作
+ * ================================================================ */
 
 /*
- * 获取窗口的位置和尺寸
- * 参数: win - 窗口句柄; rect - 输出的矩形区域
+ * 将窗口提升到最前端
  * 返回: 0 成功, -1 失败
  */
-int funsos_get_window_rect(funsos_window_t win, funsos_rect_t *rect);
-
-/* ---- 事件类型常量 (集中定义供全局引用) ---- */
-#define FUNSOS_EVENT_NONE         0    /* 无事件 */
-#define FUNSOS_EVENT_KEY_PRESS    1    /* 键盘按下 */
-#define FUNSOS_EVENT_KEY_RELEASE  2    /* 键盘释放 */
-#define FUNSOS_EVENT_MOUSE_MOVE   3    /* 鼠标移动 */
-#define FUNSOS_EVENT_MOUSE_CLICK  4    /* 鼠标点击 */
-#define FUNSOS_EVENT_WINDOW_CLOSE 5    /* 窗口关闭 */
-#define FUNSOS_EVENT_TIMER        6    /* 定时器 */
-#define FUNSOS_EVENT_MOUSE_PRESS  7    /* 鼠标按下 */
-#define FUNSOS_EVENT_MOUSE_RELEASE 8   /* 鼠标释放 */
-#define FUNSOS_EVENT_WINDOW_MOVE  9    /* 窗口移动 */
-#define FUNSOS_EVENT_WINDOW_RESIZE 10  /* 窗口大小改变 */
-#define FUNSOS_EVENT_FOCUS        11   /* 获得焦点 */
-#define FUNSOS_EVENT_UNFOCUS      12   /* 失去焦点 */
-#define FUNSOS_EVENT_EXPOSE       13   /* 窗口需要重绘 */
-#define FUNSOS_EVENT_MINIMIZE     14   /* 窗口最小化 */
-#define FUNSOS_EVENT_MAXIMIZE     15   /* 窗口最大化 */
-#define FUNSOS_EVENT_RESTORE      16   /* 窗口恢复（从最小化/最大化） */
-#define FUNSOS_EVENT_ENTER        17   /* 鼠标进入窗口区域 */
-#define FUNSOS_EVENT_LEAVE        18   /* 鼠标离开窗口区域 */
-#define FUNSOS_EVENT_SCROLL       19   /* 鼠标滚轮滚动 */
-#define FUNSOS_EVENT_CLIPBOARD    20   /* 剪贴板内容变化 */
-#define FUNSOS_EVENT_DRAG_ENTER   21   /* 拖拽进入窗口 */
-#define FUNSOS_EVENT_DRAG_MOVE    22   /* 拖拽移动中 */
-#define FUNSOS_EVENT_DRAG_DROP    23   /* 拖拽放下 */
-#define FUNSOS_EVENT_DRAG_LEAVE   24   /* 拖拽离开窗口 */
-
-/* ---- 对话框 / 消息框 API ---- */
-
-/* 消息框按钮组合 */
-#define FUNSOS_MB_OK              0x00000000L  /* 确定 */
-#define FUNSOS_MB_OKCANCEL        0x00000001L  /* 确定 / 取消 */
-#define FUNSOS_MB_YESNO           0x00000004L  /* 是 / 否 */
-#define FUNSOS_YESNOCANCEL        0x00000003L  /* 是 / 否 / 取消 */
-
-/* 消息框图标类型 */
-#define FUNSOS_MB_ICON_NONE       0x00000000L  /* 无图标 */
-#define FUNSOS_MB_ICON_INFO       0x00000040L  /* 信息图标 (i) */
-#define FUNSOS_MB_ICON_WARNING    0x00000030L  /* 警告图标 (!) */
-#define FUNSOS_MB_ICON_ERROR      0x00000010L  /* 错误图标 (X) */
-#define FUNSOS_MB_ICON_QUESTION   0x00000020L  /* 问号图标 (?) */
-
-/* 消息框返回值 */
-#define FUNSOS_IDOK      1
-#define FUNSOS_IDCANCEL  2
-#define FUNSOS_IDYES     6
-#define FUNSOS_IDNO      7
+int window_raise(funsos_window_t *win);
 
 /*
- * 显示模态消息对话框
- * 参数: parent - 父窗⼝句柄 (可为 NULL); title - 对话框标题;
- *       message - 消息文本; type - 按钮与图标组合 (FUNSOS_MB_* | FUNSOS_MB_ICON_* )
- * 返回: 用户点击的按钮 ID (FUNSOS_ID*), -1 表示错误
+ * 将窗口降低到最后端
+ * 返回: 0 成功, -1 失败
  */
-int funs_message_box(funsos_window_t parent, const char *title,
-                     const char *message, uint32_t type);
+int window_lower(funsos_window_t *win);
 
 /*
- * 显示简单的确认对话框（确定/取消）
- * 参数: parent - 父窗口; title - 标题; question - 提问文本
- * 返回: 1=用户点击确定, 0=用户点击取消, -1=错误
+ * 设置/取消窗口置顶属性
+ * 参数: topmost - 1=置顶, 0=取消置顶
+ * 返回: 0 成功, -1 失败
  */
-int funs_confirm_dialog(funsos_window_t parent, const char *title,
-                        const char *question);
+int window_set_topmost(funsos_window_t *win, int topmost);
+
+/* ================================================================
+ *  属性设置
+ * ================================================================ */
 
 /*
- * 显示输入对话框（获取用户输入的单行文本）
- * 参数: parent - 父窗口; title - 标题; prompt - 提示文本;
- *       buf - 接收输入的缓冲区; bufsize - 缓冲区大小
- * 返回: 输入的字符数, -1 表示取消或错误
+ * 设置窗口不透明度
+ * 参数: alpha - 不透明度值 (0=完全透明, 255=完全不透明)
+ * 返回: 0 成功, -1 失败
  */
-int funs_input_dialog(funsos_window_t parent, const char *title,
-                      const char *prompt, char *buf, uint32_t bufsize);
+int window_set_opacity(funsos_window_t *win, uint8_t alpha);
 
-#endif /* FUNSOS_WINDOW_H */
+/*
+ * 设置鼠标光标样式
+ * 参数: cursor_type - 光标类型 (WIN_CURSOR_*)
+ * 返回: 0 成功, -1 失败
+ */
+int window_set_cursor(funsos_window_t *win, int cursor_type);
+
+/*
+ * 使指定矩形区域无效（触发重绘）
+ * 返回: 0 成功, -1 失败
+ */
+int window_invalidate_rect(funsos_window_t *win, int x, int y,
+                           int w, int h);
+
+/*
+ * 使整个客户区无效（触发完整重绘）
+ * 返回: 0 成功, -1 失败
+ */
+int window_invalidate(funsos_window_t *win);
+
+/* ================================================================
+ *  回调函数设置 API
+ * ================================================================ */
+
+/*
+ * 设置绘制回调
+ */
+void window_set_on_paint(funsos_window_t *win,
+                         void (*cb)(funsos_window_t*, funsos_surface_t*));
+
+/*
+ * 设置尺寸变化回调
+ */
+void window_set_on_resize(funsos_window_t *win,
+                          void (*cb)(funsos_window_t*, int, int));
+
+/*
+ * 设置键盘事件回调
+ */
+void window_set_on_key(funsos_window_t *win,
+                       void (*cb)(funsos_window_t*, int, int));
+
+/*
+ * 设置鼠标事件回调
+ */
+void window_set_on_mouse(funsos_window_t *win,
+                         void (*cb)(funsos_window_t*, int, int, int, int));
+
+/*
+ * 设置关闭事件回调
+ */
+void window_set_on_close(funsos_window_t *win,
+                         void (*cb)(funsos_window_t*));
+
+/* ================================================================
+ *  消息循环 API
+ * ================================================================ */
+
+/* ---- 消息结构体 ---- */
+typedef struct win_msg {
+    uint32_t msg_id;    /* 消息ID */
+    uint32_t wparam;    /* wParam 参数 */
+    uint32_t lparam;    /* lParam 参数 */
+    int64_t  time;      /* 消息时间戳 */
+} win_msg_t;
+
+/* ---- 消息ID常量 ---- */
+#define WIN_MSG_PAINT     0x0001
+#define WIN_MSG_CLOSE     0x0002
+#define WIN_MSG_DESTROY   0x0003
+#define WIN_MSG_KEYDOWN   0x0100
+#define WIN_MSG_KEYUP     0x0101
+#define WIN_MSG_CHAR      0x0102
+#define WIN_MSG_MOUSEMOVE 0x0200
+#define WIN_MSG_LBUTTONDOWN 0x0201
+#define WIN_MSG_LBUTTONUP   0x0202
+#define WIN_MSG_RBUTTONDOWN 0x0204
+#define WIN_MSG_RBUTTONUP   0x0205
+#define WIN_MSG_MOUSEWHEEL  0x020A
+#define WIN_MSG_SIZE       0x0005
+#define WIN_MSG_MOVE       0x0006
+#define WIN_MSG_SETFOCUS   0x0007
+#define WIN_MSG_KILLFOCUS  0x0008
+#define WIN_MSG_TIMER      0x0083
+#define WIN_MSG_QUIT       0x0012
+
+/*
+ * 进入消息循环（阻塞直到收到 WM_QUIT 消息）
+ * 返回: 退出码
+ */
+int window_message_loop(void);
+
+/*
+ * 非阻塞地查看消息队列中是否有消息
+ * 参数: msg - 接收消息的结构体
+ * 返回: 1 有消息, 0 无消息, -1 错误
+ */
+int window_peek_message(win_msg_t *msg);
+
+/*
+ * 向指定窗口投递消息
+ * 参数: win_handle - 目标窗口句柄; msg - 消息ID; wp/lp - 参数
+ * 返回: 0 成功, -1 失败
+ */
+int window_post_message(uint32_t win_handle, uint32_t msg,
+                        uint32_t wp, uint32_t lp);
+
+/* ================================================================
+ *  模态对话框 API
+ * ================================================================ */
+
+/*
+ * 以模态方式运行对话框（阻塞父窗口直到对话框关闭）
+ * 参数: parent - 父窗口; dialog - 对话框窗口
+ * 返回: 对话框返回值
+ */
+int window_dialog_run(funsos_window_t *parent, funsos_window_t *dialog);
+
+#endif /* FUNSOS_WINDOW_SDK_H */

@@ -135,4 +135,43 @@ int  netfilter_run_tables(int hook, net_buffer_t *buf);
  * If buf is NULL, only the IP-header-independent fields are used. */
 int  nf_match_test(const nf_match_t *m, net_buffer_t *buf);
 
+/* ------------------------------------------------------------------- */
+/*  规则日志                                                            */
+/* ------------------------------------------------------------------- */
+
+#define NF_LOG_MAX 256
+typedef struct nf_log_entry {
+    uint32_t timestamp;
+    int      hook;
+    uint32_t src_ip;
+    uint32_t dst_ip;
+    uint16_t src_port;
+    uint16_t dst_port;
+    uint8_t  protocol;
+    uint8_t  verdict; /* NF_ACCEPT/NF_DROP */
+} nf_log_entry_t;
+
+void   nf_log_init(void);
+void   nf_log_packet(int hook, net_buffer_t *buf, int verdict);
+void   nf_log_dump(void (*fn)(const char *));
+
+/* ------------------------------------------------------------------- */
+/*  连接跟踪(Conntrack)基础                                             */
+/* ------------------------------------------------------------------- */
+
+#define NF_CONNTRACK_MAX 128
+typedef struct nf_conntrack {
+    uint32_t src_ip; uint16_t src_port;
+    uint32_t dst_ip; uint16_t dst_port;
+    uint8_t  protocol;
+    uint8_t  state; /* 0=new, 1=established, 2=closing */
+    uint32_t timeout;
+    uint8_t  used;
+} nf_conntrack_t;
+
+void   nf_ct_init(void);
+int    nf_ct_check(net_buffer_t *buf, int *state);
+void   nf_ct_update(net_buffer_t *buf, uint8_t state);
+void   nf_ct_cleanup(uint32_t now);
+
 #endif

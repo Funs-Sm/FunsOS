@@ -320,8 +320,80 @@ void fr_shape_fill(fr_shape_t *shape, fr_context_t *ctx)
         float ry = shape->params[FR_RECT_PARAM_RY];
         if (rx <= 0.0f && ry <= 0.0f) {
             fr_shape_fill_rect(ctx, sx, sy, sw, sh, color);
-        } else {
-            fr_shape_fill_rect(ctx, sx, sy, sw, sh, color);
+            break;
+        }
+
+        /* 限制圆角半径不超过矩形尺寸的一半 */
+        if (rx > sw * 0.5f) rx = sw * 0.5f;
+        if (ry > sh * 0.5f) ry = sh * 0.5f;
+        /* 最小圆角半径为1 */
+        if (rx < 1.0f) rx = 1.0f;
+        if (ry < 1.0f) ry = 1.0f;
+
+        int irx = (int)rx;
+        int iry = (int)ry;
+
+        /* 1. 填充中间矩形 (不含四个角的区域) */
+        for (int py = sy + iry; py < sy + sh - iry; py++) {
+            if (py < 0 || py >= ctx->height) continue;
+            int x_start = sx < 0 ? 0 : sx;
+            int x_end = sx + sw - 1;
+            if (x_end >= ctx->width) x_end = ctx->width - 1;
+            for (int px = x_start; px <= x_end; px++)
+                ctx->framebuffer[py * ctx->width + px] = color;
+        }
+
+        /* 2. 填充上下水平条带 */
+        for (int py = sy; py < sy + iry; py++) {
+            if (py < 0 || py >= ctx->height) continue;
+            int x_start = sx + irx;
+            int x_end = sx + sw - irx - 1;
+            if (x_start < 0) x_start = 0;
+            if (x_end >= ctx->width) x_end = ctx->width - 1;
+            for (int px = x_start; px <= x_end; px++)
+                ctx->framebuffer[py * ctx->width + px] = color;
+        }
+        for (int py = sy + sh - iry; py < sy + sh; py++) {
+            if (py < 0 || py >= ctx->height) continue;
+            int x_start = sx + irx;
+            int x_end = sx + sw - irx - 1;
+            if (x_start < 0) x_start = 0;
+            if (x_end >= ctx->width) x_end = ctx->width - 1;
+            for (int px = x_start; px <= x_end; px++)
+                ctx->framebuffer[py * ctx->width + px] = color;
+        }
+
+        /* 3. 四个圆角 - 用椭圆方程判断
+         * 左上角圆心 (sx+irx, sy+iry)
+         * 右上角圆心 (sx+sw-irx-1, sy+iry)
+         * 左下角圆心 (sx+irx, sy+sh-iry-1)
+         * 右下角圆心 (sx+sw-irx-1, sy+sh-iry-1)
+         */
+        int corners_x[4] = { sx + irx,           sx + sw - irx - 1, sx + irx,           sx + sw - irx - 1 };
+        int corners_y[4] = { sy + iry,           sy + iry,           sy + sh - iry - 1,   sy + sh - iry - 1 };
+        int dx_signs[4] = { -1,                   1,                  -1,                   1 };
+        int dy_signs[4] = { -1,                  -1,                   1,                    1 };
+
+        for (int c = 0; c < 4; c++) {
+            int cx_corner = corners_x[c];
+            int cy_corner = corners_y[c];
+            int y_start = dy_signs[c] > 0 ? cy_corner : cy_corner - iry + 1;
+            int y_end   = dy_signs[c] > 0 ? cy_corner + iry - 1 : cy_corner;
+
+            for (int py = y_start; py <= y_end; py++) {
+                if (py < 0 || py >= ctx->height) continue;
+                int x_start_c = dx_signs[c] > 0 ? cx_corner : cx_corner - irx + 1;
+                int x_end_c   = dx_signs[c] > 0 ? cx_corner + irx - 1 : cx_corner;
+
+                for (int px = x_start_c; px <= x_end_c; px++) {
+                    if (px < 0 || px >= ctx->width) continue;
+                    float dx = (float)(px - cx_corner);
+                    float dy = (float)(py - cy_corner);
+                    /* 椭圆方程: (dx/rx)^2 + (dy/ry)^2 <= 1 */
+                    if ((dx * dx) / (rx * rx) + (dy * dy) / (ry * ry) <= 1.0f)
+                        ctx->framebuffer[py * ctx->width + px] = color;
+                }
+            }
         }
         break;
     }

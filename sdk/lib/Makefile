@@ -5,7 +5,7 @@ CFLAGS  = -m32 -ffreestanding -nostdlib -I ../include -Wall -Wextra
 AR      = ar
 
 TARGET  = libfunsos_api.a
-OBJ     = funsos_api.o funsos_glue.o
+OBJ     = funsos_api.o funsos_glue.o funsos_libc.o funsos_surface.o funsos_pipeline.o funsos_event.o funsos_window.o funsos_audio.o
 
 # Tools
 TOOLS_DIR = ../tools
@@ -22,6 +22,24 @@ funsos_api.o: funsos_api.c funsos_api.h ../include/funsos.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
 funsos_glue.o: funsos_glue.c funsos_api.h ../include/funsos.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+funsos_libc.o: funsos_libc.c ../include/funsos.h ../include/funsos_libc.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+funsos_surface.o: funsos_surface.c ../include/funsos.h ../include/funsos_libc.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+funsos_pipeline.o: funsos_pipeline.c ../include/funsos.h ../include/funsos_libc.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+funsos_event.o: funsos_event.c ../include/funsos.h ../include/funsos_event.h ../include/funsos_libc.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+funsos_window.o: funsos_window.c ../include/funsos.h ../include/funsos_window.h ../include/funsos_surface.h ../include/funsos_libc.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+funsos_audio.o: funsos_audio.c ../include/funsos.h ../include/funsos_audio.h ../include/funsos_libc.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # funpack tool

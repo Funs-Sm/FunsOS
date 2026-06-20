@@ -61,16 +61,26 @@ def main():
     loader_padded = pad_to(loader, LOADER_SECTORS * SECTOR, "loader.bin")
     stage2_padded = pad_to(stage2, STAGE2_SECTORS * SECTOR, "stage2.bin")
 
+    # Calculate kernel sector count (rounded up)
+    kernel_sectors = (len(kernel) + SECTOR - 1) // SECTOR
+
+    # Build sector 1: kernel info block
+    # Bytes 0-3: magic 0xB007F00D
+    # Bytes 4-7: kernel_sectors (uint32 LE)
+    # Bytes 8-11: kernel_total_bytes (uint32 LE)
+    info_block = struct.pack("<III", 0xB007F00D, kernel_sectors, len(kernel))
+    info_block = info_block + b"\x00" * (SECTOR - len(info_block))
+
     with open(out_path, "wb") as f:
         f.write(boot_padded)                       # sector 0
-        f.write(b"\x00" * SECTOR)                 # sector 1 (reserved)
-        f.write(loader_padded)                    # sectors 2..21
-        f.write(stage2_padded)                    # sectors 22..25
-        f.write(kernel)                           # sector 26+
+        f.write(info_block)                        # sector 1 (kernel info)
+        f.write(loader_padded)                     # sectors 2..21
+        f.write(stage2_padded)                     # sectors 22..25
+        f.write(kernel)                            # sector 26+
 
     size = SECTOR * 2 + len(loader_padded) + len(stage2_padded) + len(kernel)
-    sys.stdout.write("mkimg: wrote %s (%d bytes, %d sectors)\n"
-                     % (out_path, size, (size + SECTOR - 1) // SECTOR))
+    sys.stdout.write("mkimg: wrote %s (%d bytes, %d sectors, kernel=%d sectors)\n"
+                     % (out_path, size, (size + SECTOR - 1) // SECTOR, kernel_sectors))
 
 if __name__ == "__main__":
     main()

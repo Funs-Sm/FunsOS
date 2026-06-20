@@ -10,6 +10,9 @@
 #include "tarfs.h"
 #include "btrfs.h"
 #include "xfs.h"
+#include "../kernel/permission.h"
+#include "../kernel/user.h"
+#include "../kernel/klog.h"
 
 dentry_t *root_dentry;
 mount_t *mount_list;
@@ -134,6 +137,19 @@ int32_t vfs_mount(const char *path, uint32_t fs_type, void *data) {
     mnt->root_dentry = sb->root ? sb->root->dentries : target;
     target->mount_point = 1;
 
+    /* 挂载到根路径时，将文件系统 ops 和数据同步到 root_dentry 的 inode */
+    if (sb->root && target == root_dentry) {
+        /* 设置 sb->root->dentries 并修正 mnt->root_dentry（mount_point 跟踪需要） */
+        sb->root->dentries = root_dentry;
+        mnt->root_dentry = root_dentry;
+        /* 同步关键字段到 root_dentry 的 inode */
+        root_dentry->inode->ops = sb->root->ops;
+        root_dentry->inode->private_data = sb->root->private_data;
+        root_dentry->inode->sb = sb->root->sb;
+        root_dentry->inode->ino = sb->root->ino;
+        cwd_dentry = root_dentry;
+    }
+
     mnt->next = mount_list;
     mount_list = mnt;
 
@@ -184,14 +200,66 @@ int32_t vfs_open(const char *path, uint32_t flags, file_t **file) {
 
     spinlock_lock(&vfs_lock);
 
+    int32_t created = 0;
     if (path_resolve(path, &dentry) != 0) {
-        spinlock_unlock(&vfs_lock);
-        return -1;
+        if (!(flags & FILE_MODE_CREATE)) {
+            spinlock_unlock(&vfs_lock);
+            return -1;
+        }
+
+        /* Create the file and then resolve it again. */
+        char parent_path[PATH_MAX];
+        char name[256];
+        if (path_parent(path, parent_path, PATH_MAX) != 0 ||
+            path_basename(path, name, 256) != 0) {
+            spinlock_unlock(&vfs_lock);
+            return -1;
+        }
+
+        dentry_t *parent = NULL;
+        if (path_resolve(parent_path, &parent) != 0 ||
+            !parent->inode || !parent->inode->ops ||
+            !parent->inode->ops->create) {
+            spinlock_unlock(&vfs_lock);
+            return -1;
+        }
+
+        if (parent->inode->ops->create(parent, name,
+                                       FILE_MODE_REG | FILE_MODE_READ | FILE_MODE_WRITE) != 0) {
+            spinlock_unlock(&vfs_lock);
+            return -1;
+        }
+
+        if (path_resolve(path, &dentry) != 0 || !dentry->inode) {
+            spinlock_unlock(&vfs_lock);
+            return -1;
+        }
+        created = 1;
     }
 
     if (!dentry->inode) {
         spinlock_unlock(&vfs_lock);
         return -1;
+    }
+
+    /* 权限检查: 打开文件需要读取权限 */
+    {
+        uint32_t proc_uid = user_get_current_uid();
+        uint32_t proc_gid = 0;
+        user_t *cur = user_get_current();
+        if (cur) proc_gid = cur->gid;
+
+        if (perm_check_path(path, PERM_READ) != 0) {
+            spinlock_unlock(&vfs_lock);
+            return -1;
+        }
+        if (perm_check_extended(dentry->inode->uid, dentry->inode->gid,
+                                (uint16_t)dentry->inode->mode,
+                                dentry->inode->acl, proc_uid, proc_gid,
+                                PERM_READ) != 0) {
+            spinlock_unlock(&vfs_lock);
+            return -1;
+        }
     }
 
     file_t *f = (file_t *)kmalloc(sizeof(file_t));
@@ -207,6 +275,7 @@ int32_t vfs_open(const char *path, uint32_t flags, file_t **file) {
     f->ops = NULL;
     f->private_data = NULL;
     f->ref_count = 1;
+    (void)created;
 
     if (dentry->inode->sb && dentry->inode->sb->fs_type == FS_TYPE_DEVFS) {
         extern file_ops_t devfs_file_ops;
@@ -275,6 +344,22 @@ int32_t vfs_read(file_t *file, void *buf, uint32_t count) {
 int32_t vfs_write(file_t *file, const void *buf, uint32_t count) {
     if (!file || !file->ops || !file->ops->write) return -1;
     if (!(file->flags & FILE_MODE_WRITE)) return -1;
+
+    /* 权限检查: 写入文件需要写入权限 */
+    if (file->inode) {
+        uint32_t proc_uid = user_get_current_uid();
+        uint32_t proc_gid = 0;
+        user_t *cur = user_get_current();
+        if (cur) proc_gid = cur->gid;
+
+        if (perm_check_extended(file->inode->uid, file->inode->gid,
+                                (uint16_t)file->inode->mode,
+                                file->inode->acl, proc_uid, proc_gid,
+                                PERM_WRITE) != 0) {
+            return -1;
+        }
+    }
+
     return file->ops->write(file, buf, count);
 }
 
@@ -329,6 +414,24 @@ int32_t vfs_mkdir(const char *path, uint32_t mode) {
         return -1;
     }
 
+    /* 权限检查: 创建目录需要父目录写入权限 */
+    {
+        uint32_t proc_uid = user_get_current_uid();
+        uint32_t proc_gid = 0;
+        user_t *cur = user_get_current();
+        if (cur) proc_gid = cur->gid;
+
+        int pc = perm_check_path(parent_path, PERM_WRITE);
+        int pe = perm_check_extended(parent->inode->uid, parent->inode->gid,
+                                    (uint16_t)parent->inode->mode,
+                                    parent->inode->acl, proc_uid, proc_gid,
+                                    PERM_WRITE);
+        if (pc != 0 || pe != 0) {
+            spinlock_unlock(&vfs_lock);
+            return -1;
+        }
+    }
+
     int32_t ret = parent->inode->ops->mkdir(parent, name, mode);
     spinlock_unlock(&vfs_lock);
     return ret;
@@ -360,6 +463,23 @@ int32_t vfs_rmdir(const char *path) {
         return -1;
     }
 
+    /* 权限检查: 删除目录需要父目录写入权限 */
+    {
+        uint32_t proc_uid = user_get_current_uid();
+        uint32_t proc_gid = 0;
+        user_t *cur = user_get_current();
+        if (cur) proc_gid = cur->gid;
+
+        if (perm_check_path(parent_path, PERM_WRITE) != 0 ||
+            perm_check_extended(parent->inode->uid, parent->inode->gid,
+                                (uint16_t)parent->inode->mode,
+                                parent->inode->acl, proc_uid, proc_gid,
+                                PERM_WRITE) != 0) {
+            spinlock_unlock(&vfs_lock);
+            return -1;
+        }
+    }
+
     int32_t ret = parent->inode->ops->rmdir(parent, name);
     spinlock_unlock(&vfs_lock);
     return ret;
@@ -389,6 +509,23 @@ int32_t vfs_unlink(const char *path) {
     if (!parent->inode || !parent->inode->ops || !parent->inode->ops->unlink) {
         spinlock_unlock(&vfs_lock);
         return -1;
+    }
+
+    /* 权限检查: 删除文件需要父目录写入权限 */
+    {
+        uint32_t proc_uid = user_get_current_uid();
+        uint32_t proc_gid = 0;
+        user_t *cur = user_get_current();
+        if (cur) proc_gid = cur->gid;
+
+        if (perm_check_path(parent_path, PERM_WRITE) != 0 ||
+            perm_check_extended(parent->inode->uid, parent->inode->gid,
+                                (uint16_t)parent->inode->mode,
+                                parent->inode->acl, proc_uid, proc_gid,
+                                PERM_WRITE) != 0) {
+            spinlock_unlock(&vfs_lock);
+            return -1;
+        }
     }
 
     int32_t ret = parent->inode->ops->unlink(parent, name);
@@ -612,7 +749,7 @@ int32_t vfs_readlink(const char *path, char *buf, uint32_t size) {
     dentry_t *dentry = NULL;
 
     spinlock_lock(&vfs_lock);
-    if (path_resolve(path, &dentry) != 0 || !dentry->inode) {
+    if (path_resolve_nofollow(path, &dentry) != 0 || !dentry->inode) {
         spinlock_unlock(&vfs_lock);
         return -1;
     }
@@ -636,9 +773,24 @@ int32_t vfs_chmod(const char *path, uint32_t mode) {
         return -1;
     }
 
-    /* Update mode: preserve file type bits, replace permission bits */
-    dentry->inode->mode = (dentry->inode->mode & (FILE_MODE_DIR | FILE_MODE_REG | FILE_MODE_LNK)) |
-                          (mode & (FILE_MODE_READ | FILE_MODE_WRITE | FILE_MODE_EXEC));
+    /* 权限控制: 仅 owner 或 admin 可更改文件模式 */
+    {
+        uint32_t proc_uid = user_get_current_uid();
+        int is_admin = perm_is_admin();
+
+        if (proc_uid != dentry->inode->uid && !is_admin) {
+            spinlock_unlock(&vfs_lock);
+            return -1;
+        }
+        uint16_t cur_mode = (uint16_t)dentry->inode->mode;
+        if (perm_set_mode(&cur_mode, (uint16_t)mode, proc_uid, is_admin) != 0) {
+            spinlock_unlock(&vfs_lock);
+            return -1;
+        }
+        /* Update mode: preserve file type bits, replace permission bits */
+        dentry->inode->mode = (dentry->inode->mode & (FILE_MODE_DIR | FILE_MODE_REG | FILE_MODE_LNK)) |
+                              (cur_mode & (FILE_MODE_READ | FILE_MODE_WRITE | FILE_MODE_EXEC));
+    }
 
     /* For disk-based filesystems, write back to disk */
     if (dentry->inode->sb) {

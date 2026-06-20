@@ -47,6 +47,7 @@ typedef struct sock_fd {
     uint8_t   used;
     pcb_t    *owner;
     void     *file_like; /* placeholder for future VFS bridge           */
+    sock_err_t err_queue[SOCK_ERRQ_MAX]; /* Socket错误队列              */
 } sock_fd_t;
 
 static sock_fd_t  sock_table[SOCK_FD_MAX];
@@ -86,10 +87,12 @@ static socket_t *sock_get(int32_t fd) {
 
 void socket_init(void) {
     mutex_init(&sock_table_lock);
+    conn_pool_init();
     for (int32_t i = 0; i < SOCK_FD_MAX; i++) {
         sock_table[i].used = 0;
         sock_table[i].owner = NULL;
         sock_table[i].file_like = NULL;
+        memset(sock_table[i].err_queue, 0, sizeof(sock_table[i].err_queue));
     }
 }
 
@@ -501,6 +504,20 @@ static int32_t sock_tcp_setsockopt(socket_t *s, int level, int optname,
             return 0;
         case SO_RCVBUF:
             return 0;
+        case SO_LINGER:
+            /* 支持优雅关闭延迟 - 记录linger时间 */
+            if (optval && optlen >= 4) {
+                s->snd_timeout_ms = *(uint32_t *)optval;  /* 复用snd_timeout_ms存储linger时间 */
+                return 0;
+            }
+            return -1;
+        case SO_REUSEPORT:
+            s->flags |= SO_REUSEPORT;
+            return 0;
+        case SO_SNDLOWAT:
+        case SO_RCVLOWAT:
+            /* 低水位标记 - 接受但不强制执行 */
+            return 0;
         }
     } else if (level == IPPROTO_TCP && t) {
         switch (optname) {
@@ -561,6 +578,10 @@ static int32_t sock_tcp_setsockopt(socket_t *s, int level, int optname,
             /* All accepted as hints; we don't enforce them. */
             return 0;
         case IP_HDRINCL:
+            return 0;
+        case IP_PKTINFO:
+            /* 获取包信息 - 标记启用 */
+            s->flags |= IP_PKTINFO;
             return 0;
         }
     }
@@ -699,6 +720,16 @@ static int32_t sock_udp_setsockopt(socket_t *s, int level, int optname,
             if (optval && optlen >= 4) { s->rcv_timeout_ms = *(uint32_t *)optval; return 0; }
             return -1;
         case SO_NO_CHECK:
+            return 0;
+        case SO_REUSEPORT:
+            s->flags |= SO_REUSEPORT;
+            return 0;
+        case SO_LINGER:
+            /* UDP不支持linger，但接受参数 */
+            if (optval && optlen >= 4) return 0;
+            return -1;
+        case SO_SNDLOWAT:
+        case SO_RCVLOWAT:
             return 0;
         }
     }
@@ -857,5 +888,126 @@ int32_t sys_poll(void *fds, uint32_t nfds, int32_t timeout_ms) {
 int32_t sys_sendfile(int out_fd, int in_fd, uint64_t *offset, uint32_t count) {
     (void)out_fd; (void)in_fd; (void)offset; (void)count;
     /* sendfile not yet implemented with file_descriptor_t */
+    return -1;
+}
+
+/* ------------------------------------------------------------------------- */
+/*  TCP连接池管理（TCP连接复用）                                             */
+/* ------------------------------------------------------------------------- */
+
+static conn_pool_entry_t conn_pool[CONN_POOL_MAX];
+static mutex_t conn_pool_lock;
+
+void conn_pool_init(void) {
+    mutex_init(&conn_pool_lock);
+    for (int32_t i = 0; i < CONN_POOL_MAX; i++) {
+        memset(&conn_pool[i], 0, sizeof(conn_pool_entry_t));
+        conn_pool[i].sock_fd = -1;
+    }
+}
+
+int32_t conn_pool_lookup(ipv4_addr_t ip, uint16_t port) {
+    mutex_lock(&conn_pool_lock);
+    for (int32_t i = 0; i < CONN_POOL_MAX; i++) {
+        if (conn_pool[i].in_use &&
+            conn_pool[i].remote_ip.addr == ip.addr &&
+            conn_pool[i].remote_port == port &&
+            conn_pool[i].sock_fd >= 0) {
+            /* 找到匹配的连接，更新使用时间并返回fd */
+            conn_pool[i].last_used = timer_get_ticks();
+            int32_t fd = conn_pool[i].sock_fd;
+            mutex_unlock(&conn_pool_lock);
+            return fd;
+        }
+    }
+    mutex_unlock(&conn_pool_lock);
+    return -1;
+}
+
+int32_t conn_pool_register(int32_t fd, ipv4_addr_t ip, uint16_t rport, uint16_t lport) {
+    if (fd < 0 || fd >= SOCK_FD_MAX) return -1;
+    mutex_lock(&conn_pool_lock);
+    for (int32_t i = 0; i < CONN_POOL_MAX; i++) {
+        if (!conn_pool[i].in_use || conn_pool[i].sock_fd == -1) {
+            conn_pool[i].remote_ip = ip;
+            conn_pool[i].remote_port = rport;
+            conn_pool[i].local_port = lport;
+            conn_pool[i].sock_fd = fd;
+            conn_pool[i].last_used = timer_get_ticks();
+            conn_pool[i].in_use = 1;
+            mutex_unlock(&conn_pool_lock);
+            return 0;
+        }
+    }
+    mutex_unlock(&conn_pool_lock);
+    return -1;
+}
+
+void conn_pool_release(int32_t fd) {
+    mutex_lock(&conn_pool_lock);
+    for (int32_t i = 0; i < CONN_POOL_MAX; i++) {
+        if (conn_pool[i].in_use && conn_pool[i].sock_fd == fd) {
+            conn_pool[i].sock_fd = -1;
+            conn_pool[i].in_use = 0;
+            break;
+        }
+    }
+    mutex_unlock(&conn_pool_lock);
+}
+
+void conn_pool_cleanup(uint32_t timeout_ticks) {
+    mutex_lock(&conn_pool_lock);
+    uint32_t now = timer_get_ticks();
+    for (int32_t i = 0; i < CONN_POOL_MAX; i++) {
+        if (conn_pool[i].in_use && conn_pool[i].sock_fd >= 0) {
+            if ((now - conn_pool[i].last_used) > timeout_ticks) {
+                /* 超时关闭连接 */
+                if (conn_pool[i].sock_fd < SOCK_FD_MAX && sock_table[conn_pool[i].sock_fd].used) {
+                    socket_t *s = &sock_table[conn_pool[i].sock_fd].sock;
+                    if (s->ops_close) s->ops_close(s);
+                }
+                conn_pool[i].sock_fd = -1;
+                conn_pool[i].in_use = 0;
+            }
+        }
+    }
+    mutex_unlock(&conn_pool_lock);
+}
+
+/* ------------------------------------------------------------------------- */
+/*  Socket错误队列                                                          */
+/* ------------------------------------------------------------------------- */
+
+void sock_errq_enqueue(int fd, int32_t errno_val) {
+    if (fd < 0 || fd >= SOCK_FD_MAX) return;
+    sock_fd_t *sf = &sock_table[fd];
+    if (!sf->used) return;
+    for (int i = 0; i < SOCK_ERRQ_MAX; i++) {
+        if (!sf->err_queue[i].pending) {
+            sf->err_queue[i].errno_val = errno_val;
+            sf->err_queue[i].pending = 1;
+            return;
+        }
+    }
+    /* 队列满，丢弃最旧的错误 */
+    for (int i = 0; i < SOCK_ERRQ_MAX - 1; i++) {
+        sf->err_queue[i] = sf->err_queue[i + 1];
+    }
+    sf->err_queue[SOCK_ERRQ_MAX - 1].errno_val = errno_val;
+    sf->err_queue[SOCK_ERRQ_MAX - 1].pending = 1;
+}
+
+int sock_errq_dequeue(int fd, int32_t *errno_val) {
+    if (fd < 0 || fd >= SOCK_FD_MAX || !errno_val) return -1;
+    sock_fd_t *sf = &sock_table[fd];
+    if (!sf->used) return -1;
+    for (int i = 0; i < SOCK_ERRQ_MAX; i++) {
+        if (sf->err_queue[i].pending) {
+            *errno_val = sf->err_queue[i].errno_val;
+            sf->err_queue[i].pending = 0;
+            sf->err_queue[i].errno_val = 0;
+            return 0;
+        }
+    }
     return -1;
 }

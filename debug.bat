@@ -21,7 +21,7 @@ echo [INFO] Connect GDB with: target remote localhost:1234
 echo [INFO] In another terminal run: gdb build/kernel.elf
 echo.
 
-start /b qemu-system-i386 -drive format=raw,file=build\os.img -m 128 -s -S -serial stdio 2>&1
+start /b qemu-system-i386 -drive format=raw,file=build\os.img,if=ide,index=0 -m 128 -s -S -serial stdio 2>&1
 
 echo [INFO] QEMU waiting for GDB connection on port 1234...
 echo [INFO] Press any key to stop QEMU...

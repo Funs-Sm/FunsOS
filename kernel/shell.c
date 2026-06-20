@@ -53,6 +53,7 @@
 #include "user_persist.h"
 #include "fundb.h"
 #include "config.h"
+#include "serial.h"
 
 #define SHELL_MAX_LINE 256
 #define SHELL_PROMPT  "funs> "
@@ -276,15 +277,15 @@ static int shell_read_line(char *buf, uint32_t size) {
     uint32_t pos = 0;
 
     while (1) {
-        /* Try interrupt-driven first, then fall back to polling */
+        /* Poll keyboard hardware directly.
+         * Note: keyboard_wait() (semaphore/IRQ-based) may not work if
+         * IRQ 1 is not firing in this QEMU config. Polling is the
+         * reliable fallback. */
+        keyboard_poll();
+
         if (!keyboard_has_data()) {
-            keyboard_poll();  /* Poll hardware directly as fallback */
-        }
-        if (!keyboard_has_data()) {
-            if (is_vbe_mode()) {
-                fb_console_blink_cursor();
-            }
-            asm volatile("hlt");
+            /* Short yield to avoid hogging CPU */
+            for (volatile int y = 0; y < 1000; y++) { asm volatile("nop"); }
             continue;
         }
 
@@ -618,11 +619,9 @@ static int shell_read_password(char *buf, uint32_t size) {
     if (size == 0) return 0;
     uint32_t pos = 0;
     while (1) {
+        keyboard_poll();
         if (!keyboard_has_data()) {
-            keyboard_poll();  /* Poll hardware directly as fallback */
-        }
-        if (!keyboard_has_data()) {
-            asm volatile("hlt");
+            for (volatile int y = 0; y < 1000; y++) { asm volatile("nop"); }
             continue;
         }
         keyboard_event_t event;

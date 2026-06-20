@@ -176,6 +176,10 @@ int keyboard_poll(void) {
     return 0;
 }
 
+void keyboard_wait(void) {
+    sem_wait(&kb_sem);
+}
+
 int keyboard_get_event(keyboard_event_t *event) {
     if (kb_head == kb_tail) {
         return 0;

@@ -4,6 +4,8 @@
 #include "stddef.h"
 #include "stdint.h"
 #include "kheap.h"
+#include "timer.h"
+#include "stdio.h"
 
 /* Per-hook chain of registered callbacks.  We use a small static
  * table to avoid the cost of heap allocation; the typical number of
@@ -26,6 +28,8 @@ void netfilter_init(void) {
     table_count = 0;
     mutex_init(&nf_lock);
     mutex_init(&table_lock);
+    nf_log_init();
+    nf_ct_init();
 }
 
 int netfilter_register(int hook, int (*fn)(net_buffer_t *, int, void *), void *priv) {
@@ -264,10 +268,8 @@ int nf_match_test(const nf_match_t *m, net_buffer_t *buf) {
     uint8_t ihl = (vihl & 0x0F) * 4;
     if (ihl < 20 || buf->len < (int)ihl) return 0;
     uint8_t proto = p[9];
-    uint32_t sip = ((uint32_t)p[12])      | ((uint32_t)p[13] << 8) |
-                   ((uint32_t)p[14] << 16)| ((uint32_t)p[15] << 24);
-    uint32_t dip = ((uint32_t)p[16])      | ((uint32_t)p[17] << 8) |
-                   ((uint32_t)p[18] << 16)| ((uint32_t)p[19] << 24);
+    uint32_t sip = ((uint32_t)p[12]) | ((uint32_t)p[13] << 8) | (((uint32_t)p[14] << 16) | ((uint32_t)p[15] << 24));
+    uint32_t dip = ((uint32_t)p[16]) | ((uint32_t)p[17] << 8) | (((uint32_t)p[18] << 16) | ((uint32_t)p[19] << 24));
 
     if (m->flags & NF_MATCH_SRC_IP) {
         if ((sip & m->src_mask.addr) != (m->src_ip.addr & m->src_mask.addr)) return 0;
@@ -338,4 +340,180 @@ int netfilter_run_tables(int hook, net_buffer_t *buf) {
         }
     }
     return verdict;
+}
+
+/* ------------------------------------------------------------------ */
+/*  规则日志                                                           */
+/* ------------------------------------------------------------------ */
+
+static nf_log_entry_t nf_log[NF_LOG_MAX];
+static uint32_t nf_log_pos;
+static mutex_t   nf_log_lock;
+
+void nf_log_init(void) {
+    memset(nf_log, 0, sizeof(nf_log));
+    nf_log_pos = 0;
+    mutex_init(&nf_log_lock);
+}
+
+void nf_log_packet(int hook, net_buffer_t *buf, int verdict) {
+    if (!buf || hook < 0 || hook >= NF_INET_NUMHOOKS) return;
+    if (buf->len < 20) return;
+
+    const uint8_t *p = (const uint8_t *)buf->data + buf->offset;
+    uint8_t vihl = p[0];
+    if (((vihl >> 4) & 0x0F) != 4) return;
+    uint8_t ihl = (vihl & 0x0F) * 4;
+    if (ihl < 20 || buf->len < (int)ihl) return;
+
+    uint8_t proto = p[9];
+    uint32_t sip = ((uint32_t)p[12]) | ((uint32_t)p[13] << 8) | (((uint32_t)p[14] << 16) | ((uint32_t)p[15] << 24));
+    uint32_t dip = ((uint32_t)p[16]) | ((uint32_t)p[17] << 8) | (((uint32_t)p[18] << 16) | ((uint32_t)p[19] << 24));
+
+    uint16_t sport = 0, dport = 0;
+    if ((proto == 6 || proto == 17) && buf->len >= (int)(ihl + 4)) {
+        const uint8_t *l4 = p + ihl;
+        sport = ((uint16_t)l4[0] << 8) | l4[1];
+        dport = ((uint16_t)l4[2] << 8) | l4[3];
+    }
+
+    mutex_lock(&nf_log_lock);
+    nf_log_entry_t *entry = &nf_log[nf_log_pos % NF_LOG_MAX];
+    entry->timestamp = timer_get_ticks();
+    entry->hook = hook;
+    entry->src_ip = sip;
+    entry->dst_ip = dip;
+    entry->src_port = sport;
+    entry->dst_port = dport;
+    entry->protocol = proto;
+    entry->verdict = (uint8_t)verdict;
+    nf_log_pos++;
+    mutex_unlock(&nf_log_lock);
+}
+
+void nf_log_dump(void (*fn)(const char *)) {
+    if (!fn) return;
+    mutex_lock(&nf_log_lock);
+    uint32_t count = (nf_log_pos > NF_LOG_MAX) ? NF_LOG_MAX : nf_log_pos;
+    for (uint32_t i = 0; i < count; i++) {
+        nf_log_entry_t *e = &nf_log[i];
+        char line[128];
+        /* 格式化输出日志条目 */
+        int len = snprintf(line, sizeof(line),
+            "[%u] HOOK=%d SRC=%u.%u.%u.%u:%u DST=%u.%u.%u.%u:%u PROTO=%u VERDICT=%s\n",
+            e->timestamp, e->hook,
+            (e->src_ip >> 0) & 0xFF, (e->src_ip >> 8) & 0xFF,
+            (e->src_ip >> 16) & 0xFF, (e->src_ip >> 24) & 0xFF, e->src_port,
+            (e->dst_ip >> 0) & 0xFF, (e->dst_ip >> 8) & 0xFF,
+            (e->dst_ip >> 16) & 0xFF, (e->dst_ip >> 24) & 0xFF, e->dst_port,
+            e->protocol, e->verdict == NF_ACCEPT ? "ACCEPT" : "DROP");
+        (void)len;
+        fn(line);
+    }
+    mutex_unlock(&nf_log_lock);
+}
+
+/* ------------------------------------------------------------------ */
+/*  连接跟踪(Conntrack)基础                                            */
+/* ------------------------------------------------------------------ */
+
+static nf_conntrack_t ct_table[NF_CONNTRACK_MAX];
+
+void nf_ct_init(void) {
+    memset(ct_table, 0, sizeof(ct_table));
+}
+
+int nf_ct_check(net_buffer_t *buf, int *state) {
+    if (!buf || !state) return -1;
+    if (buf->len < 20) return -1;
+
+    const uint8_t *p = (const uint8_t *)buf->data + buf->offset;
+    uint8_t vihl = p[0];
+    if (((vihl >> 4) & 0x0F) != 4) return -1;
+    uint8_t ihl = (vihl & 0x0F) * 4;
+    if (ihl < 20 || buf->len < (int)ihl) return -1;
+
+    uint8_t proto = p[9];
+    /* 只跟踪TCP和UDP */
+    if (proto != 6 && proto != 17) return -1;
+
+    uint32_t sip = ((uint32_t)p[12]) | ((uint32_t)p[13] << 8) | (((uint32_t)p[14] << 16) | ((uint32_t)p[15] << 24));
+    uint32_t dip = ((uint32_t)p[16]) | ((uint32_t)p[17] << 8) | (((uint32_t)p[18] << 16) | ((uint32_t)p[19] << 24));
+
+    uint16_t sport = 0, dport = 0;
+    if (buf->len >= (int)(ihl + 4)) {
+        const uint8_t *l4 = p + ihl;
+        sport = ((uint16_t)l4[0] << 8) | l4[1];
+        dport = ((uint16_t)l4[2] << 8) | l4[3];
+    }
+
+    for (uint32_t i = 0; i < NF_CONNTRACK_MAX; i++) {
+        if (ct_table[i].used &&
+            ct_table[i].src_ip == sip && ct_table[i].src_port == sport &&
+            ct_table[i].dst_ip == dip && ct_table[i].dst_port == dport &&
+            ct_table[i].protocol == proto) {
+            *state = ct_table[i].state;
+            return 0;
+        }
+    }
+    *state = 0; /* 未找到，状态为new */
+    return 0;
+}
+
+void nf_ct_update(net_buffer_t *buf, uint8_t state) {
+    if (!buf) return;
+    if (buf->len < 20) return;
+
+    const uint8_t *p = (const uint8_t *)buf->data + buf->offset;
+    uint8_t vihl = p[0];
+    if (((vihl >> 4) & 0x0F) != 4) return;
+    uint8_t ihl = (vihl & 0x0F) * 4;
+    if (ihl < 20 || buf->len < (int)ihl) return;
+
+    uint8_t proto = p[9];
+    if (proto != 6 && proto != 17) return;
+
+    uint32_t sip = ((uint32_t)p[12]) | ((uint32_t)p[13] << 8) | (((uint32_t)p[14] << 16) | ((uint32_t)p[15] << 24));
+    uint32_t dip = ((uint32_t)p[16]) | ((uint32_t)p[17] << 8) | (((uint32_t)p[18] << 16) | ((uint32_t)p[19] << 24));
+
+    uint16_t sport = 0, dport = 0;
+    if (buf->len >= (int)(ihl + 4)) {
+        const uint8_t *l4 = p + ihl;
+        sport = ((uint16_t)l4[0] << 8) | l4[1];
+        dport = ((uint16_t)l4[2] << 8) | l4[3];
+    }
+
+    for (uint32_t i = 0; i < NF_CONNTRACK_MAX; i++) {
+        if (ct_table[i].used &&
+            ct_table[i].src_ip == sip && ct_table[i].src_port == sport &&
+            ct_table[i].dst_ip == dip && ct_table[i].dst_port == dport &&
+            ct_table[i].protocol == proto) {
+            ct_table[i].state = state;
+            ct_table[i].timeout = timer_get_ticks() + 300; /* 默认超时300 ticks */
+            return;
+        }
+    }
+
+    /* 未找到，创建新条目 */
+    for (uint32_t i = 0; i < NF_CONNTRACK_MAX; i++) {
+        if (!ct_table[i].used) {
+            ct_table[i].src_ip = sip;
+            ct_table[i].src_port = sport;
+            ct_table[i].dst_ip = dip;
+            ct_table[i].dst_port = dport;
+            ct_table[i].protocol = proto;
+            ct_table[i].state = state;
+            ct_table[i].timeout = timer_get_ticks() + 300;
+            ct_table[i].used = 1;
+            break;
+        }
+    }
+}
+
+void nf_ct_cleanup(uint32_t now) {
+    for (uint32_t i = 0; i < NF_CONNTRACK_MAX; i++) {
+        if (ct_table[i].used && now > ct_table[i].timeout) {
+            ct_table[i].used = 0;
+        }
+    }
 }

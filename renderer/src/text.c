@@ -4,8 +4,16 @@
 
 #include "funrender.h"
 #include "fr_context.h"
-#include "gfx.h"
+#include "../gui/font.h"
+#include "../gui/gfx.h"
 #include "string.h"
+
+/* 裁剪区域检测 */
+static int fr_text_inside_clip(fr_context_t *ctx, int px, int py)
+{
+    return (px >= ctx->clip_x && px < ctx->clip_x + ctx->clip_w &&
+            py >= ctx->clip_y && py < ctx->clip_y + ctx->clip_h);
+}
 
 /* 绘制单行文本 */
 void fr_draw_text(fr_context_t *ctx, int x, int y, const char *text,
@@ -14,37 +22,42 @@ void fr_draw_text(fr_context_t *ctx, int x, int y, const char *text,
     if (ctx == NULL || text == NULL || ctx->framebuffer == NULL)
         return;
 
-    gfx_context_t gfx_ctx;
-    gfx_ctx.buffer = ctx->framebuffer;
-    gfx_ctx.width = ctx->width;
-    gfx_ctx.height = ctx->height;
-
     uint32_t text_color = ((uint32_t)color.r << 16) |
                           ((uint32_t)color.g << 8) |
                           (uint32_t)color.b;
 
-    /* 逐字符绘制 - 简化实现 */
+    /* 逐字符绘制 - 使用字体位图 */
     int cx = x;
     for (int i = 0; text[i]; i++) {
+        unsigned char c = (unsigned char)text[i];
+
         if (max_width > 0 && cx >= x + max_width)
             break;
 
-        /* 绘制字符（8x16 像素字体） */
-        for (int row = 0; row < 16; row++) {
-            for (int col = 0; col < 8; col++) {
-                /* 简化：使用系统字体渲染 */
-                int px = cx + col;
-                int py = y + row;
-                if (px >= 0 && px < ctx->width && py >= 0 && py < ctx->height) {
-                    /* 实际由字体引擎完成 */
+        /* 检查字符是否在字体范围内 */
+        if (c >= FONT_FIRST_CHAR && c <= FONT_LAST_CHAR) {
+            const uint8_t *glyph = font_data[c - FONT_FIRST_CHAR];
+
+            /* 遍历字形的每一行每一列像素 */
+            for (int row = 0; row < FONT_GLYPH_HEIGHT; row++) {
+                uint8_t bitmap_byte = glyph[row];
+                for (int col = 0; col < FONT_GLYPH_WIDTH; col++) {
+                    /* MSB优先: bit 7 是最左边的像素 */
+                    if (bitmap_byte & (1 << (7 - col))) {
+                        int px = cx + col;
+                        int py = y + row;
+                        if (px >= 0 && px < ctx->width &&
+                            py >= 0 && py < ctx->height &&
+                            fr_text_inside_clip(ctx, px, py)) {
+                            ctx->framebuffer[py * ctx->width + px] = text_color;
+                        }
+                    }
                 }
             }
         }
-        cx += 8;
-    }
 
-    (void)text_color;
-    (void)gfx_ctx;
+        cx += FONT_GLYPH_WIDTH;
+    }
 }
 
 /* 绘制多行文本 */
@@ -67,7 +80,7 @@ void fr_draw_text_multiline(fr_context_t *ctx, int x, int y, const char *text,
                 line[len < 255 ? len : 255] = '\0';
                 fr_draw_text(ctx, x, cy, line, color, max_width);
             }
-            cy += line_height > 0 ? line_height : 16;
+            cy += line_height > 0 ? line_height : FONT_GLYPH_HEIGHT;
             line_start = i + 1;
 
             if (text[i] == '\0') break;
@@ -84,7 +97,7 @@ void fr_draw_text_wrap(fr_context_t *ctx, int x, int y, const char *text,
     int cy = y;
     int line_start = 0;
     int last_space = -1;
-    int char_width = 8;  /* 每字符宽度 */
+    int char_width = FONT_GLYPH_WIDTH;  /* 每字符宽度 */
     int chars_per_line = max_width / char_width;
 
     if (chars_per_line <= 0) chars_per_line = 1;
@@ -106,7 +119,7 @@ void fr_draw_text_wrap(fr_context_t *ctx, int x, int y, const char *text,
                     fr_draw_text(ctx, x, cy, line, color, max_width);
                 }
 
-                cy += line_height > 0 ? line_height : 16;
+                cy += line_height > 0 ? line_height : FONT_GLYPH_HEIGHT;
                 line_start = (text[i] == ' ' && last_space >= line_start) ?
                              last_space + 1 : i + 1;
                 col = 0;
@@ -130,10 +143,10 @@ void fr_draw_text_selection(fr_context_t *ctx, int x, int y,
     gfx_ctx.width = ctx->width;
     gfx_ctx.height = ctx->height;
 
-    int sel_x = x + start_col * 8;
-    int sel_w = (end_col - start_col) * 8;
+    int sel_x = x + start_col * FONT_GLYPH_WIDTH;
+    int sel_w = (end_col - start_col) * FONT_GLYPH_WIDTH;
 
-    gfx_rect_t sel = {sel_x, y, sel_w, line_height > 0 ? line_height : 16};
+    gfx_rect_t sel = {sel_x, y, sel_w, line_height > 0 ? line_height : FONT_GLYPH_HEIGHT};
     gfx_fill_rect(&gfx_ctx, sel, 0xCCE8FF);
 }
 
@@ -143,7 +156,7 @@ int fr_text_width(const char *text, int font_size)
     (void)font_size;
     int w = 0;
     for (int i = 0; text[i]; i++)
-        w += 8;  /* 简化：每字符8像素 */
+        w += FONT_GLYPH_WIDTH;
     return w;
 }
 
@@ -151,5 +164,5 @@ int fr_text_width(const char *text, int font_size)
 int fr_text_height(int font_size, int line_count)
 {
     (void)font_size;
-    return line_count * 16;
+    return line_count * FONT_GLYPH_HEIGHT;
 }

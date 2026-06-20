@@ -2,6 +2,24 @@
 #include "user.h"
 #include "string.h"
 
+/* ------------------------------------------------------------------ */
+/* umask: 进程创建文件时的权限掩码, 默认 0022 (屏蔽 group/other 写)   */
+/* ------------------------------------------------------------------ */
+static uint32_t current_umask = 0022;
+
+uint32_t perm_umask_get(void) {
+    return current_umask;
+}
+
+void perm_umask_set(uint32_t mask) {
+    /* 只保留低 9 位 (rwxrwxrwx) + 特殊位 */
+    current_umask = mask & 07777;
+}
+
+/* ------------------------------------------------------------------ */
+/* 基础权限检查                                                        */
+/* ------------------------------------------------------------------ */
+
 int perm_check(uint32_t file_uid, uint32_t file_gid, uint16_t file_mode, uint32_t proc_uid, uint32_t proc_gid, uint32_t access) {
     if (proc_uid == 0) return 0;
 
@@ -34,6 +52,89 @@ int perm_check_exec(uint16_t mode, uint32_t uid, uint32_t gid, uint32_t proc_uid
     return perm_check(uid, gid, mode, proc_uid, proc_gid, PERM_EXEC);
 }
 
+/* ------------------------------------------------------------------ */
+/* ACL 权限检查                                                         */
+/* 按顺序遍历 ACL 条目, 首条匹配的规则决定结果                          */
+/* ------------------------------------------------------------------ */
+
+int acl_check(const acl_t *acl, uint32_t uid, uint32_t gid, uint16_t required_perm) {
+    if (!acl || acl->count == 0) {
+        /* 无 ACL 时返回拒绝, 由调用方回退到传统 rwx 检查 */
+        return -1;
+    }
+
+    uint32_t i;
+    for (i = 0; i < acl->count; i++) {
+        const acl_entry_t *e = &acl->entries[i];
+
+        /* 检查 UID 匹配: 精确匹配或通配符 */
+        int uid_match = (e->uid == (uint32_t)-1) || (e->uid == uid);
+
+        /* 检查 GID 匹配: 精确匹配或通配符 */
+        int gid_match = (e->gid == (uint32_t)-1) || (e->gid == gid);
+
+        if (uid_match && gid_match) {
+            /* 条目匹配, 检查是否拥有所需全部权限位 */
+            if ((e->perms & required_perm) == required_perm) {
+                return 0;   /* 授权 */
+            }
+            return -1;     /* 匹配但权限不足 -> 明确拒绝 */
+        }
+    }
+
+    /* 无任何条目匹配 -> 默认拒绝 */
+    return -1;
+}
+
+/* ------------------------------------------------------------------ */
+/* 扩展权限检查: 先走传统 rwx, 若被拒绝则尝试 ACL                      */
+/* ------------------------------------------------------------------ */
+
+int perm_check_extended(uint32_t file_uid, uint32_t file_gid, uint16_t file_mode,
+                        const acl_t *acl, uint32_t proc_uid, uint32_t proc_gid, uint32_t access) {
+    /* Sover 跳过所有检查 */
+    if (proc_uid == 0) return 0;
+
+    /* 第一步: 传统 Unix rwx 权限检查 */
+    int ret = perm_check(file_uid, file_gid, file_mode, proc_uid, proc_gid, access);
+    if (ret == 0) return 0;
+
+    /* 第二步: 传统检查未通过, 尝试 ACL 补充授权 */
+    if (acl && acl->count > 0) {
+        ret = acl_check(acl, proc_uid, proc_gid, (uint16_t)access);
+        if (ret == 0) return 0;
+    }
+
+    return -1;
+}
+
+/* ------------------------------------------------------------------ */
+/* 文件模式修改权限控制                                                 */
+/* 仅允许文件 owner 或管理员更改模式                                    */
+/* ------------------------------------------------------------------ */
+
+int perm_set_mode(uint16_t *mode, uint16_t new_mode, uint32_t proc_uid, int is_admin) {
+    if (!mode) return -1;
+
+    /* admin 可直接修改 */
+    if (is_admin) {
+        *mode = new_mode & 07777;
+        return 0;
+    }
+
+    /* owner 可修改自身文件的权限 */
+    if (proc_uid != 0) {
+        *mode = new_mode & 07777;
+        return 0;
+    }
+
+    return -1;
+}
+
+/* ------------------------------------------------------------------ */
+/* 用户身份检查                                                         */
+/* ------------------------------------------------------------------ */
+
 /* 检查当前用户是否为 Sover (uid == 0) */
 int perm_is_sover(void) {
     uint32_t uid = user_get_current_uid();
@@ -46,6 +147,10 @@ int perm_is_admin(void) {
     if (!u) return 0;
     return u->is_admin;
 }
+
+/* ------------------------------------------------------------------ */
+/* 路径权限检查                                                         */
+/* ------------------------------------------------------------------ */
 
 /* 检查路径前缀: 判断 path 是否以 prefix 开头 */
 static int path_starts_with(const char *path, const char *prefix) {
@@ -79,6 +184,10 @@ int perm_check_path(const char *path, uint32_t required_perm) {
     /* 其他路径按常规 rwx 检查（由调用者通过 perm_check 完成）*/
     return 0;
 }
+
+/* ------------------------------------------------------------------ */
+/* 权限级别与提示信息                                                   */
+/* ------------------------------------------------------------------ */
 
 /* 获取当前用户的权限级别 */
 int perm_get_level(void) {

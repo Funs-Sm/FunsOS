@@ -30,4 +30,7 @@ int keyboard_read_line(char *buf, uint32_t size);
  * Returns 1 if a key event was processed, 0 if no data available. */
 int keyboard_poll(void);
 
+/* Block until a key event is available (uses semaphore from IRQ handler) */
+void keyboard_wait(void);
+
 #endif

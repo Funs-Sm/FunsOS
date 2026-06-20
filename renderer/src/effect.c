@@ -1,11 +1,12 @@
 /* effect.c - 视觉特效引擎实现
- * 实现阴影、模糊、渐变、Alpha混合、圆角矩形、透明效果、
- * 发光效果、颜色叠加和透明度控制
+ * 实现阴影、模糊、渐变、Alpha混合、圆角矩形、透明效果�?
+ * 发光效果、颜色叠加和透明度控�?
  */
 
 #include "funrender.h"
 #include "fr_context.h"
 #include "fr_effect.h"
+#include "fr_compositor.h"
 #include "string.h"
 #include "../lib/math.h"
 
@@ -27,20 +28,20 @@ static float clamp_float(float val, float min, float max)
     return val;
 }
 
-/* 在两点间线性插值 */
+/* 在两点间线性插�?*/
 static float lerp_float(float a, float b, float t)
 {
     return a + (b - a) * t;
 }
 
-/* 在两点间线性插值(uint8_t) */
+/* 在两点间线性插�?uint8_t) */
 static uint8_t lerp_uint8(uint8_t a, uint8_t b, float t)
 {
     return (uint8_t)((float)a + (float)(b - a) * t);
 }
 
 /* 复制像素矩形到临时缓冲区 */
-static uint32_t *copy_rect_to_buffer(fr_context_t *ctx,
+static uint32_t *copy_fr_rect_to_buffer(fr_context_t *ctx,
                                       int x, int y, int w, int h)
 {
     if (ctx == NULL || ctx->framebuffer == NULL) return NULL;
@@ -52,7 +53,7 @@ static uint32_t *copy_rect_to_buffer(fr_context_t *ctx,
     for (int py = 0; py < h; py++) {
         int sy = y + py;
         if (sy < 0 || sy >= ctx->height) {
-            /* 超出屏幕范围的行填 0 */
+            /* 超出屏幕范围的行�?0 */
             memset(&buf[py * w], 0, (size_t)(w * 4));
             continue;
         }
@@ -75,14 +76,14 @@ static uint32_t *copy_rect_to_buffer(fr_context_t *ctx,
 /*
  * fr_effect_drop_shadow - 绘制投影
  *
- * 在当前帧缓冲上进行绘制: 先根据阴影配置生成一个偏移的模糊阴影区域,
- * 然后在对应位置进行 Alpha 混合。
+ * 在当前帧缓冲上进行绘�? 先根据阴影配置生成一个偏移的模糊阴影区域,
+ * 然后在对应位置进�?Alpha 混合�?
  *
  * 算法步骤:
- *   1. 提取并扩展需要绘制阴影的区域(包含偏移和模糊扩展)
+ *   1. 提取并扩展需要绘制阴影的区域(包含偏移和模糊扩�?
  *   2. 创建一个临时缓冲区, 将阴影颜色填充到对应的形状中
  *   3. 对临时缓冲区执行高斯模糊
- *   4. 将模糊后的阴影混合回帧缓冲
+ *   4. 将模糊后的阴影混合回帧缓�?
  */
 void fr_effect_drop_shadow(fr_context_t *ctx,
                            int x, int y, int w, int h,
@@ -95,21 +96,21 @@ void fr_effect_drop_shadow(fr_context_t *ctx,
     int blur_r = shadow->blur_radius;
     int spread = shadow->spread;
 
-    /* 计算阴影包围盒 */
+    /* 计算阴影包围�?*/
     int sx = x + shadow->offset_x - blur_r - spread;
     int sy = y + shadow->offset_y - blur_r - spread;
     int sw = w + 2 * (blur_r + spread);
     int sh = h + 2 * (blur_r + spread);
 
-    /* 裁剪到屏幕 */
+    /* 裁剪到屏�?*/
     if (sx < 0) { sw += sx; sx = 0; }
     if (sy < 0) { sh += sy; sy = 0; }
     if (sx + sw > ctx->width)  sw = ctx->width - sx;
     if (sy + sh > ctx->height) sh = ctx->height - sy;
     if (sw <= 0 || sh <= 0) return;
 
-    /* 在阴影包围盒内, 填充阴影颜色到"目标区域" */
-    /* 使用简化方法: 直接在帧缓冲上绘制模糊效果 */
+    /* 在阴影包围盒�? 填充阴影颜色�?目标区域" */
+    /* 使用简化方�? 直接在帧缓冲上绘制模糊效�?*/
     int ofx = shadow->offset_x;
     int ofy = shadow->offset_y;
 
@@ -126,7 +127,7 @@ void fr_effect_drop_shadow(fr_context_t *ctx,
 
     for (int py = 0; py < sh; py++) {
         for (int px = 0; px < sw; px++) {
-            /* 检查是否在形状区域内 */
+            /* 检查是否在形状区域�?*/
             if (px >= shape_x && px < shape_x + w &&
                 py >= shape_y && py < shape_y + h) {
                 shadow_buf[py * sw + px] = shadow_color;
@@ -139,7 +140,7 @@ void fr_effect_drop_shadow(fr_context_t *ctx,
     /* 对阴影缓冲区执行模糊 */
     fr_effect_blur_buffer(shadow_buf, sw, sh, 0, 0, sw, sh, blur_r);
 
-    /* 将阴影混合回帧缓冲 */
+    /* 将阴影混合回帧缓�?*/
     if (shadow->opacity == 255) {
         /* 完全覆盖模式 - 直接复制非零像素, 使用 Alpha 混合 */
         for (int py = 0; py < sh; py++) {
@@ -153,7 +154,7 @@ void fr_effect_drop_shadow(fr_context_t *ctx,
                     ty < 0 || ty >= ctx->height) continue;
 
                 uint32_t dst_pixel = ctx->framebuffer[ty * ctx->width + tx];
-                /* 阴影像素本身已经有模糊衰减, 直接进行 Alpha 混合 */
+                /* 阴影像素本身已经有模糊衰�? 直接进行 Alpha 混合 */
                 uint8_t sb = sp & 0xFF;
                 uint8_t sg = (sp >> 8) & 0xFF;
                 uint8_t sr = (sp >> 16) & 0xFF;
@@ -217,8 +218,8 @@ void fr_effect_drop_shadow(fr_context_t *ctx,
 /*
  * fr_effect_drop_shadow_masked - 在带遮罩的区域上绘制阴影
  *
- * 与 fr_effect_drop_shadow 类似, 但使用一个 Alpha 遮罩来决定阴影的形状。
- * 遮罩中非零区域作为阴影的"发射区域"。
+ * �?fr_effect_drop_shadow 类似, 但使用一�?Alpha 遮罩来决定阴影的形状�?
+ * 遮罩中非零区域作为阴影的"发射区域"�?
  */
 void fr_effect_drop_shadow_masked(fr_context_t *ctx,
                                   int x, int y, int w, int h,
@@ -268,7 +269,7 @@ void fr_effect_drop_shadow_masked(fr_context_t *ctx,
             uint8_t mask_alpha = alpha_mask[mask_idx];
 
             if (mask_alpha > 0) {
-                /* 按遮罩 Alpha 缩放阴影颜色 */
+                /* 按遮�?Alpha 缩放阴影颜色 */
                 uint8_t r = (uint8_t)((uint16_t)shadow->color.r * mask_alpha / 255);
                 uint8_t g = (uint8_t)((uint16_t)shadow->color.g * mask_alpha / 255);
                 uint8_t b = (uint8_t)((uint16_t)shadow->color.b * mask_alpha / 255);
@@ -323,15 +324,15 @@ void fr_effect_drop_shadow_masked(fr_context_t *ctx,
  * ================================================================ */
 
 /*
- * 预计算的高斯模糊核
- * 使用 2σ^2 = radius^2 的近似高斯分布
+ * 预计算的高斯模糊�?
+ * 使用 2σ^2 = radius^2 的近似高斯分�?
  */
 
-/* 3x3 核 */
+/* 3x3 �?*/
 static const int gauss_kernel_3[9] = {1, 2, 1, 2, 4, 2, 1, 2, 1};
 static const int gauss_kernel_3_sum = 16;
 
-/* 5x5 核 */
+/* 5x5 �?*/
 static const int gauss_kernel_5[25] = {
     1,  4,  7,  4, 1,
     4, 16, 26, 16, 4,
@@ -341,7 +342,7 @@ static const int gauss_kernel_5[25] = {
 };
 static const int gauss_kernel_5_sum = 273;
 
-/* 7x7 核 */
+/* 7x7 �?*/
 static const int gauss_kernel_7[49] = {
      1,  4,  7, 10,  7,  4,  1,
      4, 12, 26, 33, 26, 12,  4,
@@ -360,7 +361,7 @@ static void blur_horizontal(uint32_t *buf, int buf_w, int buf_h,
 {
     int half = ksize / 2;
 
-    /* 需要读写分离, 在此使用临时行缓冲 */
+    /* 需要读写分�? 在此使用临时行缓�?*/
     uint32_t *row_temp = (uint32_t *)fr_alloc((uint32_t)(w * 4));
     if (row_temp == NULL) return;
 
@@ -442,8 +443,8 @@ static void blur_vertical(uint32_t *buf, int buf_w, int buf_h,
 /*
  * fr_effect_gaussian_blur - 对帧缓冲区域执行高斯模糊
  *
- * 使用分离卷积: 先水平方向再垂直方向各执行一遍, 减少计算量。
- * 支持 3x3、5x5、7x7 三种模糊核。
+ * 使用分离卷积: 先水平方向再垂直方向各执行一�? 减少计算量�?
+ * 支持 3x3�?x5�?x7 三种模糊核�?
  */
 void fr_effect_gaussian_blur(fr_context_t *ctx,
                              int x, int y, int w, int h,
@@ -455,7 +456,7 @@ void fr_effect_gaussian_blur(fr_context_t *ctx,
     const int *kernel;
     int ksize, ksum;
 
-    /* 选择合适的模糊核 */
+    /* 选择合适的模糊�?*/
     if (radius <= 1) {
         ksize = 3;
         kernel = gauss_kernel_3;
@@ -529,13 +530,13 @@ void fr_effect_blur_buffer(uint32_t *buffer, int buf_w, int buf_h,
 }
 
 /* ================================================================
- *  渐变渲染器
+ *  渐变渲染�?
  * ================================================================ */
 
 /*
  * fr_effect_gradient_sample - 从渐变配置中采样颜色
  *
- * 根据位置 t (0.0-1.0) 在停止点之间进行线性插值。
+ * 根据位置 t (0.0-1.0) 在停止点之间进行线性插值�?
  */
 fr_color_t fr_effect_gradient_sample(const fr_gradient_t *gradient, float t)
 {
@@ -561,7 +562,7 @@ fr_color_t fr_effect_gradient_sample(const fr_gradient_t *gradient, float t)
         return gradient->stops[last].color;
     }
 
-    /* 在停止点之间插值 */
+    /* 在停止点之间插�?*/
     for (uint32_t i = 0; i < gradient->stop_count - 1; i++) {
         float p0 = gradient->stops[i].position;
         float p1 = gradient->stops[i + 1].position;
@@ -588,7 +589,7 @@ fr_color_t fr_effect_gradient_sample(const fr_gradient_t *gradient, float t)
 /*
  * fr_effect_render_gradient - 渲染渐变到帧缓冲
  *
- * 支持线性渐变(四个方向)和径向渐变。
+ * 支持线性渐�?四个方向)和径向渐变�?
  */
 void fr_effect_render_gradient(fr_context_t *ctx,
                                int x, int y, int w, int h,
@@ -608,7 +609,7 @@ void fr_effect_render_gradient(fr_context_t *ctx,
 
             float t;
             if (gradient->type == FR_GRAD_TYPE_LINEAR) {
-                /* 线性渐变 - use params.linear for direction */
+                /* 线性渐�?- use params.linear for direction */
                 float x1 = gradient->params.linear.x1;
                 float y1 = gradient->params.linear.y1;
                 float x2 = gradient->params.linear.x2;
@@ -671,7 +672,7 @@ void fr_effect_render_gradient(fr_context_t *ctx,
 /*
  * fr_effect_blend_pixel - 混合单个像素
  *
- * 支持多种混合模式 (Porter-Duff + Photoshop 风格)。
+ * 支持多种混合模式 (Porter-Duff + Photoshop 风格)�?
  */
 uint32_t fr_effect_blend_pixel(uint32_t src, uint32_t dst,
                                 uint8_t alpha, uint32_t mode)
@@ -736,7 +737,7 @@ uint32_t fr_effect_blend_pixel(uint32_t src, uint32_t dst,
         break;
     }
     case FR_BLEND_OVERLAY: {
-        /* 叠加: 混合 Multiply 和 Screen */
+        /* 叠加: 混合 Multiply �?Screen */
         uint16_t ov_r, ov_g, ov_b;
 
         if (dr < 128) ov_r = (uint16_t)sr * dr * 2 / 255;
@@ -817,10 +818,10 @@ void fr_effect_blend_buffer(fr_context_t *ctx,
 }
 
 /*
- * fr_effect_blend_buffer_alpha - 带逐像素 Alpha 的混合
+ * fr_effect_blend_buffer_alpha - 带逐像�?Alpha 的混�?
  *
  * 每个源像素有一个独立的 Alpha 通道(来自 alpha_map),
- * 与全局 global_alpha 相乘后作为该像素的最终不透明度。
+ * 与全局 global_alpha 相乘后作为该像素的最终不透明度�?
  */
 void fr_effect_blend_buffer_alpha(fr_context_t *ctx,
                                   int dx, int dy,
@@ -853,7 +854,7 @@ void fr_effect_blend_buffer_alpha(fr_context_t *ctx,
                 sa = 255;
             }
 
-            /* 合并全局和逐像素透明度 */
+            /* 合并全局和逐像素透明�?*/
             uint8_t final_alpha = (uint8_t)((uint16_t)sa * global_alpha / 255);
             if (final_alpha == 0) continue;
 
@@ -871,24 +872,24 @@ void fr_effect_blend_buffer_alpha(fr_context_t *ctx,
  * ================================================================ */
 
 /*
- * fr_effect_rounded_rect_alpha - 计算像素对应的圆角矩形 Alpha 值
+ * fr_effect_rounded_rect_alpha - 计算像素对应的圆角矩�?Alpha �?
  *
- * 返回 0-255 的 Alpha 值, 表示该像素在圆角矩形内的覆盖比例。
- * 圆心区域返回 255 (完全不透明), 圆角边缘区域返回 0-255 (抗锯齿),
- * 圆角外返回 0 (完全透明)。
+ * 返回 0-255 �?Alpha �? 表示该像素在圆角矩形内的覆盖比例�?
+ * 圆心区域返回 255 (完全不透明), 圆角边缘区域返回 0-255 (抗锯�?,
+ * 圆角外返�?0 (完全透明)�?
  */
 int fr_effect_rounded_rect_alpha(int px, int py,
                                  int rx, int ry, int rw, int rh,
                                  int radius)
 {
     if (radius <= 0) {
-        /* 无圆角：完全在内部返回 255 */
+        /* 无圆角：完全在内部返�?255 */
         if (px >= rx && px < rx + rw && py >= ry && py < ry + rh)
             return 255;
         return 0;
     }
 
-    /* 保证 radius 不超过宽度/高度的一半 */
+    /* 保证 radius 不超过宽�?高度的一�?*/
     if (radius > rw / 2) radius = rw / 2;
     if (radius > rh / 2) radius = rh / 2;
     if (radius <= 0) {
@@ -897,7 +898,7 @@ int fr_effect_rounded_rect_alpha(int px, int py,
         return 0;
     }
 
-    /* 判断像素在哪个区域 */
+    /* 判断像素在哪个区�?*/
     int inside = 1;
     int corner = 0;
     int cx = 0, cy = 0;
@@ -910,25 +911,25 @@ int fr_effect_rounded_rect_alpha(int px, int py,
     if (!inside) return 0;
 
     /* 检查是否在圆角区域 */
-    /* 左上角 */
+    /* 左上�?*/
     if (px < rx + radius && py < ry + radius) {
         corner = 1;
         cx = rx + radius;
         cy = ry + radius;
     }
-    /* 右上角 */
+    /* 右上�?*/
     else if (px >= rx + rw - radius && py < ry + radius) {
         corner = 1;
         cx = rx + rw - radius;
         cy = ry + radius;
     }
-    /* 左下角 */
+    /* 左下�?*/
     else if (px < rx + radius && py >= ry + rh - radius) {
         corner = 1;
         cx = rx + radius;
         cy = ry + rh - radius;
     }
-    /* 右下角 */
+    /* 右下�?*/
     else if (px >= rx + rw - radius && py >= ry + rh - radius) {
         corner = 1;
         cx = rx + rw - radius;
@@ -937,19 +938,19 @@ int fr_effect_rounded_rect_alpha(int px, int py,
 
     if (!corner) return 255;
 
-    /* 计算像素到圆角中心的距离, 并据此计算 Alpha */
+    /* 计算像素到圆角中心的距离, 并据此计�?Alpha */
     int dx = px - cx;
     int dy = py - cy;
     if (dx < 0) dx = -dx;
     if (dy < 0) dy = -dy;
 
     /* 使用整数距离近似: 对于像素级抗锯齿,
-     * 使用距离的平方与半径的平方比较, 并在边缘做平滑过渡 */
+     * 使用距离的平方与半径的平方比�? 并在边缘做平滑过�?*/
     int dist_sq = dx * dx + dy * dy;
     int r_sq = radius * radius;
 
     if (dist_sq >= r_sq + radius) {
-        /* 远在圆角外 */
+        /* 远在圆角�?*/
         return 0;
     }
 
@@ -958,17 +959,17 @@ int fr_effect_rounded_rect_alpha(int px, int py,
         return 255;
     }
 
-    /* 边缘抗锯齿: 使用像素到理想边缘的距离 */
+    /* 边缘抗锯�? 使用像素到理想边缘的距离 */
     int dist = 0;
-    /* 近似 sqrt: 使用牛顿法的一步近似 */
+    /* 近似 sqrt: 使用牛顿法的一步近�?*/
     if (dist_sq > 0) {
         dist = dist_sq; /* 初始猜测 */
         dist = (dist + dist_sq / (dist > 0 ? dist : 1)) / 2;
     }
 
-    /* 计算到边缘的距离 (正=内部, 负=外部) */
+    /* 计算到边缘的距离 (�?内部, �?外部) */
     int edge_dist = radius - dist;
-    /* 映射到 Alpha 范围 [0, 255] */
+    /* 映射�?Alpha 范围 [0, 255] */
     int alpha = (edge_dist + 1) * 128;
     if (alpha > 255) alpha = 255;
     if (alpha < 0) alpha = 0;
@@ -977,7 +978,7 @@ int fr_effect_rounded_rect_alpha(int px, int py,
 }
 
 /*
- * fr_effect_fill_rounded_rect - 绘制填充的圆角矩形(带抗锯齿)
+ * fr_effect_fill_rounded_rect - 绘制填充的圆角矩�?带抗锯齿)
  */
 void fr_effect_fill_rounded_rect(fr_context_t *ctx,
                                  int x, int y, int w, int h,
@@ -1006,7 +1007,7 @@ void fr_effect_fill_rounded_rect(fr_context_t *ctx,
             if (alpha == 255 && color.a == 255) {
                 ctx->framebuffer[ty * ctx->width + tx] = pixel_color;
             } else {
-                /* 结合圆角抗锯齿 Alpha 和颜色 Alpha */
+                /* 结合圆角抗锯�?Alpha 和颜�?Alpha */
                 uint8_t final_alpha = (uint8_t)((uint16_t)alpha *
                                                 color.a / 255);
                 if (final_alpha == 0) continue;
@@ -1041,7 +1042,7 @@ void fr_effect_draw_rounded_rect(fr_context_t *ctx,
     if (ctx == NULL || ctx->framebuffer == NULL) return;
     if (w <= 0 || h <= 0 || border_width <= 0) return;
 
-    /* 绘制外边框: 对于每像素, 检查它是否在边框区域内 */
+    /* 绘制外边�? 对于每像�? 检查它是否在边框区域内 */
     uint32_t pixel_color = ((uint32_t)color.r << 16) |
                             ((uint32_t)color.g << 8) |
                             (uint32_t)color.b;
@@ -1064,7 +1065,7 @@ void fr_effect_draw_rounded_rect(fr_context_t *ctx,
                 w - 2 * border_width, h - 2 * border_width,
                 radius - border_width > 0 ? radius - border_width : 0);
 
-            /* 边框区域的 Alpha = 外部Alpha - 内部Alpha */
+            /* 边框区域�?Alpha = 外部Alpha - 内部Alpha */
             int alpha = outer - inner;
             if (alpha <= 0) continue;
 
@@ -1102,7 +1103,7 @@ void fr_effect_draw_rounded_rect(fr_context_t *ctx,
  * fr_effect_transparency - 应用透明效果到帧缓冲区域
  *
  * 玻璃效果: 对背景部分进行采样并叠加轻微亮色
- * 磨砂玻璃: 对背景进行模糊, 然后叠加色调
+ * 磨砂玻璃: 对背景进行模�? 然后叠加色调
  * 背景模糊: 仅对背景进行模糊, 不做额外处理
  */
 void fr_effect_transparency(fr_context_t *ctx,
@@ -1114,7 +1115,7 @@ void fr_effect_transparency(fr_context_t *ctx,
 
     if (trans->type == FR_TRANSPARENCY_NONE) return;
 
-    /* 裁剪到屏幕范围 */
+    /* 裁剪到屏幕范�?*/
     int cx = x, cy = y, cw = w, ch = h;
     if (cx < 0) { cw += cx; cx = 0; }
     if (cy < 0) { ch += cy; cy = 0; }
@@ -1123,14 +1124,14 @@ void fr_effect_transparency(fr_context_t *ctx,
     if (cw <= 0 || ch <= 0) return;
 
     if (trans->type == FR_TRANSPARENCY_BLUR_BG) {
-        /* 仅背景模糊 */
+        /* 仅背景模�?*/
         fr_effect_gaussian_blur(ctx, cx, cy, cw, ch, 3);
         return;
     }
 
     if (trans->type == FR_TRANSPARENCY_FROSTED) {
         /* 磨砂玻璃: 模糊 + 变亮 + 色调 */
-        /* 先模糊背景 */
+        /* 先模糊背�?*/
         fr_effect_gaussian_blur(ctx, cx, cy, cw, ch, 5);
 
         /* 叠加色调 */
@@ -1186,7 +1187,7 @@ void fr_effect_transparency(fr_context_t *ctx,
                 uint8_t pg = (p >> 8) & 0xFF;
                 uint8_t pb = p & 0xFF;
 
-                /* 玻璃效果: 混合白色和背景 */
+                /* 玻璃效果: 混合白色和背�?*/
                 uint16_t inv = 255 - intensity;
                 uint16_t r = ((uint16_t)pr * inv + 255 * intensity) / 255;
                 uint16_t g = ((uint16_t)pg * inv + 255 * intensity) / 255;
@@ -1221,8 +1222,8 @@ void fr_effect_transparency(fr_context_t *ctx,
 /*
  * fr_effect_glow - 绘制发光效果
  *
- * 在目标矩形周围绘制一个模糊的光晕。
- * 工作原理: 创建临时缓冲区, 将矩形"点亮", 然后模糊, 再混合回帧缓冲。
+ * 在目标矩形周围绘制一个模糊的光晕�?
+ * 工作原理: 创建临时缓冲�? 将矩�?点亮", 然后模糊, 再混合回帧缓冲�?
  */
 void fr_effect_glow(fr_context_t *ctx,
                     int x, int y, int w, int h,
@@ -1234,7 +1235,7 @@ void fr_effect_glow(fr_context_t *ctx,
     int r = glow->radius;
     if (r <= 0) r = 1;
 
-    /* 计算发光包围盒 */
+    /* 计算发光包围�?*/
     int gx = x - r;
     int gy = y - r;
     int gw = w + 2 * r;
@@ -1247,7 +1248,7 @@ void fr_effect_glow(fr_context_t *ctx,
     if (gy + gh > ctx->height) gh = ctx->height - gy;
     if (gw <= 0 || gh <= 0) return;
 
-    /* 创建临时发光缓冲区 */
+    /* 创建临时发光缓冲�?*/
     uint32_t *glow_buf = (uint32_t *)fr_alloc((uint32_t)(gw * gh * 4));
     if (glow_buf == NULL) return;
 
@@ -1255,7 +1256,7 @@ void fr_effect_glow(fr_context_t *ctx,
                            ((uint32_t)glow->color.g << 8) |
                            (uint32_t)glow->color.b;
 
-    /* 填充发光源 */
+    /* 填充发光�?*/
     int inner_x = x - gx;
     int inner_y = y - gy;
 
@@ -1339,7 +1340,7 @@ void fr_effect_glow_masked(fr_context_t *ctx,
     int inner_x = x - gx;
     int inner_y = y - gy;
 
-    /* 使用遮罩填充发光源 */
+    /* 使用遮罩填充发光�?*/
     for (int py = 0; py < gh; py++) {
         for (int px = 0; px < gw; px++) {
             int mx = px - inner_x;
@@ -1401,7 +1402,7 @@ void fr_effect_glow_masked(fr_context_t *ctx,
 /*
  * fr_effect_color_overlay - 应用颜色叠加
  *
- * 使用指定的混合模式将颜色叠加到矩形区域上。
+ * 使用指定的混合模式将颜色叠加到矩形区域上�?
  */
 void fr_effect_color_overlay(fr_context_t *ctx,
                              int x, int y, int w, int h,
@@ -1436,11 +1437,11 @@ void fr_effect_color_overlay(fr_context_t *ctx,
 }
 
 /* ================================================================
- *  控件透明度
+ *  控件透明�?
  * ================================================================ */
 
 /*
- * fr_effect_set_opacity - 设置不透明度控制
+ * fr_effect_set_opacity - 设置不透明度控�?
  */
 void fr_effect_set_opacity(fr_opacity_t *opacity, uint8_t value, int enabled)
 {
@@ -1450,18 +1451,18 @@ void fr_effect_set_opacity(fr_opacity_t *opacity, uint8_t value, int enabled)
 }
 
 /*
- * fr_effect_apply_opacity - 应用不透明度到帧缓冲区域
+ * fr_effect_apply_opacity - 应用不透明度到帧缓冲区�?
  *
- * 将每个像素与黑色背景混合以模拟不透明度降低效果。
- * 注意: 这简化了透明度效果——正确的做法需要将该区域与它下面
- * 的内容混合, 而不是与黑色混合。此处作为通用 alpha 缩放处理。
+ * 将每个像素与黑色背景混合以模拟不透明度降低效果�?
+ * 注意: 这简化了透明度效果——正确的做法需要将该区域与它下�?
+ * 的内容混�? 而不是与黑色混合。此处作为通用 alpha 缩放处理�?
  */
 void fr_effect_apply_opacity(struct fr_context *ctx,
                              int x, int y, int w, int h,
                              uint8_t opacity)
 {
     if (ctx == NULL || ctx->framebuffer == NULL) return;
-    if (opacity >= 255) return; /* 无效果 */
+    if (opacity >= 255) return; /* 无效�?*/
 
     if (x < 0) { w += x; x = 0; }
     if (y < 0) { h += y; y = 0; }
@@ -1469,7 +1470,7 @@ void fr_effect_apply_opacity(struct fr_context *ctx,
     if (y + h > ctx->height) h = ctx->height - y;
     if (w <= 0 || h <= 0) return;
 
-    /* 将每个像素的 RGB 值按比例缩放, 模拟不透明度 */
+    /* 将每个像素的 RGB 值按比例缩放, 模拟不透明�?*/
     for (int py = 0; py < h; py++) {
         for (int px = 0; px < w; px++) {
             int tx = x + px;
@@ -1480,7 +1481,7 @@ void fr_effect_apply_opacity(struct fr_context *ctx,
             uint8_t pg = (p >> 8) & 0xFF;
             uint8_t pb = p & 0xFF;
 
-            /* 向黑色 (0) 混合 */
+            /* 向黑�?(0) 混合 */
             uint8_t r = (uint8_t)((uint16_t)pr * opacity / 255);
             uint8_t g = (uint8_t)((uint16_t)pg * opacity / 255);
             uint8_t b = (uint8_t)((uint16_t)pb * opacity / 255);
@@ -1489,4 +1490,762 @@ void fr_effect_apply_opacity(struct fr_context *ctx,
                 ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
         }
     }
+}
+
+/* ================================================================
+ *  高级效果扩展 - 高斯模糊、径向模糊、运动模�?
+ * ================================================================ */
+
+/*
+ * blur_pass_h - 水平方向高斯模糊单遍
+ */
+static void blur_pass_h(fr_surface_t *src, fr_surface_t *dst,
+                         float *kernel, int ksize, fr_rect_t *r)
+{
+    int half = ksize / 2;
+    int src_pitch = (int)(src->pitch / 4);
+    int dst_pitch = (int)(dst->pitch / 4);
+
+    for (int py = 0; py < r->h; py++) {
+        for (int px = 0; px < r->w; px++) {
+            float sum_r = 0, sum_g = 0, sum_b = 0;
+
+            for (int k = 0; k < ksize; k++) {
+                int sx = px + k - half;
+                if (sx < 0) sx = 0;
+                if (sx >= r->w) sx = r->w - 1;
+
+                uint32_t p = src->buffer[((int)(r->y) + py) * src_pitch + ((int)(r->x) + sx)];
+                float weight = kernel[k];
+                sum_r += ((p >> 16) & 0xFF) * weight;
+                sum_g += ((p >> 8) & 0xFF) * weight;
+                sum_b += (p & 0xFF) * weight;
+            }
+
+            uint8_t ir = (sum_r > 255.0f) ? 255 : (sum_r < 0.0f) ? 0 : (uint8_t)sum_r;
+            uint8_t ig = (sum_g > 255.0f) ? 255 : (sum_g < 0.0f) ? 0 : (uint8_t)sum_g;
+            uint8_t ib = (sum_b > 255.0f) ? 255 : (sum_b < 0.0f) ? 0 : (uint8_t)sum_b;
+
+            dst->buffer[py * dst_pitch + px] =
+                ((uint32_t)ir << 16) | ((uint32_t)ig << 8) | ib;
+        }
+    }
+}
+
+/*
+ * blur_pass_v - 垂直方向高斯模糊单遍
+ */
+static void blur_pass_v(fr_surface_t *src, fr_surface_t *dst,
+                         float *kernel, int ksize, fr_rect_t *r)
+{
+    int half = ksize / 2;
+    int src_pitch = (int)(src->pitch / 4);
+    int dst_pitch = (int)(dst->pitch / 4);
+
+    for (int py = 0; py < r->h; py++) {
+        for (int px = 0; px < r->w; px++) {
+            float sum_r = 0, sum_g = 0, sum_b = 0;
+
+            for (int k = 0; k < ksize; k++) {
+                int sy = py + k - half;
+                if (sy < 0) sy = 0;
+                if (sy >= r->h) sy = r->h - 1;
+
+                uint32_t p = src->buffer[sy * src_pitch + px];
+                float weight = kernel[k];
+                sum_r += ((p >> 16) & 0xFF) * weight;
+                sum_g += ((p >> 8) & 0xFF) * weight;
+                sum_b += (p & 0xFF) * weight;
+            }
+
+            uint8_t ir = (sum_r > 255.0f) ? 255 : (sum_r < 0.0f) ? 0 : (uint8_t)sum_r;
+            uint8_t ig = (sum_g > 255.0f) ? 255 : (sum_g < 0.0f) ? 0 : (uint8_t)sum_g;
+            uint8_t ib = (sum_b > 255.0f) ? 255 : (sum_b < 0.0f) ? 0 : (uint8_t)sum_b;
+
+            dst->buffer[((int)(r->y) + py) * dst_pitch + ((int)(r->x) + px)] =
+                ((uint32_t)ir << 16) | ((uint32_t)ig << 8) | ib;
+        }
+    }
+}
+
+/*
+ * effect_gaussian_blur - 分离轴高斯模�?(O(n)复杂�?
+ *
+ * 使用一维高斯核分别进行水平和垂直两次pass�?
+ * 支持任意半径(通过sigma计算核大�?�?
+ *
+ * 返回 0=成功, -1=失败�?
+ */
+/* Forward declarations for blur passes */
+static void blur_pass_h(fr_surface_t *src, fr_surface_t *dst, float *kernel, int ksize, fr_rect_t *r);
+static void blur_pass_v(fr_surface_t *src, fr_surface_t *dst, float *kernel, int ksize, fr_rect_t *r);
+
+int effect_gaussian_blur(fr_surface_t *src, fr_surface_t *dst,
+                         float radius, fr_rect_t *region)
+{
+    if (src == NULL || dst == NULL) return -1;
+    if (src->buffer == NULL || dst->buffer == NULL) return -1;
+    if (radius <= 0.0f) radius = 1.0f;
+
+    /* 确定处理区域 */
+    fr_rect_t r;
+    if (region != NULL) {
+        r = *region;
+    } else {
+        r.x = 0; r.y = 0;
+        r.w = src->w; r.h = src->h;
+    }
+
+    /* 裁剪到源表面范围 */
+    if (r.x < 0) { r.w += r.x; r.x = 0; }
+    if (r.y < 0) { r.h += r.y; r.y = 0; }
+    if (r.x + r.w > (int)src->w) r.w = src->w - r.x;
+    if (r.y + r.h > (int)src->h) r.h = src->h - r.y;
+    if (r.w <= 0 || r.h <= 0) return -1;
+
+    /* 计算高斯核大�?(奇数): ksize = 2*ceil(sigma*3)+1 */
+    int ksize = (int)(radius * 3.0f) * 2 + 1;
+    if (ksize < 3) ksize = 3;
+    if (ksize > 31) ksize = 31; /* 限制最大核大小 */
+    if (ksize % 2 == 0) ksize++;
+
+    /* 分配并计算高斯核 */
+    float *kernel = (float *)fr_alloc((uint32_t)(ksize * sizeof(float)));
+    if (kernel == NULL) return -1;
+
+    float sigma = radius;
+    float sum = 0.0f;
+    int half = ksize / 2;
+    for (int i = 0; i < ksize; i++) {
+        float x = (float)(i - half);
+        kernel[i] = (float)(exp(-(x * x) / (2.0f * sigma * sigma)));
+        sum += kernel[i];
+    }
+    /* 归一�?*/
+    for (int i = 0; i < ksize; i++) kernel[i] /= sum;
+
+    /* 分配临时缓冲区用于水平pass结果 */
+    uint32_t *temp_buf = (uint32_t *)fr_alloc((uint32_t)(r.w * r.h * 4));
+    if (temp_buf == NULL) { fr_free(kernel); return -1; }
+
+    /* 包装为 fr_surface_t 以便传给 blur_pass */
+    fr_surface_t temp_surf;
+    memset(&temp_surf, 0, sizeof(temp_surf));
+    temp_surf.buffer = temp_buf;
+    temp_surf.pitch  = (uint32_t)(r.w * 4);
+    temp_surf.w      = r.w;
+    temp_surf.h      = r.h;
+
+    /* 水平pass: src -> temp_buf */
+    blur_pass_h(src, &temp_surf, kernel, ksize, &r);
+
+    /* 垂直pass: temp_buf -> dst */
+    blur_pass_v(&temp_surf, dst, kernel, ksize, &r);
+
+    fr_free(temp_buf);
+    fr_free(kernel);
+    return 0;
+}
+
+/*
+ * effect_radial_blur - 径向/缩放模糊
+ *
+ * 以指定中心点为原点，沿径向方向对像素进行采样混合�?
+ * amount控制模糊强度，samples控制采样质量�?
+ *
+ * 返回 0=成功, -1=失败�?
+ */
+int effect_radial_blur(fr_surface_t *src, fr_surface_t *dst,
+                       int cx, int cy, float amount, int samples)
+{
+    if (src == NULL || dst == NULL) return -1;
+    if (src->buffer == NULL || dst->buffer == NULL) return -1;
+    if (samples < 2) samples = 2;
+    if (samples > 32) samples = 32;
+    if (amount <= 0.0f) amount = 0.1f;
+
+    uint32_t src_pitch = src->pitch / 4;
+    uint32_t dst_pitch = dst->pitch / 4;
+
+    for (int py = 0; py < (int)src->h; py++) {
+        for (int px = 0; px < (int)src->w; px++) {
+            float dx = (float)(px - cx);
+            float dy = (float)(py - cy);
+            float dist = sqrt(dx * dx + dy * dy);
+
+            if (dist < 1.0f) {
+                /* 中心点不模糊 */
+                dst->buffer[py * dst_pitch + px] =
+                    src->buffer[py * src_pitch + px];
+                continue;
+            }
+
+            float sum_r = 0, sum_g = 0, sum_b = 0;
+            float inv_samples = 1.0f / (float)samples;
+
+            for (int s = 0; s < samples; s++) {
+                float scale = 1.0f - amount * (float)s * inv_samples;
+                float sx = cx + dx * scale;
+                float sy = cy + dy * scale;
+
+                /* 边界钳制 */
+                int isx = (int)(sx + 0.5f);
+                int isy = (int)(sy + 0.5f);
+                if (isx < 0) isx = 0;
+                if (isx >= (int)src->w) isx = src->w - 1;
+                if (isy < 0) isy = 0;
+                if (isy >= (int)src->h) isy = src->h - 1;
+
+                uint32_t p = src->buffer[isy * src_pitch + isx];
+                sum_r += (p >> 16) & 0xFF;
+                sum_g += (p >> 8) & 0xFF;
+                sum_b += p & 0xFF;
+            }
+
+            uint8_t ir = (uint8_t)(sum_r * inv_samples);
+            uint8_t ig = (uint8_t)(sum_g * inv_samples);
+            uint8_t ib = (uint8_t)(sum_b * inv_samples);
+
+            dst->buffer[py * dst_pitch + px] =
+                ((uint32_t)ir << 16) | ((uint32_t)ig << 8) | ib;
+        }
+    }
+
+    return 0;
+}
+
+/*
+ * effect_motion_blur - 方向性运动模�?
+ *
+ * 沿指定角度方向进行线性运动模糊模拟�?
+ * angle为角�?�?, distance为模糊距�?像素)�?
+ *
+ * 返回 0=成功, -1=失败�?
+ */
+int effect_motion_blur(fr_surface_t *src, fr_surface_t *dst,
+                       float angle, float distance)
+{
+    if (src == NULL || dst == NULL) return -1;
+    if (src->buffer == NULL || dst->buffer == NULL) return -1;
+    if (distance <= 0.0f) distance = 1.0f;
+
+    /* 计算方向向量 */
+    float rad = angle * 3.14159265f / 180.0f;
+    float dir_x = cos(rad);
+    float dir_y = sin(rad);
+
+    int samples = (int)(distance) + 1;
+    if (samples > 32) samples = 32;
+    if (samples < 2) samples = 2;
+
+    float step = distance / (float)(samples - 1);
+    float inv_samples = 1.0f / (float)samples;
+
+    uint32_t src_pitch = src->pitch / 4;
+    uint32_t dst_pitch = dst->pitch / 4;
+
+    for (int py = 0; py < (int)src->h; py++) {
+        for (int px = 0; px < (int)src->w; px++) {
+            float sum_r = 0, sum_g = 0, sum_b = 0;
+
+            for (int s = 0; s < samples; s++) {
+                float offset = (float)s * step;
+                float sx = (float)px + dir_x * offset;
+                float sy = (float)py + dir_y * offset;
+
+                int isx = (int)(sx + 0.5f);
+                int isy = (int)(sy + 0.5f);
+                if (isx < 0) isx = 0;
+                if (isx >= (int)src->w) isx = src->w - 1;
+                if (isy < 0) isy = 0;
+                if (isy >= (int)src->h) isy = src->h - 1;
+
+                uint32_t p = src->buffer[isy * src_pitch + isx];
+                sum_r += (p >> 16) & 0xFF;
+                sum_g += (p >> 8) & 0xFF;
+                sum_b += p & 0xFF;
+            }
+
+            uint8_t ir = (uint8_t)(sum_r * inv_samples);
+            uint8_t ig = (uint8_t)(sum_g * inv_samples);
+            uint8_t ib = (uint8_t)(sum_b * inv_samples);
+
+            dst->buffer[py * dst_pitch + px] =
+                ((uint32_t)ir << 16) | ((uint32_t)ig << 8) | ib;
+        }
+    }
+
+    return 0;
+}
+
+/* ================================================================
+ *  色彩调整
+ * ================================================================ */
+
+/*
+ * color_adjust_t - 色彩调整参数
+ */
+typedef struct {
+    float brightness;    /* -1.0 to 1.0 */
+    float contrast;      /* 0.0 to 3.0 */
+    float saturation;    /* 0.0 to 3.0 */
+    float hue;           /* 0.0 to 360.0 */
+    float gamma;         /* 0.1 to 3.0 */
+} color_adjust_t;
+
+/*
+ * effect_adjust_colors - 综合色彩调整
+ *
+ * 对图像应用亮度、对比度、饱和度、色相和Gamma校正�?
+ * 所有参数可独立调节，支持区域处理�?
+ *
+ * 返回 0=成功, -1=失败�?
+ */
+int effect_adjust_colors(fr_surface_t *src, fr_surface_t *dst,
+                          const color_adjust_t *adj, fr_rect_t *region)
+{
+    if (src == NULL || dst == NULL || adj == NULL) return -1;
+    if (src->buffer == NULL || dst->buffer == NULL) return -1;
+
+    /* 确定处理区域 */
+    fr_rect_t r;
+    if (region != NULL) {
+        r = *region;
+    } else {
+        r.x = 0; r.y = 0;
+        r.w = src->w; r.h = src->h;
+    }
+
+    if (r.x < 0) { r.w += r.x; r.x = 0; }
+    if (r.y < 0) { r.h += r.y; r.y = 0; }
+    if (r.x + r.w > (int)src->w) r.w = src->w - r.x;
+    if (r.y + r.h > (int)src->h) r.h = src->h - r.y;
+    if (r.w <= 0 || r.h <= 0) return -1;
+
+    int pitch = (int)(src->pitch / 4);
+
+    /* 预计算常用值 */
+    float brightness = adj->brightness;   /* -1~1 */
+    float contrast = adj->contrast;       /* 0~2, 1=原始 */
+    float saturation = adj->saturation;   /* 0~2, 1=原始 */
+    float hue_shift = adj->hue;           /* 0~360�?*/
+    float gamma_val = adj->gamma;         /* 0.1~3.0, 1=原始 */
+
+    /* 构建Gamma查找�?(避免每像素调用powf) */
+    uint8_t gamma_lut[256];
+    if (gamma_val > 0.01f && fabs(gamma_val - 1.0f) > 0.01f) {
+        float inv_gamma = 1.0f / gamma_val;
+        for (int i = 0; i < 256; i++) {
+            float v = (float)i / 255.0f;
+            v = pow(v, inv_gamma);
+            gamma_lut[i] = (v > 1.0f) ? 255 : (v < 0.0f) ? 0 : (uint8_t)(v * 255.0f);
+        }
+    }
+
+    /* 色相旋转的sin/cos预计�?*/
+    float hue_cos = cos(hue_shift * 3.14159265f / 180.0f);
+    float hue_sin = sin(hue_shift * 3.14159265f / 180.0f);
+
+    for (int py = 0; py < r.h; py++) {
+        for (int px = 0; px < r.w; px++) {
+            uint32_t p = src->buffer[((int)(r.y) + py) * pitch + ((int)(r.x) + px)];
+
+            /* 归一化到 [0, 1] */
+            float rf = ((p >> 16) & 0xFF) / 255.0f;
+            float gf = ((p >> 8) & 0xFF) / 255.0f;
+            float bf = (p & 0xFF) / 255.0f;
+
+            /* 亮度偏移 */
+            rf += brightness;
+            gf += brightness;
+            bf += brightness;
+
+            /* 对比�? �?.5为中心缩�?*/
+            rf = (rf - 0.5f) * contrast + 0.5f;
+            gf = (gf - 0.5f) * contrast + 0.5f;
+            bf = (bf - 0.5f) * contrast + 0.5f;
+
+            /* 饱和�? 转换到YUV空间调整 */
+            float luminance = 0.299f * rf + 0.587f * gf + 0.114f * bf;
+            rf = luminance + (rf - luminance) * saturation;
+            gf = luminance + (gf - luminance) * saturation;
+            bf = luminance + (bf - luminance) * saturation;
+
+            /* 色相旋转 (在色度平面内旋转) */
+            if (fabs(hue_shift) > 0.01f) {
+                /* 简化的RGB色相旋转 */
+                float cr = rf - 0.5f;
+                float cg = gf - 0.5f;
+                float cb = bf - 0.5f;
+                rf = 0.5f + cr * hue_cos + cb * hue_sin;
+                gf = 0.5f + cg;
+                bf = 0.5f - cr * hue_sin + cb * hue_cos;
+            }
+
+            /* Gamma校正 */
+            if (gamma_val > 0.01f && fabs(gamma_val - 1.0f) > 0.01f) {
+                int ir = (int)(rf * 255.0f);
+                int ig = (int)(gf * 255.0f);
+                int ib = (int)(bf * 255.0f);
+                ir = (ir < 0) ? 0 : (ir > 255) ? 255 : ir;
+                ig = (ig < 0) ? 0 : (ig > 255) ? 255 : ig;
+                ib = (ib < 0) ? 0 : (ib > 255) ? 255 : ib;
+                rf = gamma_lut[ir] / 255.0f;
+                gf = gamma_lut[ig] / 255.0f;
+                bf = gamma_lut[ib] / 255.0f;
+            }
+
+            /* 钳制�?[0, 1] 并转换回8�?*/
+            uint8_t or = (rf > 1.0f) ? 255 : (rf < 0.0f) ? 0 : (uint8_t)(rf * 255.0f);
+            uint8_t og = (gf > 1.0f) ? 255 : (gf < 0.0f) ? 0 : (uint8_t)(gf * 255.0f);
+            uint8_t ob = (bf > 1.0f) ? 255 : (bf < 0.0f) ? 0 : (uint8_t)(bf * 255.0f);
+
+            dst->buffer[((int)(r.y) + py) * pitch + ((int)(r.x) + px)] =
+                ((uint32_t)or << 16) | ((uint32_t)og << 8) | ob;
+        }
+    }
+
+    return 0;
+}
+
+/* ================================================================
+ *  阴影生成扩展
+ * ================================================================ */
+
+/*
+ * effect_drop_shadow - 投射阴影生成
+ *
+ * 为源表面内容生成带偏移的高斯模糊阴影�?
+ *
+ * 返回 0=成功, -1=失败�?
+ */
+int effect_drop_shadow(fr_surface_t *src, fr_surface_t *dst,
+                        int offset_x, int offset_y,
+                        float radius, uint8_t alpha)
+{
+    if (src == NULL || dst == NULL) return -1;
+    if (src->buffer == NULL || dst->buffer == NULL) return -1;
+    if (alpha == 0) return 0;
+    if (radius < 0.5f) radius = 0.5f;
+
+    uint32_t sw = src->w, sh = src->h;
+    uint32_t dw = dst->w, dh = dst->h;
+    uint32_t spitch = src->pitch / 4;
+    uint32_t dpitch = dst->pitch / 4;
+
+    /* 清空目标 */
+    memset(dst->buffer, 0, (size_t)(dw * dh * 4));
+
+    /* 第一�? 提取alpha通道作为阴影形状 */
+    uint32_t *shape_buf = (uint32_t *)fr_alloc(sw * sh * 4);
+    if (shape_buf == NULL) return -1;
+
+    for (uint32_t y = 0; y < sh; y++) {
+        for (uint32_t x = 0; x < sw; x++) {
+            uint32_t p = src->buffer[y * spitch + x];
+            uint8_t sa = (p >> 24) & 0xFF; /* 使用Alpha通道或亮�?*/
+            if (sa == 0) {
+                /* 无Alpha时使用亮度估�?*/
+                uint8_t sr = (p >> 16) & 0xFF;
+                uint8_t sg = (p >> 8) & 0xFF;
+                uint8_t sb = p & 0xFF;
+                sa = (uint8_t)(((uint16_t)sr + (uint16_t)sg + (uint16_t)sb) / 3);
+            }
+            /* 用灰度表示阴影强�?*/
+            shape_buf[y * sw + x] = ((uint32_t)sa << 16) |
+                                     ((uint32_t)sa << 8) | sa;
+        }
+    }
+
+    /* 第二�? 在目标位置创建临时表面用于模�?*/
+    fr_surface_t temp_surf;
+    memset(&temp_surf, 0, sizeof(temp_surf));
+    temp_surf.w = dw; temp_surf.h = dh;
+    temp_surf.pitch = dw * 4; temp_surf.bpp = 32;
+    temp_surf.buffer = (uint32_t *)fr_alloc(dw * dh * 4);
+    if (temp_surf.buffer == NULL) {
+        fr_free(shape_buf);
+        return -1;
+    }
+    memset(temp_surf.buffer, 0, (size_t)(dw * dh * 4));
+
+    /* 将形状绘制到临时缓冲区的偏移位置 */
+    int sx = offset_x, sy = offset_y;
+    if (sx < 0) sx = 0;
+    if (sy < 0) sy = 0;
+
+    for (uint32_t y = 0; y < sh && (sy + y) < dh; y++) {
+        for (uint32_t x = 0; x < sw && (sx + x) < dw; x++) {
+            temp_surf.buffer[(sy + y) * dpitch + (sx + x)] =
+                shape_buf[y * sw + x];
+        }
+    }
+
+    fr_free(shape_buf);
+
+    /* 第三�? 模糊阴影形状 */
+    fr_rect_t blur_region = {0, 0, (int)dw, (int)dh};
+    effect_gaussian_blur(&temp_surf, dst, radius, &blur_region);
+
+    /* 第四�? 应用Alpha缩放 */
+    for (uint32_t y = 0; y < dh; y++) {
+        for (uint32_t x = 0; x < dw; x++) {
+            uint32_t p = dst->buffer[y * dpitch + x];
+            uint8_t intensity = (p >> 16) & 0xFF;
+            intensity = (uint8_t)((uint16_t)intensity * alpha / 255);
+            dst->buffer[y * dpitch + x] = ((uint32_t)intensity << 16) |
+                                          ((uint32_t)intensity << 8) | intensity;
+        }
+    }
+
+    fr_free(temp_surf.buffer);
+    return 0;
+}
+
+/*
+ * effect_inner_shadow - 内阴影生�?
+ *
+ * 在源表面边缘内部生成凹陷阴影效果�?
+ *
+ * 返回 0=成功, -1=失败�?
+ */
+int effect_inner_shadow(fr_surface_t *src, fr_surface_t *dst,
+                         float radius, uint8_t alpha)
+{
+    if (src == NULL || dst == NULL) return -1;
+    if (src->buffer == NULL || dst->buffer == NULL) return -1;
+    if (alpha == 0) return 0;
+    if (radius < 0.5f) radius = 0.5f;
+
+    uint32_t w = src->w, h = src->h;
+    uint32_t pitch = src->pitch / 4;
+
+    /* 复制原图到输�?*/
+    memcpy(dst->buffer, src->buffer, (size_t)(w * h * 4));
+
+    /* 创建边缘遮罩 */
+    uint32_t *edge_mask = (uint32_t *)fr_alloc(w * h * 4);
+    if (edge_mask == NULL) return -1;
+    memset(edge_mask, 0, (size_t)(w * h * 4));
+
+    /* 标记边缘像素 (距离边界<radius的像�? */
+    int iradius = (int)(radius + 0.5f);
+    for (uint32_t y = 0; y < h; y++) {
+        for (uint32_t x = 0; x < w; x++) {
+            int dist_to_edge = iradius;
+            if ((int)x < iradius) dist_to_edge = (int)x;
+            if ((int)x >= (int)w - iradius) dist_to_edge = (int)(w - 1 - x);
+            if ((int)y < iradius) dist_to_edge = (int)y;
+            if ((int)y >= (int)h - iradius) dist_to_edge = (int)(h - 1 - y);
+
+            if (dist_to_edge < iradius) {
+                /* 边缘强度与到边界的距离成正比 */
+                uint8_t strength = (uint8_t)(255 * (iradius - dist_to_edge) / iradius);
+                edge_mask[y * pitch + x] = ((uint32_t)strength << 16) |
+                                            ((uint32_t)strength << 8) | strength;
+            }
+        }
+    }
+
+    /* 模糊边缘遮罩 */
+    fr_surface_t mask_surf;
+    memset(&mask_surf, 0, sizeof(mask_surf));
+    mask_surf.w = w; mask_surf.h = h;
+    mask_surf.pitch = w * 4; mask_surf.bpp = 32;
+    mask_surf.buffer = (uint32_t *)fr_alloc(w * h * 4);
+    if (mask_surf.buffer != NULL) {
+        fr_rect_t region = {0, 0, (int)w, (int)h};
+
+        mask_surf.buffer = edge_mask; /* 直接用edge_mask作为�?*/
+        uint32_t *blur_result = (uint32_t *)fr_alloc(w * h * 4);
+        if (blur_result != NULL) {
+            fr_surface_t blur_dst;
+            memset(&blur_dst, 0, sizeof(blur_dst));
+            blur_dst.w = w; blur_dst.h = h;
+            blur_dst.pitch = w * 4; blur_dst.bpp = 32;
+            blur_dst.buffer = blur_result;
+
+            effect_gaussian_blur(&mask_surf, &blur_dst, radius, &region);
+
+            /* 将模糊后的阴影叠加到原图�?(变暗) */
+            for (uint32_t py = 0; py < h; py++) {
+                for (uint32_t px = 0; px < w; px++) {
+                    uint32_t shadow_v = blur_result[py * pitch + px];
+                    uint8_t sv = (shadow_v >> 16) & 0xFF;
+                    sv = (uint8_t)((uint16_t)sv * alpha / 255);
+
+                    if (sv > 0) {
+                        uint32_t orig = src->buffer[py * pitch + px];
+                        uint8_t or = (orig >> 16) & 0xFF;
+                        uint8_t og = (orig >> 8) & 0xFF;
+                        uint8_t ob = orig & 0xFF;
+
+                        uint8_t nr = (uint8_t)(or - (uint16_t)or * sv / (256 * 2));
+                        uint8_t ng = (uint8_t)(og - (uint16_t)og * sv / (256 * 2));
+                        uint8_t nb = (uint8_t)(ob - (uint16_t)ob * sv / (256 * 2));
+
+                        dst->buffer[py * pitch + px] =
+                            ((uint32_t)nr << 16) | ((uint32_t)ng << 8) | nb;
+                    }
+                }
+            }
+
+            fr_free(blur_result);
+        }
+        fr_free(mask_surf.buffer); /* 实际释放的是blur_result占位 */
+    } else {
+        fr_free(edge_mask);
+    }
+
+    return 0;
+}
+
+/* ================================================================
+ *  发光/描边效果
+ * ================================================================ */
+
+/*
+ * effect_glow - 外发光效�?
+ *
+ * 在非透明像素周围产生发光光晕�?
+ *
+ * 返回 0=成功, -1=失败�?
+ */
+int effect_glow(fr_surface_t *src, fr_surface_t *dst,
+                float radius, fr_color_t glow_color)
+{
+    if (src == NULL || dst == NULL) return -1;
+    if (src->buffer == NULL || dst->buffer == NULL) return -1;
+    if (radius < 0.5f) radius = 0.5f;
+
+    uint32_t w = src->w, h = src->h;
+    uint32_t pitch = src->pitch / 4;
+
+    /* 复制原图 */
+    memcpy(dst->buffer, src->buffer, (size_t)(w * h * 4));
+
+    /* 提取发光�?(非零像素) */
+    uint32_t *glow_src = (uint32_t *)fr_alloc(w * h * 4);
+    if (glow_src == NULL) return -1;
+    memset(glow_src, 0, (size_t)(w * h * 4));
+
+    uint32_t gc = ((uint32_t)glow_color.r << 16) |
+                  ((uint32_t)glow_color.g << 8) | glow_color.b;
+
+    for (uint32_t y = 0; y < h; y++) {
+        for (uint32_t x = 0; x < w; x++) {
+            uint32_t p = src->buffer[y * pitch + x];
+            if (p != 0) { /* 非透明/非黑色像素视为发光源 */
+                glow_src[y * pitch + x] = gc;
+            }
+        }
+    }
+
+    /* 模糊得到发光效果 */
+    fr_surface_t glow_surf;
+    memset(&glow_surf, 0, sizeof(glow_surf));
+    glow_surf.w = w; glow_surf.h = h;
+    glow_surf.pitch = w * 4; glow_surf.bpp = 32;
+    glow_surf.buffer = glow_src;
+
+    uint32_t *glow_result = (uint32_t *)fr_alloc(w * h * 4);
+    if (glow_result == NULL) {
+        fr_free(glow_src);
+        return -1;
+    }
+
+    fr_surface_t glow_dst;
+    memset(&glow_dst, 0, sizeof(glow_dst));
+    glow_dst.w = w; glow_dst.h = h;
+    glow_dst.pitch = w * 4; glow_dst.bpp = 32;
+    glow_dst.buffer = glow_result;
+
+    fr_rect_t region = {0, 0, (int)w, (int)h};
+    effect_gaussian_blur(&glow_surf, &glow_dst, radius, &region);
+
+    /* 加法混合发光层到目标 */
+    for (uint32_t y = 0; y < h; y++) {
+        for (uint32_t x = 0; x < w; x++) {
+            uint32_t glow_p = glow_result[y * pitch + x];
+            if (glow_p == 0) continue;
+
+            uint32_t dst_p = dst->buffer[y * pitch + x];
+
+            uint8_t gr = (glow_p >> 16) & 0xFF;
+            uint8_t gg = (glow_p >> 8) & 0xFF;
+            uint8_t gb = glow_p & 0xFF;
+            uint8_t dr = (dst_p >> 16) & 0xFF;
+            uint8_t dg = (dst_p >> 8) & 0xFF;
+            uint8_t db = dst_p & 0xFF;
+
+            /* 加法混合 */
+            uint8_t rr = (gr + dr > 255) ? 255 : gr + dr;
+            uint8_t rg = (gg + dg > 255) ? 255 : gg + dg;
+            uint8_t rb = (gb + db > 255) ? 255 : gb + db;
+
+            dst->buffer[y * pitch + x] =
+                ((uint32_t)rr << 16) | ((uint32_t)rg << 8) | rb;
+        }
+    }
+
+    fr_free(glow_src);
+    fr_free(glow_result);
+    return 0;
+}
+
+/*
+ * effect_outline - 描边效果
+ *
+ * 为非透明像素轮廓添加指定颜色和粗细的描边�?
+ *
+ * 返回 0=成功, -1=失败�?
+ */
+int effect_outline(fr_surface_t *src, fr_surface_t *dst,
+                   fr_color_t outline_color, int thickness)
+{
+    if (src == NULL || dst == NULL) return -1;
+    if (src->buffer == NULL || dst->buffer == NULL) return -1;
+    if (thickness <= 0) thickness = 1;
+
+    uint32_t w = src->w, h = src->h;
+    uint32_t pitch = src->pitch / 4;
+
+    /* 复制原图 */
+    memcpy(dst->buffer, src->buffer, (size_t)(w * h * 4));
+
+    uint32_t oc = ((uint32_t)outline_color.r << 16) |
+                  ((uint32_t)outline_color.g << 8) | outline_color.b;
+
+    /* 扫描每个像素，检查是否是边缘像素 */
+    for (int py = 0; py < (int)h; py++) {
+        for (int px = 0; px < (int)w; px++) {
+            uint32_t center = src->buffer[py * pitch + px];
+
+            /* 只处理非内容像素 (透明/黑色) */
+            if (center != 0) continue;
+
+            /* 检查周围是否有内容像素 */
+            int is_edge = 0;
+            for (int dy = -thickness; dy <= thickness && !is_edge; dy++) {
+                for (int dx = -thickness; dx <= thickness && !is_edge; dx++) {
+                    if (dx == 0 && dy == 0) continue;
+
+                    int nx = px + dx;
+                    int ny = py + dy;
+                    if (nx < 0 || nx >= (int)w || ny < 0 || ny >= (int)h)
+                        continue;
+
+                    if (src->buffer[ny * pitch + nx] != 0) {
+                        is_edge = 1;
+                    }
+                }
+            }
+
+            if (is_edge) {
+                dst->buffer[py * pitch + px] = oc;
+            }
+        }
+    }
+
+    return 0;
 }

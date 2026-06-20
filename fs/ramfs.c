@@ -5,6 +5,7 @@
 #include "stddef.h"
 #include "sync.h"
 #include "spinlock.h"
+#include "../kernel/klog.h"
 
 static superblock_t *ramfs_sb;
 static ramfs_node_t *ramfs_root;
@@ -95,6 +96,72 @@ static int32_t ramfs_grow_data(ramfs_node_t *node, uint32_t new_size) {
     return 0;
 }
 
+/* Build a VFS inode/dentry pair for a ramfs node and attach it to the
+ * parent dentry's child list.  This keeps the VFS dentry tree in sync
+ * with the ramfs node tree so that path_resolve() can traverse ramfs
+ * directories. */
+static dentry_t *ramfs_build_dentry(dentry_t *parent, ramfs_node_t *node, const char *name) {
+    inode_t *inode = (inode_t *)kmalloc(sizeof(inode_t));
+    if (!inode) return NULL;
+    memset(inode, 0, sizeof(inode_t));
+
+    dentry_t *d = (dentry_t *)kmalloc(sizeof(dentry_t));
+    if (!d) {
+        kfree(inode);
+        return NULL;
+    }
+    memset(d, 0, sizeof(dentry_t));
+
+    inode->ino = node->ino;
+    inode->mode = node->mode;
+    inode->uid = node->uid;
+    inode->gid = node->gid;
+    inode->size = node->size;
+    inode->nlinks = node->nlinks;
+    inode->atime = node->atime;
+    inode->mtime = node->mtime;
+    inode->ctime = node->ctime;
+    inode->sb = ramfs_sb;
+    inode->ops = &ramfs_inode_ops;
+    inode->private_data = node;
+    inode->dentries = d;
+
+    strncpy(d->name, name, 255);
+    d->name[255] = '\0';
+    d->parent = parent;
+    d->inode = inode;
+
+    d->next_sibling = parent->child;
+    parent->child = d;
+
+    return d;
+}
+
+/* Remove the VFS dentry (and its inode) matching `name` from parent. */
+static void ramfs_remove_vfs_dentry(dentry_t *parent, const char *name) {
+    if (!parent || !name) return;
+
+    dentry_t *prev = NULL;
+    dentry_t *cur = parent->child;
+    while (cur) {
+        if (strcmp(cur->name, name) == 0) {
+            if (prev) {
+                prev->next_sibling = cur->next_sibling;
+            } else {
+                parent->child = cur->next_sibling;
+            }
+            if (cur->inode) {
+                cur->inode->dentries = NULL;
+                kfree(cur->inode);
+            }
+            kfree(cur);
+            return;
+        }
+        prev = cur;
+        cur = cur->next_sibling;
+    }
+}
+
 static ramfs_node_t *ramfs_new_node(const char *name, uint32_t mode) {
     ramfs_node_t *n = (ramfs_node_t *)kmalloc(sizeof(ramfs_node_t));
     if (!n) return NULL;
@@ -119,12 +186,17 @@ static dentry_t *ramfs_lookup_op(dentry_t *dir, const char *name) {
     if (!(d->mode & FILE_MODE_DIR)) return NULL;
     if (strcmp(name, ".") == 0) return dir;
     if (strcmp(name, "..") == 0) return dir->parent;
-    if (ramfs_find_child(d, name) == NULL) return NULL;
-    /* The VFS caches dentries in path_resolve; here we return a
-     * transient dentry whose inode has not been attached to the
-     * tree. This is sufficient for write operations like mkdir/unlink
-     * that only use the name. */
-    return dir;
+
+    /* Walk the VFS dentry child list, which is kept in sync with the
+     * ramfs node tree by create/mkdir/symlink. */
+    dentry_t *child = dir->child;
+    while (child) {
+        if (strcmp(child->name, name) == 0) {
+            return child;
+        }
+        child = child->next_sibling;
+    }
+    return NULL;
 }
 
 static int32_t ramfs_create_op(dentry_t *dir, const char *name, uint32_t mode) {
@@ -137,6 +209,13 @@ static int32_t ramfs_create_op(dentry_t *dir, const char *name, uint32_t mode) {
     n->parent = d;
     n->next_sibling = d->child;
     d->child = n;
+
+    if (!ramfs_build_dentry(dir, n, name)) {
+        /* Roll back ramfs node creation. */
+        ramfs_unlink_from_parent(n);
+        kfree(n);
+        return -1;
+    }
     return 0;
 }
 
@@ -151,6 +230,14 @@ static int32_t ramfs_mkdir_op(dentry_t *dir, const char *name, uint32_t mode) {
     n->next_sibling = d->child;
     d->child = n;
     d->nlinks++;
+
+    if (!ramfs_build_dentry(dir, n, name)) {
+        /* Roll back ramfs node creation. */
+        d->nlinks--;
+        ramfs_unlink_from_parent(n);
+        kfree(n);
+        return -1;
+    }
     return 0;
 }
 
@@ -171,7 +258,11 @@ static int32_t ramfs_unlink_op(dentry_t *dir, const char *name) {
     ramfs_node_t *c = ramfs_find_child(d, name);
     if (!c) return -1;
     if (c->mode & FILE_MODE_DIR) return -1;
-    return ramfs_remove_node(d, c);
+    int32_t ret = ramfs_remove_node(d, c);
+    if (ret == 0) {
+        ramfs_remove_vfs_dentry(dir, name);
+    }
+    return ret;
 }
 
 static int32_t ramfs_rmdir_op(dentry_t *dir, const char *name) {
@@ -180,7 +271,11 @@ static int32_t ramfs_rmdir_op(dentry_t *dir, const char *name) {
     ramfs_node_t *c = ramfs_find_child(d, name);
     if (!c) return -1;
     if (!(c->mode & FILE_MODE_DIR)) return -1;
-    return ramfs_remove_node(d, c);
+    int32_t ret = ramfs_remove_node(d, c);
+    if (ret == 0) {
+        ramfs_remove_vfs_dentry(dir, name);
+    }
+    return ret;
 }
 
 static int32_t ramfs_rename_op(dentry_t *old_dir, const char *old_name,
@@ -192,12 +287,26 @@ static int32_t ramfs_rename_op(dentry_t *old_dir, const char *old_name,
     ramfs_node_t *node = ramfs_find_child(od, old_name);
     if (!node) return -1;
     if (ramfs_find_child(nd, new_name)) return -1;
+
     ramfs_unlink_from_parent(node);
     strncpy(node->name, new_name, RAMFS_MAX_NAME);
     node->name[RAMFS_MAX_NAME] = '\0';
     node->parent = nd;
     node->next_sibling = nd->child;
     nd->child = node;
+
+    /* Keep the VFS dentry tree in sync: remove the old dentry and
+     * create a new one under the destination parent. */
+    ramfs_remove_vfs_dentry(old_dir, old_name);
+    if (!ramfs_build_dentry(new_dir, node, new_name)) {
+        /* Roll back: restore node under the old parent. */
+        ramfs_unlink_from_parent(node);
+        strncpy(node->name, old_name, RAMFS_MAX_NAME);
+        node->parent = od;
+        node->next_sibling = od->child;
+        od->child = node;
+        return -1;
+    }
     return 0;
 }
 
@@ -206,21 +315,10 @@ static int32_t ramfs_symlink_op(dentry_t *dir, const char *name, const char *tar
 
     ramfs_node_t *parent = (ramfs_node_t *)dir->inode->private_data;
     if (!parent) return -1;
+    if (ramfs_find_child(parent, name)) return -1;
 
-    /* Create new ramfs node for the symlink */
-    ramfs_node_t *node = (ramfs_node_t *)kmalloc(sizeof(ramfs_node_t));
+    ramfs_node_t *node = ramfs_new_node(name, FILE_MODE_LNK | FILE_MODE_READ);
     if (!node) return -1;
-    memset(node, 0, sizeof(ramfs_node_t));
-
-    spinlock_lock(&ramfs_lock);
-    node->ino = ramfs_next_ino++;
-    spinlock_unlock(&ramfs_lock);
-
-    node->mode = FILE_MODE_LNK | FILE_MODE_READ;
-    strncpy(node->name, name, RAMFS_MAX_NAME);
-    node->name[RAMFS_MAX_NAME] = '\0';
-    node->parent = parent;
-    node->nlinks = 1;
 
     uint32_t target_len = strlen(target);
     node->size = target_len;
@@ -232,44 +330,17 @@ static int32_t ramfs_symlink_op(dentry_t *dir, const char *name, const char *tar
     }
     memcpy(node->data, target, target_len + 1);
 
-    /* Add to parent's child list */
+    node->parent = parent;
     node->next_sibling = parent->child;
     parent->child = node;
 
-    /* Create VFS inode */
-    inode_t *vfs_inode = (inode_t *)kmalloc(sizeof(inode_t));
-    if (!vfs_inode) {
+    if (!ramfs_build_dentry(dir, node, name)) {
+        /* Roll back. */
+        ramfs_unlink_from_parent(node);
         kfree(node->data);
         kfree(node);
         return -1;
     }
-    memset(vfs_inode, 0, sizeof(inode_t));
-    vfs_inode->ino = node->ino;
-    vfs_inode->mode = node->mode;
-    vfs_inode->size = target_len;
-    vfs_inode->nlinks = 1;
-    vfs_inode->sb = ramfs_sb;
-    vfs_inode->ops = &ramfs_inode_ops;
-    vfs_inode->private_data = node;
-
-    /* Create VFS dentry */
-    dentry_t *d = (dentry_t *)kmalloc(sizeof(dentry_t));
-    if (!d) {
-        kfree(vfs_inode);
-        kfree(node->data);
-        kfree(node);
-        return -1;
-    }
-    memset(d, 0, sizeof(dentry_t));
-    strncpy(d->name, name, 255);
-    d->name[255] = '\0';
-    d->inode = vfs_inode;
-    d->parent = dir;
-    vfs_inode->dentries = d;
-
-    d->next_sibling = dir->child;
-    dir->child = d;
-
     return 0;
 }
 

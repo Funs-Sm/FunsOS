@@ -13,6 +13,7 @@ static mutex_t cache_lock;
 static uint32_t cache_hits;
 static uint32_t cache_misses;
 static uint32_t cache_time;
+static uint32_t max_cache_entries = 0;  /* 0表示无限制 */
 
 static uint32_t cache_hash_fn(uint32_t block_num) {
     return block_num % CACHE_HASH_SIZE;
@@ -253,6 +254,157 @@ void cache_evict(void) {
             return;
         }
         entry = entry->lru_prev;
+    }
+
+    mutex_unlock(&cache_lock);
+}
+
+/* ==================== 缓存统计和高级操作 ==================== */
+
+/* 获取缓存统计信息 */
+cache_stats_t *cache_get_stats(void) {
+    static cache_stats_t stats;
+    mutex_lock(&cache_lock);
+
+    /* 统计当前缓存条目数 */
+    uint32_t entry_count = 0;
+    for (uint32_t i = 0; i < CACHE_HASH_SIZE; i++) {
+        cache_entry_t *entry = cache_hash[i];
+        while (entry) {
+            if (entry->valid) {
+                entry_count++;
+            }
+            entry = entry->hash_next;
+        }
+    }
+
+    stats.hits = cache_hits;
+    stats.misses = cache_misses;
+    stats.entries = entry_count;
+
+    /* 计算命中率（百分比） */
+    uint32_t total_accesses = cache_hits + cache_misses;
+    if (total_accesses > 0) {
+        stats.hit_rate = (cache_hits * 100) / total_accesses;
+    } else {
+        stats.hit_rate = 0;
+    }
+
+    mutex_unlock(&cache_lock);
+    return &stats;
+}
+
+/* 预读取指定块到缓存（不返回数据） */
+int32_t cache_prefetch(uint32_t block_num) {
+    mutex_lock(&cache_lock);
+
+    /* 检查是否已在缓存中 */
+    cache_entry_t *entry = cache_lookup(block_num);
+    if (entry) {
+        /* 已在缓存中，更新访问时间 */
+        entry->access_time = cache_time++;
+        lru_remove(entry);
+        lru_add_front(entry);
+        mutex_unlock(&cache_lock);
+        return 0;
+    }
+
+    /* 检查是否超过最大条目限制 */
+    if (max_cache_entries > 0) {
+        uint32_t current_entries = 0;
+        for (uint32_t i = 0; i < CACHE_HASH_SIZE; i++) {
+            cache_entry_t *e = cache_hash[i];
+            while (e) {
+                if (e->valid) current_entries++;
+                e = e->hash_next;
+            }
+        }
+        if (current_entries >= max_cache_entries) {
+            mutex_unlock(&cache_lock);
+            return -1; /* 缓存已满 */
+        }
+    }
+
+    /* 从磁盘读取数据 */
+    void *disk_buf = kmalloc(4096);
+    if (!disk_buf) {
+        mutex_unlock(&cache_lock);
+        return -1;
+    }
+
+    uint32_t lba = block_num * (4096 / 512);
+    if (ide_read_sectors(0, 8, lba, disk_buf) != 0) {
+        kfree(disk_buf);
+        mutex_unlock(&cache_lock);
+        return -1;
+    }
+
+    /* 插入到缓存 */
+    int32_t ret = cache_insert(block_num, disk_buf);
+    kfree(disk_buf);
+
+    mutex_unlock(&cache_lock);
+    return ret;
+}
+
+/* 使指定块缓存失效 */
+void cache_invalidate(uint32_t block_num) {
+    mutex_lock(&cache_lock);
+
+    cache_entry_t *entry = cache_lookup(block_num);
+    if (!entry || !entry->valid) {
+        mutex_unlock(&cache_lock);
+        return;
+    }
+
+    /* 如果脏数据，先写回磁盘 */
+    if (entry->dirty) {
+        uint32_t lba = block_num * (4096 / 512);
+        ide_write_sectors(0, 8, lba, entry->data);
+    }
+
+    /* 从哈希表中移除 */
+    uint32_t idx = cache_hash_fn(block_num);
+    if (cache_hash[idx] == entry) {
+        cache_hash[idx] = entry->hash_next;
+    }
+    if (entry->hash_prev) {
+        entry->hash_prev->hash_next = entry->hash_next;
+    }
+    if (entry->hash_next) {
+        entry->hash_next->hash_prev = entry->hash_prev;
+    }
+
+    /* 从LRU链表移除 */
+    lru_remove(entry);
+
+    /* 释放内存 */
+    kfree(entry->data);
+    kfree(entry);
+
+    mutex_unlock(&cache_lock);
+}
+
+/* 设置最大缓存条目数限制 */
+void cache_set_max_entries(uint32_t max) {
+    mutex_lock(&cache_lock);
+    max_cache_entries = max;
+
+    /* 如果新限制小于当前条目数，驱逐多余条目 */
+    if (max > 0) {
+        uint32_t current_entries = 0;
+        for (uint32_t i = 0; i < CACHE_HASH_SIZE; i++) {
+            cache_entry_t *e = cache_hash[i];
+            while (e) {
+                if (e->valid) current_entries++;
+                e = e->hash_next;
+            }
+        }
+
+        while (current_entries > max) {
+            cache_evict();
+            current_entries--;
+        }
     }
 
     mutex_unlock(&cache_lock);

@@ -4,6 +4,19 @@
 #include "kernel_types.h"
 #include "kernel_mem.h"
 #include "sync.h"
+
+/* 信号相关类型前向声明（用于pcb_t结构体） */
+typedef struct sigaction_entry {
+    void (*sa_handler)(int);
+    uint32_t sa_mask;
+    uint32_t sa_flags;
+} sigaction_entry_t;
+
+typedef struct sig_queue_entry {
+    int signo;
+    int value;
+} sig_queue_entry_t;
+
 #include "signal.h"
 
 /* Forward declaration */
@@ -61,6 +74,12 @@ struct pcb_t {
     uint64_t last_run_time;
     uint64_t wake_time;
     int32_t blocked_reason;
+
+    /* CFS调度器字段 */
+    uint64_t vruntime;            /* 虚拟运行时间 */
+
+    /* 进程组字段 */
+    pid_t pgid;                   /* 进程组ID */
     file_descriptor_t *fd_table[MAX_OPEN_FILES];
     uint32_t fd_count;
     uint32_t signal_pending;
@@ -70,6 +89,14 @@ struct pcb_t {
     uint32_t signal_sa_mask;      /* sigaction 掩码 */
     uint32_t alarm_ticks;         /* alarm 定时器 (时钟滴答) */
     uint32_t signal_frame_addr;   /* 当前信号帧地址 (用于 sigreturn) */
+
+    /* 扩展信号字段（完整sigaction支持） */
+#define MAX_SIG_QUEUE_SIZE 8
+    sigaction_entry_t signal_actions[32];  /* 每个信号的sigaction */
+    uint32_t         sig_pending_bits[1];   /* 待处理信号位图 */
+    sig_queue_entry_t sig_queue[MAX_SIG_QUEUE_SIZE]; /* 实时信号队列 */
+    uint32_t         sig_queue_count;
+
     uint32_t nice;
     uint8_t *comm;
     uint8_t fpu_saved;

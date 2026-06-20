@@ -1,9 +1,13 @@
 #include "vga_text.h"
 #include "io.h"
+#include "serial.h"
+#include "../gui/font.h"
 
 static int cursor_row = 0;
 static int cursor_col = 0;
 static uint8_t current_color = 0;
+
+static void update_hardware_cursor(void);
 
 /*
  * vga_text_mode3_switch - Switch VGA hardware from graphics mode to
@@ -16,130 +20,26 @@ static uint8_t current_color = 0;
  * to text mode 3 without calling BIOS (which is unavailable in
  * protected mode).
  *
- * Register values are the standard VGA mode 3 initialization sequence
- * from the IBM VGA BIOS / FreeVGA project.
+ * IMPORTANT: The bootloader already called INT 10h AH=00h AL=03
+ * (set video mode 3) before entering protected mode, which:
+ *   - Programmed all CRTC/sequencer/GFX registers correctly
+ *   - Loaded the standard 8x16 ROM font into CGRAM
+ *   - Cleared the text buffer at 0xB8000
+ *
+ * This function only needs to clear the screen and reset cursor,
+ * since BIOS did the heavy lifting.
  */
 void vga_text_mode3_switch(void) {
-    /* ---- Step 1: Disable display and sequencer ---- */
-    /* Turn off screen via sequencer clocking mode register */
-    outb(0x3C4, 0x01);  /* Sequencer: Clocking Mode */
-    outb(0x3C5, 0x21);  /* bit 5 = screen off, bit 0 = 8-dot mode */
-
-    /* ---- Step 2: Miscellaneous Output Register ---- */
-    outb(0x3C2, 0x67);  /* 28.322 MHz clock, 80-col mode, color I/O */
-
-    /* ---- Step 3: Sequencer registers ---- */
-    static const uint8_t seq_regs[] = {
-        0x00, 0x03,  /* Reset (async reset off) */
-        0x01, 0x01,  /* Clocking Mode (8-dot chars) */
-        0x02, 0x0F,  /* Map Mask (all 4 planes enabled) */
-        0x03, 0x00,  /* Character Map Select */
-        0x04, 0x0E,  /* Memory Mode (extended memory, odd/even) */
-    };
-    for (int i = 0; i < (int)(sizeof(seq_regs) / 2); i++) {
-        outb(0x3C4, seq_regs[i * 2]);
-        outb(0x3C5, seq_regs[i * 2 + 1]);
-    }
-
-    /* ---- Step 4: Unlock CRTC protection ---- */
-    outb(0x3D4, 0x11);
-    uint8_t crtc11 = inb(0x3D5);
-    outb(0x3D5, crtc11 & 0x7F);  /* Unlock CRTC regs 0-7 */
-
-    /* ---- Step 5: CRTC registers ---- */
-    static const uint8_t crtc_regs[] = {
-        0x00, 0x5F,  /* Horizontal Total */
-        0x01, 0x4F,  /* Horizontal Display End */
-        0x02, 0x50,  /* Horizontal Blank Start */
-        0x03, 0x82,  /* Horizontal Blank End */
-        0x04, 0x55,  /* Horizontal Retrace Start */
-        0x05, 0x81,  /* Horizontal Retrace End */
-        0x06, 0xBF,  /* Vertical Total */
-        0x07, 0x1F,  /* Overflow */
-        0x08, 0x00,  /* Preset Row Scan */
-        0x09, 0x4F,  /* Maximum Scan Line */
-        0x0A, 0x0D,  /* Cursor Start */
-        0x0B, 0x0E,  /* Cursor End */
-        0x0C, 0x00,  /* Start Address High */
-        0x0D, 0x00,  /* Start Address Low */
-        0x0E, 0x00,  /* Cursor Location High */
-        0x0F, 0x00,  /* Cursor Location Low */
-        0x10, 0x9C,  /* Vertical Retrace Start */
-        0x11, 0x8E,  /* Vertical Retrace End */
-        0x12, 0x8F,  /* Vertical Display End */
-        0x13, 0x28,  /* Offset (80 columns = 40 words) */
-        0x14, 0x1F,  /* Underline Location */
-        0x15, 0x96,  /* Vertical Blank Start */
-        0x16, 0xB9,  /* Vertical Blank End */
-        0x17, 0xA3,  /* Mode Control */
-    };
-    for (int i = 0; i < (int)(sizeof(crtc_regs) / 2); i++) {
-        outb(0x3D4, crtc_regs[i * 2]);
-        outb(0x3D5, crtc_regs[i * 2 + 1]);
-    }
-
-    /* ---- Step 6: Graphics Controller registers ---- */
-    static const uint8_t gfx_regs[] = {
-        0x00, 0x00,  /* Set/Reset */
-        0x01, 0x00,  /* Enable Set/Reset */
-        0x02, 0x00,  /* Color Compare */
-        0x03, 0x00,  /* Data Rotate */
-        0x04, 0x00,  /* Read Map Select */
-        0x05, 0x10,  /* Graphics Mode (text mode) */
-        0x06, 0x0E,  /* Miscellaneous (A0000-BFFFF, odd/even) */
-        0x07, 0x0F,  /* Color Don't Care */
-        0x08, 0xFF,  /* Bit Mask */
-    };
-    for (int i = 0; i < (int)(sizeof(gfx_regs) / 2); i++) {
-        outb(0x3CE, gfx_regs[i * 2]);
-        outb(0x3CF, gfx_regs[i * 2 + 1]);
-    }
-
-    /* ---- Step 7: Attribute Controller registers ---- */
-    /* Reset attribute flip-flop by reading 0x3DA */
-    inb(0x3DA);
-    static const uint8_t attr_regs[] = {
-        0x00, 0x00,  /* Palette 0: Black */
-        0x01, 0x01,  /* Palette 1: Blue */
-        0x02, 0x02,  /* Palette 2: Green */
-        0x03, 0x03,  /* Palette 3: Cyan */
-        0x04, 0x04,  /* Palette 4: Red */
-        0x05, 0x05,  /* Palette 5: Magenta */
-        0x06, 0x06,  /* Palette 6: Brown */
-        0x07, 0x07,  /* Palette 7: Light Gray */
-        0x08, 0x08,  /* Palette 8: Dark Gray */
-        0x09, 0x09,  /* Palette 9: Light Blue */
-        0x0A, 0x0A,  /* Palette 10: Light Green */
-        0x0B, 0x0B,  /* Palette 11: Light Cyan */
-        0x0C, 0x0C,  /* Palette 12: Light Red */
-        0x0D, 0x0D,  /* Palette 13: Light Magenta */
-        0x0E, 0x0E,  /* Palette 14: Yellow */
-        0x0F, 0x0F,  /* Palette 15: White */
-        0x10, 0x0C,  /* Mode Control (text mode, 8-bit) */
-        0x11, 0x00,  /* Overscan Color */
-        0x12, 0x0F,  /* Color Plane Enable */
-        0x13, 0x08,  /* Horizontal Pixel Panning */
-        0x14, 0x00,  /* Color Select */
-    };
-    for (int i = 0; i < (int)(sizeof(attr_regs) / 2); i++) {
-        inb(0x3DA);  /* Reset flip-flop */
-        outb(0x3C0, attr_regs[i * 2]);
-        outb(0x3C0, attr_regs[i * 2 + 1]);
-    }
-
-    /* ---- Step 8: Re-enable display ---- */
-    outb(0x3C4, 0x01);
-    outb(0x3C5, 0x01);  /* Screen on, 8-dot mode */
-
-    /* ---- Step 9: Enable attribute controller display ---- */
-    inb(0x3DA);
-    outb(0x3C0, 0x20);  /* Enable display (bit 5 of attr index) */
-
-    /* Clear the text buffer so we don't see garbage */
+    /* Clear text buffer with spaces on light-grey-on-black */
     volatile uint16_t *buf = (volatile uint16_t *)VGA_BUFFER;
     for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT; i++) {
         buf[i] = (uint16_t)(' ' | 0x0700);
     }
+
+    /* Reset cursor to top-left */
+    cursor_row = 0;
+    cursor_col = 0;
+    update_hardware_cursor();
 }
 
 static void update_hardware_cursor(void) {
@@ -247,6 +147,25 @@ void vga_text_get_cursor(int *row, int *col) {
     *col = cursor_col;
 }
 
+/* Dump the visible VGA text buffer to the serial port for debugging
+ * garbled output.  Each cell is a (char, attr) pair at 0xB8000. */
+void vga_text_dump_screen(void) {
+    volatile uint16_t *buf = (volatile uint16_t *)VGA_BUFFER;
+    serial_print(COM1, "--- VGA screen dump ---\n");
+    for (int row = 0; row < VGA_HEIGHT && row < 25; row++) {
+        char line[VGA_WIDTH + 1];
+        for (int col = 0; col < VGA_WIDTH; col++) {
+            uint16_t cell = buf[row * VGA_WIDTH + col];
+            char c = (char)(cell & 0xFF);
+            line[col] = (c >= 32 && c < 127) ? c : ' ';
+        }
+        line[VGA_WIDTH] = '\0';
+        serial_print(COM1, line);
+        serial_print(COM1, "\n");
+    }
+    serial_print(COM1, "--- end VGA screen dump ---\n");
+}
+
 void vga_text_print_hex(uint32_t val) {
     static const char hex_chars[] = "0123456789ABCDEF";
     vga_text_putchar('0');
@@ -275,4 +194,115 @@ void vga_text_print_dec(uint32_t val) {
     for (int j = i - 1; j >= 0; j--) {
         vga_text_putchar(buf[j]);
     }
+}
+
+/* Diagnostic: print the full ASCII table via VGA and verify font RAM.
+ * Outputs every printable character (32-126) in rows of 16,
+ * then reads back the first few bytes of CGRAM for 'A' (char 65)
+ * and dumps them to serial so we can confirm the font was loaded. */
+void vga_text_font_diagnostic(void) {
+    /* Print ASCII grid on screen */
+    vga_text_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLUE);
+    vga_text_print("=== VGA FONT DIAGNOSTIC ===\n");
+
+    int test_chars[] = {'A', 'B', 'a', '0', ' ', '#'};
+    int n_test = sizeof(test_chars) / sizeof(test_chars[0]);
+
+    for (int c = 32; c < 127; c++) {
+        if ((c - 32) % 16 == 0) {
+            char buf[8];
+            int n = 0;
+            int tmp = c;
+            buf[n++] = '[';
+            if (tmp == 0) { buf[n++] = '0'; }
+            else {
+                char rev[4]; int ri = 0;
+                while (tmp > 0) { rev[ri++] = '0' + (tmp % 10); tmp /= 10; }
+                while (ri > 0) buf[n++] = rev[--ri];
+            }
+            buf[n++] = ']';
+            buf[n++] = ':';
+            buf[n++] = ' ';
+            buf[n] = '\0';
+            vga_text_print(buf);
+        }
+        vga_text_putchar((char)c);
+        vga_text_putchar(' ');
+    }
+    vga_text_putchar('\n');
+
+    /* Read back font data from plane 2 and dump to serial */
+    {
+        uint8_t saved_seq2, saved_seq4, saved_gfx5, saved_gfx6;
+
+        outb(0x3C4, 0x02); saved_seq2 = inb(0x3C5);
+        outb(0x3C4, 0x04); saved_seq4 = inb(0x3C5);
+        outb(0x3CE, 0x05); saved_gfx5 = inb(0x3CF);
+        outb(0x3CE, 0x06); saved_gfx6 = inb(0x3CF);
+
+        /* Select plane 2 for reading, read mode 0 */
+        outb(0x3C4, 0x02); outb(0x3C5, 0x04);
+        outb(0x3C4, 0x04); outb(0x3C5, 0x07);
+        outb(0x3CE, 0x05); outb(0x3CF, 0x00);  /* read mode 0 */
+        outb(0x3CE, 0x06); outb(0x3CF, 0x04);
+
+        volatile uint8_t *font_ram = (volatile uint8_t *)0xA0000;
+
+        serial_print(COM1, "[FONT-DIAG] Dumping CGRAM for test chars:\n");
+        for (int ti = 0; ti < n_test; ti++) {
+            int ch = test_chars[ti];
+            char hdr[32];
+            int hi = 0;
+            hdr[hi++] = '[';
+            hdr[hi++] = (char)ch;
+            hdr[hi++] = ']';
+            hdr[hi++] = ' ';
+            int tmp = ch;
+            if (tmp == 0) { hdr[hi++] = '0'; }
+            else {
+                char rev[4]; int ri = 0;
+                while (tmp > 0) { rev[ri++] = '0' + (tmp % 10); tmp /= 10; }
+                while (ri > 0) hdr[hi++] = rev[--ri];
+            }
+            hdr[hi++] = ':';
+            hdr[hi++] = '\0';
+            serial_print(COM1, hdr);
+            for (int line = 0; line < 16; line++) {
+                uint8_t val = font_ram[ch * 32 + line];
+                /* print as binary */
+                for (int b = 7; b >= 0; b--) {
+                    char bitc = (val & (1 << b)) ? '#' : '.';
+                    serial_putchar(COM1, bitc);
+                }
+                serial_print(COM1, "  ");
+                /* also hex */
+                static const char hx[] = "0123456789ABCDEF";
+                serial_putchar(COM1, '0');
+                serial_putchar(COM1, 'x');
+                serial_putchar(COM1, hx[(val >> 4) & 0xF]);
+                serial_putchar(COM1, hx[val & 0xF]);
+                serial_putchar(COM1, '\n');
+            }
+        }
+
+        /* Also read back what we expect for 'A' from font_data array */
+        serial_print(COM1, "[FONT-DIAG] Expected 'A' from font_data array:\n");
+        extern const uint8_t font_data[][16];
+        for (int line = 0; line < 16; line++) {
+            uint8_t val = font_data['A' - 32][line];
+            for (int b = 7; b >= 0; b--) {
+                char bitc = (val & (1 << b)) ? '#' : '.';
+                serial_putchar(COM1, bitc);
+            }
+            serial_print(COM1, "\n");
+        }
+
+        /* Restore registers */
+        outb(0x3CE, 0x05); outb(0x3CF, saved_gfx5);
+        outb(0x3CE, 0x06); outb(0x3CF, saved_gfx6);
+        outb(0x3C4, 0x02); outb(0x3C5, saved_seq2);
+        outb(0x3C4, 0x04); outb(0x3C5, saved_seq4);
+    }
+
+    vga_text_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
 }

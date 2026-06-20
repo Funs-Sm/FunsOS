@@ -9,6 +9,12 @@
 
 #include "stdint.h"
 
+/* 前向声明: funsos_window_t 完整定义在 funsos_window.h */
+#ifndef FUNSOS_WINDOW_T_DEFINED
+#define FUNSOS_WINDOW_T_DEFINED
+typedef struct funsos_window funsos_window_t;
+#endif
+
 /* ---- 颜色定义 ---- */
 #define FUNSOS_COLOR_BLACK      0x000000
 #define FUNSOS_COLOR_WHITE      0xFFFFFF
@@ -93,6 +99,13 @@ int funsos_draw_line(funsos_window_t win, int x1, int y1, int x2, int y2, funsos
  * 返回: 0 成功, -1 失败
  */
 int funsos_fill_window(funsos_window_t win, funsos_color_t bg);
+
+/*
+ * 获取窗口的图形上下文
+ * 参数: win - 窗口句柄
+ * 返回: 图形上下文指针, NULL 表示失败
+ */
+void *funsos_get_window_context(funsos_window_t win);
 
 /*
  * 绘制圆形轮廓

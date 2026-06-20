@@ -39,7 +39,7 @@ REM Run with QEMU - no-reboot to catch triple faults
 REM -no-acpi: disable ACPI/IOAPIC so interrupts route through PIC (keyboard+timer need this)
 REM -monitor none: prevent QEMU monitor from stealing keystrokes
 REM -serial file: write serial output to file (not stealing keyboard focus)
-qemu-system-i386 -drive format=raw,file=build\os.img -m 128 -monitor none -serial file:serial.log -no-reboot -no-shutdown 2>&1
+qemu-system-i386 -drive format=raw,file=build\os.img,if=ide,index=0 -m 128 -monitor none -serial file:serial.log -no-reboot -no-shutdown 2>&1
 
 echo.
 echo [INFO] QEMU exited. Serial log saved to serial.log

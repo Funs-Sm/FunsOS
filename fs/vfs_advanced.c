@@ -4,6 +4,8 @@
 #include "string.h"
 #include "sync.h"
 #include "timer.h"
+#include "../kernel/process.h"
+#include "../kernel/sched.h"
 
 /* 全局文件锁表 */
 static file_lock_t *global_lock_list = NULL;
@@ -29,12 +31,44 @@ static fs_snapshot_t *snapshot_list = NULL;
 static uint32_t next_snapshot_id = 1;
 static spinlock_t snapshot_lock;
 
+/* inotify 监视表（最多32个watch）*/
+#define MAX_INOTIFY_WATCHES 32
+
+typedef struct inotify_watch {
+    int32_t wd;                    /* watch描述符 */
+    int32_t fd;                    /* 关联的fd */
+    char path[256];                /* 监视路径 */
+    uint32_t mask;                 /* 事件掩码 */
+    inotify_event_t *event_queue;  /* 事件队列 */
+    uint32_t event_count;          /* 事件数量 */
+    uint8_t active;                /* 是否激活 */
+} inotify_watch_t;
+
+static inotify_watch_t inotify_watches[MAX_INOTIFY_WATCHES];
+static int32_t next_watch_id = 1;
+static spinlock_t inotify_lock;
+static uint8_t inotify_initialized = 0;
+
 /* 初始化高级VFS功能 */
 void vfs_advanced_init(void) {
     spinlock_init(&lock_table_lock);
     spinlock_init(&xattr_lock);
     spinlock_init(&quota_lock);
     spinlock_init(&snapshot_lock);
+    spinlock_init(&inotify_lock);
+
+    /* 初始化inotify监视表 */
+    if (!inotify_initialized) {
+        for (int32_t i = 0; i < MAX_INOTIFY_WATCHES; i++) {
+            inotify_watches[i].wd = 0;
+            inotify_watches[i].fd = -1;
+            inotify_watches[i].mask = 0;
+            inotify_watches[i].event_queue = NULL;
+            inotify_watches[i].event_count = 0;
+            inotify_watches[i].active = 0;
+        }
+        inotify_initialized = 1;
+    }
 }
 
 /* ==================== 文件锁实现 ==================== */
@@ -68,7 +102,7 @@ int32_t vfs_flock(file_t *file, uint32_t type, uint64_t start, uint64_t length) 
     }
 
     new_lock->type = type;
-    new_lock->pid = 0; /* TODO: 获取当前进程PID */
+    new_lock->pid = sched_get_current() ? sched_get_current()->pid : 0;
     new_lock->start = start;
     new_lock->length = length;
     new_lock->next = global_lock_list;
@@ -479,29 +513,199 @@ int32_t vfs_snapshot_restore(const char *path, uint32_t snapshot_id) {
     return -1;
 }
 
-/* ==================== 其他高级功能存根实现 ==================== */
+/* ==================== inotify 文件监视实现 ==================== */
 
 int32_t vfs_inotify_init(void) {
-    /* TODO: 实现inotify初始化 */
-    return 0;
+    /* 确保inotify已初始化 */
+    if (!inotify_initialized) {
+        vfs_advanced_init();
+    }
+
+    /* 返回一个简单的fd（简化实现） */
+    /* 实际实现应该分配真正的文件描述符 */
+    return 0;  /* 返回inotify实例的fd */
 }
 
 int32_t vfs_inotify_add_watch(int32_t fd, const char *path, uint32_t mask) {
-    /* TODO: 实现添加监视 */
-    (void)fd; (void)path; (void)mask;
-    return 0;
+    if (!path || fd < 0) return -1;
+
+    spinlock_lock(&inotify_lock);
+
+    /* 查找空闲的watch槽位 */
+    int32_t slot = -1;
+    for (int32_t i = 0; i < MAX_INOTIFY_WATCHES; i++) {
+        if (!inotify_watches[i].active) {
+            slot = i;
+            break;
+        }
+    }
+
+    if (slot < 0) {
+        spinlock_unlock(&inotify_lock);
+        return -1;  /* 已达到最大watch数量 */
+    }
+
+    /* 初始化watch */
+    inotify_watches[slot].wd = next_watch_id++;
+    inotify_watches[slot].fd = fd;
+    strncpy(inotify_watches[slot].path, path, 255);
+    inotify_watches[slot].path[255] = '\0';
+    inotify_watches[slot].mask = mask;  /* 支持IN_CREATE/IN_DELETE/IN_MODIFY/IN_ACCESS */
+    inotify_watches[slot].event_queue = NULL;
+    inotify_watches[slot].event_count = 0;
+    inotify_watches[slot].active = 1;
+
+    int32_t wd = inotify_watches[slot].wd;
+    spinlock_unlock(&inotify_lock);
+    return wd;  /* 返回watch描述符 */
 }
 
 int32_t vfs_inotify_rm_watch(int32_t fd, int32_t wd) {
-    /* TODO: 实现移除监视 */
-    (void)fd; (void)wd;
-    return 0;
+    if (wd <= 0 || fd < 0) return -1;
+
+    spinlock_lock(&inotify_lock);
+
+    for (int32_t i = 0; i < MAX_INOTIFY_WATCHES; i++) {
+        if (inotify_watches[i].active && inotify_watches[i].wd == wd && inotify_watches[i].fd == fd) {
+            /* 释放事件队列 */
+            inotify_event_t *event = inotify_watches[i].event_queue;
+            while (event) {
+                inotify_event_t *next = event->next;
+                kfree(event);
+                event = next;
+            }
+
+            /* 清空watch槽位 */
+            inotify_watches[i].active = 0;
+            inotify_watches[i].wd = 0;
+            inotify_watches[i].fd = -1;
+            inotify_watches[i].mask = 0;
+            inotify_watches[i].event_queue = NULL;
+            inotify_watches[i].event_count = 0;
+
+            spinlock_unlock(&inotify_lock);
+            return 0;
+        }
+    }
+
+    spinlock_unlock(&inotify_lock);
+    return -1;  /* 未找到指定的watch */
+}
+
+/* ==================== 校验和计算实现 ==================== */
+
+/* CRC32 查找表（简化版） */
+static uint32_t crc32_table[256];
+static uint8_t crc32_table_initialized = 0;
+
+static void crc32_init_table(void) {
+    for (uint32_t i = 0; i < 256; i++) {
+        uint32_t crc = i;
+        for (int j = 0; j < 8; j++) {
+            if (crc & 1) {
+                crc = (crc >> 1) ^ 0xEDB88320;
+            } else {
+                crc >>= 1;
+            }
+        }
+        crc32_table[i] = crc;
+    }
+    crc32_table_initialized = 1;
+}
+
+static uint32_t crc32_compute(const uint8_t *data, uint32_t length) {
+    if (!crc32_table_initialized) {
+        crc32_init_table();
+    }
+
+    uint32_t crc = 0xFFFFFFFF;
+    for (uint32_t i = 0; i < length; i++) {
+        crc = (crc >> 8) ^ crc32_table[(crc ^ data[i]) & 0xFF];
+    }
+    return crc ^ 0xFFFFFFFF;
+}
+
+/* 简化版MD5（仅用于演示，非安全实现） */
+static void md5_simple(const uint8_t *data, uint32_t length, uint8_t *hash) {
+    /* 这是一个简化的哈希实现，不是真正的MD5 */
+    /* 实际生产环境应使用完整的MD5或SHA256实现 */
+    uint32_t state[4] = {0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476};
+
+    for (uint32_t i = 0; i < length; i++) {
+        state[0] ^= ((uint32_t)data[i] << (8 * (i % 4)));
+        state[1] += data[i] * (i + 1);
+        state[2] ^= (data[i] << 16) | (data[i] >> 16);
+        state[3] += (uint32_t)data[i] << ((i % 4) * 8);
+    }
+
+    /* 输出128位（16字节）哈希 */
+    for (int i = 0; i < 4; i++) {
+        hash[i * 4]     = (state[i] >> 24) & 0xFF;
+        hash[i * 4 + 1] = (state[i] >> 16) & 0xFF;
+        hash[i * 4 + 2] = (state[i] >> 8) & 0xFF;
+        hash[i * 4 + 3] = state[i] & 0xFF;
+    }
 }
 
 int32_t vfs_checksum_compute(const char *path, uint32_t algorithm, file_checksum_t *checksum) {
-    /* TODO: 实现校验和计算 */
-    (void)path; (void)algorithm; (void)checksum;
-    return -1;
+    if (!path || !checksum) return -1;
+
+    /* 打开文件读取数据 */
+    file_t *file = NULL;
+    if (vfs_open(path, FILE_MODE_READ, &file) != 0 || !file) {
+        return -1;
+    }
+
+    /* 获取文件大小 */
+    inode_t *inode = file->inode;
+    if (!inode) {
+        vfs_close(file);
+        return -1;
+    }
+
+    uint32_t file_size = inode->size;
+    if (file_size == 0) {
+        vfs_close(file);
+        return -1;
+    }
+
+    /* 分配缓冲区并读取文件内容 */
+    uint8_t *buffer = (uint8_t *)kmalloc(file_size);
+    if (!buffer) {
+        vfs_close(file);
+        return -1;
+    }
+
+    int32_t read_result = vfs_read(file, buffer, file_size);
+    vfs_close(file);
+
+    if (read_result <= 0) {
+        kfree(buffer);
+        return -1;
+    }
+
+    checksum->algorithm = algorithm;
+    checksum->timestamp = timer_get_ticks();
+
+    switch (algorithm) {
+        case 0:  /* CRC32 */
+        case 1: {
+            uint32_t crc = crc32_compute(buffer, read_result);
+            checksum->hash_len = 4;
+            memset(checksum->hash, 0, 64);
+            memcpy(checksum->hash, &crc, 4);
+            break;
+        }
+        case 2:  /* MD5简化版 */
+        default: {
+            md5_simple(buffer, read_result, checksum->hash);
+            checksum->hash_len = 16;
+            break;
+        }
+    }
+
+    kfree(buffer);
+    return 0;
 }
 
 int32_t vfs_checksum_verify(const char *path, file_checksum_t *checksum) {
@@ -554,9 +758,42 @@ int32_t vfs_get_fragmentation(const char *path, uint32_t *frag_percent) {
 }
 
 int32_t vfs_atomic_write(const char *path, const void *buf, uint32_t count) {
-    /* TODO: 实现原子写入 */
-    (void)path; (void)buf; (void)count;
-    return -1;
+    if (!path || !buf || count == 0) return -1;
+
+    /* 创建临时文件路径 */
+    char temp_path[300];
+    strncpy(temp_path, path, 280);
+    strcat(temp_path, ".tmp~");
+
+    /* 创建并写入临时文件 */
+    file_t *temp_file = NULL;
+    if (vfs_creat(temp_path, FILE_MODE_WRITE | FILE_MODE_REG) != 0) {
+        return -1;
+    }
+
+    if (vfs_open(temp_path, FILE_MODE_WRITE, &temp_file) != 0 || !temp_file) {
+        vfs_unlink(temp_path);
+        return -1;
+    }
+
+    int32_t write_result = vfs_write(temp_file, buf, count);
+    vfs_close(temp_file);
+
+    if (write_result < 0) {
+        vfs_unlink(temp_path);
+        return -1;
+    }
+
+    /* 原子重命名：将临时文件重命名为目标文件 */
+    int32_t rename_result = vfs_rename(temp_path, path);
+
+    if (rename_result != 0) {
+        /* 重命名失败，清理临时文件 */
+        vfs_unlink(temp_path);
+        return -1;
+    }
+
+    return count;  /* 返回写入的字节数 */
 }
 
 int32_t vfs_atomic_rename(const char *oldpath, const char *newpath) {
@@ -590,14 +827,38 @@ int32_t vfs_sync_dir(const char *path) {
 }
 
 int32_t vfs_sync_all(void) {
-    /* TODO: 实现全局同步 */
+    /* 1. 刷新所有缓存数据到磁盘 */
+    extern int32_t cache_flush_all(void);
+    cache_flush_all();
+
+    /* 2. 同步所有挂载的文件系统 */
+    /* 简化实现：调用全局vfs_sync */
+    vfs_sync();
+
     return 0;
 }
 
 int32_t vfs_readahead(file_t *file, uint64_t offset, uint64_t length) {
-    /* TODO: 实现预读取 */
-    (void)file; (void)offset; (void)length;
-    return 0;
+    if (!file || !file->inode) return -1;
+
+    /* 计算需要预读取的块范围 */
+    uint32_t block_size = 4096;  /* 假设块大小为4KB */
+    uint64_t start_block = offset / block_size;
+    uint64_t end_block = (offset + length + block_size - 1) / block_size;
+
+    /* 预读取后续块到缓存（顺序访问模式） */
+    extern int32_t cache_prefetch(uint32_t block_num);
+
+    uint64_t prefetch_count = 0;
+    const uint64_t max_prefetch = 8;  /* 最多预读取8个块 */
+
+    for (uint64_t block = start_block; block <= end_block && prefetch_count < max_prefetch; block++) {
+        if (cache_prefetch((uint32_t)block) == 0) {
+            prefetch_count++;
+        }
+    }
+
+    return (int32_t)prefetch_count;  /* 返回实际预读取的块数 */
 }
 
 int32_t vfs_direct_read(file_t *file, void *buf, uint32_t count) {

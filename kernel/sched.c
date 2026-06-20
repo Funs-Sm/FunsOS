@@ -508,3 +508,406 @@ void sched_print_stats(void) {
 
     spinlock_irq_restore(&sched.lock, flags);
 }
+
+/* ============================================================
+ * CFS (Completely Fair Scheduler) 完全公平调度器
+ * ============================================================ */
+
+/* CFS红黑树节点 - 简化为有序链表实现 */
+typedef struct cfs_node {
+    pcb_t          *proc;
+    uint64_t        vruntime;   /* 虚拟运行时间 */
+    struct cfs_node *next;
+} cfs_node_t;
+
+#define CFS_MAX_PROCS 256
+static cfs_node_t cfs_runqueue[CFS_MAX_PROCS];
+static uint32_t   cfs_count;
+static uint64_t   min_vruntime;
+static uint64_t   cfs_tick_granularity; /* 默认1ms */
+
+/* 初始化CFS调度器 */
+void sched_cfs_init(void) {
+    for (int i = 0; i < CFS_MAX_PROCS; i++) {
+        cfs_runqueue[i].proc = NULL;
+        cfs_runqueue[i].vruntime = 0;
+        cfs_runqueue[i].next = NULL;
+    }
+    cfs_count = 0;
+    min_vruntime = 0;
+    cfs_tick_granularity = 1; /* 默认1ms粒度 */
+}
+
+/* 将进程加入CFS运行队列（按vruntime排序插入） */
+void sched_cfs_enqueue(pcb_t *proc) {
+    if (!proc || cfs_count >= CFS_MAX_PROCS) return;
+
+    /* 找到空闲槽位 */
+    int slot = -1;
+    for (int i = 0; i < CFS_MAX_PROCS; i++) {
+        if (cfs_runqueue[i].proc == NULL) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) return; /* 队列满 */
+
+    /* 计算初始vruntime：继承min_vruntime或使用进程权重调整 */
+    cfs_node_t *node = &cfs_runqueue[slot];
+    node->proc = proc;
+    node->vruntime = (proc->vruntime > min_vruntime) ? proc->vruntime : min_vruntime;
+    node->next = NULL;
+
+    /* 有序链表插入：按vruntime升序排列 */
+    if (cfs_count == 0) {
+        /* 队列为空，直接作为头节点 */
+        node->next = NULL;
+    } else {
+        /* 找到合适的插入位置 */
+        cfs_node_t *prev = NULL;
+        cfs_node_t *curr = &cfs_runqueue[0]; /* 假设第一个节点是链表头 */
+
+        /* 查找实际的链表头 */
+        int head_idx = -1;
+        for (int i = 0; i < CFS_MAX_PROCS; i++) {
+            if (cfs_runqueue[i].proc != NULL) {
+                head_idx = i;
+                break;
+            }
+        }
+        if (head_idx < 0) return;
+
+        curr = &cfs_runqueue[head_idx];
+
+        while (curr && curr->vruntime < node->vruntime) {
+            prev = curr;
+            curr = curr->next;
+        }
+
+        if (prev == NULL) {
+            /* 插入到链表头部 */
+            node->next = &cfs_runqueue[head_idx];
+        } else {
+            node->next = prev->next;
+            prev->next = node;
+        }
+    }
+
+    cfs_count++;
+}
+
+/* 从CFS队列中取出vruntime最小的进程 */
+pcb_t *sched_cfs_dequeue(void) {
+    if (cfs_count == 0) return NULL;
+
+    /* 找到vruntime最小的节点（链表头） */
+    int min_idx = -1;
+    uint64_t min_val = UINT64_MAX;
+
+    for (int i = 0; i < CFS_MAX_PROCS; i++) {
+        if (cfs_runqueue[i].proc != NULL && cfs_runqueue[i].vruntime < min_val) {
+            min_val = cfs_runqueue[i].vruntime;
+            min_idx = i;
+        }
+    }
+
+    if (min_idx < 0) return NULL;
+
+    cfs_node_t *node = &cfs_runqueue[min_idx];
+    pcb_t *proc = node->proc;
+
+    /* 更新min_vruntime */
+    if (node->vruntime > min_vruntime) {
+        min_vruntime = node->vruntime;
+    }
+
+    /* 清除节点 */
+    node->proc = NULL;
+    node->vruntime = 0;
+    node->next = NULL;
+    cfs_count--;
+
+    return proc;
+}
+
+/* 计算虚拟运行时间增量 */
+uint64_t sched_calc_vruntime(pcb_t *proc, uint64_t delta_exec) {
+    if (!proc) return 0;
+
+    /* 根据进程优先级/权重计算vruntime增量
+     * 权重越高，vruntime增长越慢，获得更多CPU时间
+     * 公式: vruntime += delta_exec * 1024 / weight
+     * 这里简化为根据优先级线性调整 */
+    uint32_t priority = proc->effective_priority;
+    uint64_t weight = 1024; /* 基准权重 */
+
+    /* 优先级越高，权重越大 */
+    if (priority > SCHED_DEFAULT_PRIORITY) {
+        weight += (priority - SCHED_DEFAULT_PRIORITY) * 10;
+    } else if (priority < SCHED_DEFAULT_PRIORITY) {
+        weight -= (SCHED_DEFAULT_PRIORITY - priority) * 5;
+        if (weight < 100) weight = 100; /* 最小权重 */
+    }
+
+    return (delta_exec * 1024) / weight;
+}
+
+/* CFS时钟滴答处理 */
+void sched_cfs_tick(pcb_t *proc) {
+    if (!proc) return;
+
+    /* 更新进程的vruntime */
+    uint64_t delta = cfs_tick_granularity;
+    uint64_t vruntime_delta = sched_calc_vruntime(proc, delta);
+    proc->vruntime += vruntime_delta;
+
+    /* 如果时间片用完，重新入队 */
+    proc->time_slice--;
+    if (proc->time_slice <= 0 && proc->state == PROCESS_RUNNING) {
+        /* 重新加入CFS队列 */
+        proc->state = PROCESS_READY;
+        sched_cfs_enqueue(proc);
+    }
+}
+
+/* 设置进程的调度策略为CFS */
+int sched_set_policy_cfs(pcb_t *proc) {
+    if (!proc) return -1;
+
+    uint32_t flags = spinlock_irq_save(&sched.lock);
+
+    /* 从当前队列移除 */
+    if (proc->state == PROCESS_READY) {
+        if (proc->sched_policy & PROCESS_REAL_TIME) {
+            int rt_level = proc->priority / 50;
+            if (rt_level >= SCHED_RT_QUEUE_COUNT) {
+                rt_level = SCHED_RT_QUEUE_COUNT - 1;
+            }
+            queue_remove(&sched.rt_queues[rt_level], proc);
+        } else if (!(proc->sched_policy & PROCESS_CFS)) {
+            queue_remove(&sched.mlfq_queues[proc->queue_level], proc);
+        }
+    }
+
+    /* 设置为CFS策略 */
+    proc->sched_policy |= PROCESS_CFS;
+    proc->vruntime = min_vruntime;
+
+    /* 加入CFS队列 */
+    if (proc->state == PROCESS_READY || proc->state == PROCESS_RUNNING) {
+        sched_cfs_enqueue(proc);
+    }
+
+    spinlock_irq_restore(&sched.lock, flags);
+    return 0;
+}
+
+/* ============================================================
+ * 负载均衡模块
+ * ============================================================ */
+
+#define SCHED_LOAD_WINDOW 100 /* 采样窗口大小 */
+typedef struct load_stat {
+    uint32_t cpu_load[SCHED_LOAD_WINDOW]; /* CPU利用率0-100 */
+    uint32_t window_pos;
+    uint32_t avg_load;
+} load_stat_t;
+
+static load_stat_t load_stats;
+
+/* 初始化负载统计 */
+static void sched_load_init(void) {
+    for (int i = 0; i < SCHED_LOAD_WINDOW; i++) {
+        load_stats.cpu_load[i] = 0;
+    }
+    load_stats.window_pos = 0;
+    load_stats.avg_load = 0;
+}
+
+/* 采样CPU负载 */
+void sched_load_sample(uint32_t load) {
+    if (load > 100) load = 100;
+
+    /* 滑动窗口更新 */
+    load_stats.cpu_load[load_stats.window_pos] = load;
+    load_stats.window_pos = (load_stats.window_pos + 1) % SCHED_LOAD_WINDOW;
+
+    /* 计算平均负载 */
+    uint64_t sum = 0;
+    for (int i = 0; i < SCHED_LOAD_WINDOW; i++) {
+        sum += load_stats.cpu_load[i];
+    }
+    load_stats.avg_load = (uint32_t)(sum / SCHED_LOAD_WINDOW);
+
+    /* 当平均负载>80%时建议降低优先级或迁移进程 */
+    if (load_stats.avg_load > 80) {
+        /* 高负载警告 - 可在此处触发负载均衡策略 */
+        /* 例如：迁移部分进程到其他CPU、降低非关键进程优先级等 */
+    }
+}
+
+/* 获取当前平均负载 */
+uint32_t sched_get_avg_load(void) {
+    return load_stats.avg_load;
+}
+
+/* ============================================================
+ * 进程组调度模块
+ * ============================================================ */
+
+#define MAX_PROCESS_GROUPS 16
+typedef struct process_group {
+    pid_t    pgid;
+    pid_t    leader_pid;
+    uint32_t member_count;
+    uint32_t cpu_share;  /* 组CPU配额(1024基准) */
+    uint8_t  used;
+} process_group_t;
+
+static process_group_t pg_table[MAX_PROCESS_GROUPS];
+
+/* 初始化进程组表 */
+static void sched_pg_init(void) {
+    for (int i = 0; i < MAX_PROCESS_GROUPS; i++) {
+        pg_table[i].pgid = 0;
+        pg_table[i].leader_pid = 0;
+        pg_table[i].member_count = 0;
+        pg_table[i].cpu_share = 1024; /* 默认配额 */
+        pg_table[i].used = 0;
+    }
+}
+
+/* 创建新的进程组 */
+int sched_create_process_group(pid_t leader) {
+    for (int i = 0; i < MAX_PROCESS_GROUPS; i++) {
+        if (!pg_table[i].used) {
+            pg_table[i].pgid = leader; /* 以leader PID作为PGID */
+            pg_table[i].leader_pid = leader;
+            pg_table[i].member_count = 1;
+            pg_table[i].cpu_share = 1024;
+            pg_table[i].used = 1;
+            return (int)pg_table[i].pgid;
+        }
+    }
+    return -1; /* 进程组表满 */
+}
+
+/* 将进程添加到指定进程组 */
+int sched_add_to_group(pid_t pid, pid_t pgid) {
+    for (int i = 0; i < MAX_PROCESS_GROUPS; i++) {
+        if (pg_table[i].used && pg_table[i].pgid == pgid) {
+            pg_table[i].member_count++;
+            /* 更新进程的pgid信息 */
+            pcb_t *proc = sched_find_process(pid);
+            if (proc) {
+                proc->pgid = pgid;
+            }
+            return 0;
+        }
+    }
+    return -1; /* 进程组不存在 */
+}
+
+/* 从进程组中移除进程 */
+int sched_remove_from_group(pid_t pid) {
+    for (int i = 0; i < MAX_PROCESS_GROUPS; i++) {
+        if (pg_table[i].used) {
+            /* 查找并移除成员 */
+            pcb_t *proc = sched_find_process(pid);
+            if (proc && proc->pgid == pg_table[i].pgid) {
+                pg_table[i].member_count--;
+                proc->pgid = 0;
+
+                /* 如果组成员为0且不是leader，可以回收该组 */
+                if (pg_table[i].member_count == 0) {
+                    pg_table[i].used = 0;
+                    pg_table[i].pgid = 0;
+                    pg_table[i].leader_pid = 0;
+                }
+                return 0;
+            }
+        }
+    }
+    return -1; /* 进程不在任何组中 */
+}
+
+/* 获取进程组信息 */
+process_group_t *sched_get_group(pid_t pgid) {
+    for (int i = 0; i < MAX_PROCESS_GROUPS; i++) {
+        if (pg_table[i].used && pg_table[i].pgid == pgid) {
+            return &pg_table[i];
+        }
+    }
+    return NULL; /* 进程组不存在 */
+}
+
+/* ============================================================
+ * 调度器调试接口
+ * ============================================================ */
+
+static int sched_debug_level = 0; /* 0=off, 1=basic, 2=verbose */
+
+/* 打印指定队列内容 */
+void sched_dump_queue(int queue_index) {
+    uint32_t flags = spinlock_irq_save(&sched.lock);
+
+    printf("=== Queue Dump ===\n");
+
+    if (queue_index >= 0 && queue_index < SCHED_RT_QUEUE_COUNT) {
+        printf("RT Queue %d (%d processes):\n",
+               queue_index, sched.rt_queues[queue_index].count);
+        pcb_t *proc = sched.rt_queues[queue_index].head;
+        while (proc) {
+            printf("  PID %d: %s, prio=%d\n",
+                   proc->pid, proc->name, proc->priority);
+            proc = proc->queue_next;
+        }
+    } else if (queue_index >= SCHED_RT_QUEUE_COUNT &&
+               queue_index < SCHED_RT_QUEUE_COUNT + SCHED_QUEUE_COUNT) {
+        int mlfq_idx = queue_index - SCHED_RT_QUEUE_COUNT;
+        printf("MLFQ Queue %d (%d processes):\n",
+               mlfq_idx, sched.mlfq_queues[mlfq_idx].count);
+        pcb_t *proc = sched.mlfq_queues[mlfq_idx].head;
+        while (proc) {
+            printf("  PID %d: %s, prio=%d, level=%d\n",
+                   proc->pid, proc->name, proc->priority, proc->queue_level);
+            proc = proc->queue_next;
+        }
+    } else if (queue_index == -1) {
+        /* 打印CFS队列 */
+        printf("CFS Queue (%d processes):\n", cfs_count);
+        for (int i = 0; i < CFS_MAX_PROCS && cfs_count > 0; i++) {
+            if (cfs_runqueue[i].proc) {
+                printf("  PID %d: %s, vruntime=%llu\n",
+                       cfs_runqueue[i].proc->pid,
+                       cfs_runqueue[i].proc->name,
+                       cfs_runqueue[i].vruntime);
+            }
+        }
+    } else {
+        printf("Invalid queue index: %d\n", queue_index);
+    }
+
+    printf("==================\n");
+    spinlock_irq_restore(&sched.lock, flags);
+}
+
+/* 设置调试级别 */
+void sched_set_debug_level(int level) {
+    if (level >= 0 && level <= 2) {
+        sched_debug_level = level;
+    }
+}
+
+/* 获取调试级别 */
+int sched_get_debug_level(void) {
+    return sched_debug_level;
+}
+
+/* 在sched_init中初始化新增模块 */
+__attribute__((constructor))
+static void sched_extended_init(void) {
+    sched_cfs_init();
+    sched_load_init();
+    sched_pg_init();
+}

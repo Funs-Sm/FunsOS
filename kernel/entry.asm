@@ -15,6 +15,15 @@ _start:
 
     MOV ESP, stack_top
 
+    ; Send early diagnostic to COM1 so we can see the kernel actually started
+    MOV DX, 0x3F8
+    MOV AL, 'K'
+    OUT DX, AL
+    MOV AL, 13
+    OUT DX, AL
+    MOV AL, 10
+    OUT DX, AL
+
     PUSH EAX
 
     MOV AX, 0x10

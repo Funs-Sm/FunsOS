@@ -151,28 +151,72 @@ int32_t path_join(const char *dir, const char *name, char *out, uint32_t out_siz
     return 0;
 }
 
-int32_t path_resolve(const char *path, dentry_t **out) {
+/* Build the absolute path of a dentry into `out`.  Used when following
+ * relative symbolic links. */
+static int32_t dentry_path(dentry_t *d, char *out, uint32_t out_size) {
+    if (!d || !out || out_size == 0) return -1;
+    if (d == root_dentry) {
+        if (out_size < 2) return -1;
+        out[0] = '/';
+        out[1] = '\0';
+        return 0;
+    }
+
+    uint32_t len = 1; /* terminating '\0' */
+    dentry_t *p = d;
+    while (p && p != root_dentry) {
+        uint32_t nlen = 0;
+        while (p->name[nlen]) nlen++;
+        len += nlen + 1; /* name + '/' */
+        p = p->parent;
+    }
+    if (len > out_size) return -1;
+
+    uint32_t pos = len - 1;
+    out[pos] = '\0';
+    p = d;
+    while (p && p != root_dentry) {
+        uint32_t nlen = 0;
+        while (p->name[nlen]) nlen++;
+        pos -= nlen;
+        memcpy(out + pos, p->name, nlen);
+        p = p->parent;
+        if (p && p != root_dentry) {
+            pos--;
+            out[pos] = '/';
+        }
+    }
+    return 0;
+}
+
+/* Internal path resolver.  `follow_last` controls whether a symbolic
+ * link encountered as the final path component is followed. */
+static int32_t path_resolve_internal(const char *path, dentry_t **out, int follow_last) {
     if (!path || !out) return -1;
 
-    char normalized[PATH_MAX];
-    if (path_normalize(path, normalized, PATH_MAX) != 0) return -1;
+    char work[PATH_MAX];
+    if (path_normalize(path, work, PATH_MAX) != 0) return -1;
+
+    int32_t symlink_depth = 0;
+
+restart:
+    if (symlink_depth > SYMLINK_MAX_FOLLOW) return -1;
 
     dentry_t *current = root_dentry;
-
-    if (normalized[0] != '/') return -1;
+    if (work[0] != '/') return -1;
 
     uint32_t i = 1;
-    while (normalized[i]) {
-        while (normalized[i] == '/') i++;
-        if (!normalized[i]) break;
+    while (work[i]) {
+        while (work[i] == '/') i++;
+        if (!work[i]) break;
 
         uint32_t start = i;
-        while (normalized[i] && normalized[i] != '/') i++;
+        while (work[i] && work[i] != '/') i++;
         uint32_t comp_len = i - start;
 
         char component[256];
         if (comp_len >= 256) return -1;
-        memcpy(component, normalized + start, comp_len);
+        memcpy(component, work + start, comp_len);
         component[comp_len] = '\0';
 
         if (current->mount_point) {
@@ -203,6 +247,53 @@ int32_t path_resolve(const char *path, dentry_t **out) {
         }
 
         if (!found) return -1;
+
+        /* Follow symbolic links.  The final component is only followed
+         * when follow_last is true (open/stat) and not when it is false
+         * (readlink/lstat). */
+        int is_last_component = (work[i] == '\0');
+        if (found->inode && (found->inode->mode & FILE_MODE_LNK)) {
+            if (is_last_component && !follow_last) {
+                current = found;
+                break;
+            }
+
+            if (symlink_depth >= SYMLINK_MAX_FOLLOW) return -1;
+            if (!found->inode->ops || !found->inode->ops->readlink) return -1;
+
+            char target[PATH_MAX];
+            int32_t tlen = found->inode->ops->readlink(found, target, PATH_MAX - 1);
+            if (tlen < 0) return -1;
+            target[tlen] = '\0';
+
+            char rest[PATH_MAX];
+            uint32_t rlen = 0;
+            while (work[i + rlen] && rlen < PATH_MAX - 1) {
+                rest[rlen] = work[i + rlen];
+                rlen++;
+            }
+            rest[rlen] = '\0';
+
+            char combined[PATH_MAX];
+            if (target[0] == '/') {
+                if (path_join(target, rest, combined, PATH_MAX) != 0) return -1;
+            } else {
+                char parent_path[PATH_MAX];
+                if (dentry_path(found->parent ? found->parent : root_dentry,
+                                parent_path, PATH_MAX) != 0) {
+                    return -1;
+                }
+                if (path_join(parent_path, target, combined, PATH_MAX) != 0) return -1;
+                if (rlen > 0) {
+                    if (path_join(combined, rest, combined, PATH_MAX) != 0) return -1;
+                }
+            }
+
+            if (path_normalize(combined, work, PATH_MAX) != 0) return -1;
+            symlink_depth++;
+            goto restart;
+        }
+
         current = found;
     }
 
@@ -219,4 +310,12 @@ int32_t path_resolve(const char *path, dentry_t **out) {
 
     *out = current;
     return 0;
+}
+
+int32_t path_resolve(const char *path, dentry_t **out) {
+    return path_resolve_internal(path, out, 1);
+}
+
+int32_t path_resolve_nofollow(const char *path, dentry_t **out) {
+    return path_resolve_internal(path, out, 0);
 }

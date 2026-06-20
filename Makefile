@@ -20,6 +20,11 @@ ASFLAGS = -f elf32 -O999
 # Linker flags - use gcc as linker driver for cross-format support
 LDFLAGS = -m32 -nostdlib -T boot/linker.ld -Wl,--oformat=pei-i386
 
+# SDK用户态库(不链接到内核, 避免与GUI/内核实现符号冲突)
+SDK_OBJ   = $(patsubst %.c,$(BUILDDIR)/%.o,$(SDK_C))
+RENDERER_OBJ = $(patsubst %.c,$(BUILDDIR)/%.o,$(RENDERER_C))
+SDK_EXCLUDE = $(SDK_OBJ) $(RENDERER_OBJ)
+
 # -------------------------------------------------------------------
 #  Source file discovery
 # -------------------------------------------------------------------
@@ -99,13 +104,21 @@ all: $(OS_IMAGE)
 
 # Create all needed output directories (Windows cmd compatible)
 dirs:
-	-@cmd /c "mkdir $(BUILDDIR) 2>nul & mkdir $(BUILDDIR)\kernel 2>nul & mkdir $(BUILDDIR)\drivers 2>nul & mkdir $(BUILDDIR)\drivers\block 2>nul & mkdir $(BUILDDIR)\drivers\char 2>nul & mkdir $(BUILDDIR)\drivers\net 2>nul & mkdir $(BUILDDIR)\drivers\usb 2>nul & mkdir $(BUILDDIR)\drivers\video 2>nul & mkdir $(BUILDDIR)\drivers\gpu 2>nul & mkdir $(BUILDDIR)\drivers\audio 2>nul & mkdir $(BUILDDIR)\fs 2>nul & mkdir $(BUILDDIR)\net 2>nul & mkdir $(BUILDDIR)\gui 2>nul & mkdir $(BUILDDIR)\usb 2>nul & mkdir $(BUILDDIR)\audio 2>nul & mkdir $(BUILDDIR)\lib 2>nul & mkdir $(BUILDDIR)\userland 2>nul & mkdir $(BUILDDIR)\boot 2>nul & mkdir $(BUILDDIR)\apps 2>nul & mkdir $(BUILDDIR)\sdk 2>nul & mkdir $(BUILDDIR)\sdk\lib 2>nul & mkdir $(BUILDDIR)\renderer 2>nul & mkdir $(BUILDDIR)\renderer\src 2>nul & mkdir $(BUILDDIR)\os 2>nul & mkdir $(BUILDDIR)\os\apps 2>nul & mkdir $(BUILDDIR)\os\desktop 2>nul & mkdir $(BUILDDIR)\os\services 2>nul"
+	-@mkdir $(BUILDDIR) $(BUILDDIR)/kernel $(BUILDDIR)/drivers \
+	  $(BUILDDIR)/drivers/block $(BUILDDIR)/drivers/char $(BUILDDIR)/drivers/net \
+	  $(BUILDDIR)/drivers/usb $(BUILDDIR)/drivers/video $(BUILDDIR)/drivers/gpu \
+	  $(BUILDDIR)/drivers/audio $(BUILDDIR)/fs $(BUILDDIR)/net $(BUILDDIR)/gui \
+	  $(BUILDDIR)/usb $(BUILDDIR)/audio $(BUILDDIR)/lib $(BUILDDIR)/userland \
+	  $(BUILDDIR)/boot $(BUILDDIR)/apps $(BUILDDIR)/sdk $(BUILDDIR)/sdk/lib \
+	  $(BUILDDIR)/renderer $(BUILDDIR)/renderer/src $(BUILDDIR)/os \
+	  $(BUILDDIR)/os/apps $(BUILDDIR)/os/desktop $(BUILDDIR)/os/services 2>nul
 
 # --- Kernel ELF ---
 kernel: $(KERNEL_ELF)
 
 $(KERNEL_ELF): $(ALL_ASM_OBJ) $(ALL_C_OBJ)
-	$(CC) $(LDFLAGS) -o $@ $^
+	@echo "  LINK    $@"
+	@$(CC) $(LDFLAGS) -o $@ $(filter-out $(SDK_EXCLUDE),$^)
 
 # Compile C files -> object files
 $(BUILDDIR)/%.o: %.c | dirs
@@ -144,11 +157,11 @@ clean:
 
 # --- Run in QEMU ---
 run: all
-	qemu-system-i386 -drive format=raw,file=build/os.img -m 128 -serial stdio
+	qemu-system-i386 -drive format=raw,file=build/os.img,if=ide,index=0 -m 128 -serial stdio
 
 # --- Debug with QEMU + GDB ---
 debug: all
-	qemu-system-i386 -drive format=raw,file=build/os.img -m 128 -s -S -serial stdio
+	qemu-system-i386 -drive format=raw,file=build/os.img,if=ide,index=0 -m 128 -s -S -serial stdio
 
 # --- Package for distribution ---
 package: all

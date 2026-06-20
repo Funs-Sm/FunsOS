@@ -140,20 +140,22 @@ int funs_app_cleanup(void);
  * 返回: FUNSOS_OK 成功, 错误码见 funsos_error_t
  */
 /* 包含所有子头文件 */
+#include "funsos_event.h"
 #include "funsos_window.h"
+#include "funsos_audio.h"
 #include "funsos_graphics.h"
-#include "funsos_events.h"
+#include "funsos_event.h"
 #include "funsos_files.h"
 #include "funsos_process.h"
 #include "funsos_memory.h"
 #include "funsos_network.h"
-#include "funsos_audio.h"
 #include "funsos_sysinfo.h"
 #include "funsos_power.h"
 #include "funsos_clipboard.h"
 #include "funsos_database.h"
 #include "funsos_time.h"
 #include "funsos_ipc.h"
+#include "funsos_libc.h"
 
 int funs_get_system_info(funsos_sysinfo_t *info);
 
