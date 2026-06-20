@@ -1,7 +1,7 @@
 # FunsOS SDK - 软件开发工具包
 
 <p align="center">
-  <img src="https://img.shields.io/badge/SDK_Version-1.1.0-blue" alt="SDK Version"/>
+  <img src="https://img.shields.io/badge/SDK_Version-1.2.0-blue" alt="SDK Version"/>
   <img src="https://img.shields.io/badge/Target_OS-FunsOS_0.5-green" alt="Target OS"/>
   <img src="https://img.shields.io/badge/Kernel-FunsCore_v0.5-orange" alt="Kernel Version"/>
   <img src="https://img.shields.io/badge/APIs-200%2B_Syscalls-red" alt="API Count"/>

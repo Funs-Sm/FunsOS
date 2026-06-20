@@ -1,7 +1,7 @@
 # FunsCore v0.5 / FunsOS — 从零构建的完整 x86 操作系统
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-0.5-blue" alt="Version"/>
+  <img src="https://img.shields.io/badge/Version-0.6-blue" alt="Version"/>
   <img src="https://img.shields.io/badge/Platform-x86_32bit-green" alt="Platform"/>
   <img src="https://img.shields.io/badge/Language-C%2FASM-orange" alt="Language"/>
   <img src="https://img.shields.io/badge/Build-Passing-brightgreen" alt="Build Status"/>
