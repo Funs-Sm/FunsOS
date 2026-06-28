@@ -11,6 +11,7 @@
 #include "kheap.h"
 #include "pipe.h"
 #include "signal.h"
+#include "version.h"
 #include "../fs/vfs.h"
 #include "../fs/tarfs.h"
 #include "../fs/file_desc.h"
@@ -18,9 +19,11 @@
 #include "fb_console.h"
 #include "vga_text.h"
 #include "../drivers/vesa.h"
+#include "../drivers/rtc.h"
 #include "system_services.h"
 #include "sys_api.h"
 #include "display_server.h"
+#include "../audio/hdaudio.h"
 
 /* Syscall numbers - must match syscall.c */
 #define SYS_EXIT       1
@@ -70,7 +73,7 @@
 #define SYS_SIGPROCMASK  45
 #define SYS_ALARM        46
 #define SYS_PAUSE        47
-#define SYS_SIGRETURN    100
+#define SYS_SIGRETURN    48
 
 /* SDK Extended Syscall Numbers - Window Management */
 #define SYS_CREATE_WINDOW  100
@@ -88,6 +91,7 @@
 #define SYS_DRAW_TEXT      111
 #define SYS_DRAW_LINE      112
 #define SYS_FILL_WINDOW    113
+#define SYS_FILL_RECT      114
 
 /* SDK Extended Syscall Numbers - Events */
 #define SYS_POLL_EVENT     120
@@ -115,7 +119,79 @@
 #define SYS_3D_RENDER      151
 #define SYS_3D_CLEAR_DEPTH 152
 
+/* SDK Extended Syscall Numbers - Application */
+#define SYS_APP_INIT       160
+#define SYS_APP_CLEANUP    161
+
+/* SDK Extended Syscall Numbers - Dialogs & Cursor */
+#define SYS_MESSAGE_BOX    170
+#define SYS_SET_CURSOR     171
+
+/* SDK Extended Syscall Numbers - Clipboard */
+#define SYS_CLIPBOARD_SET     200
+#define SYS_CLIPBOARD_GET     201
+#define SYS_CLIPBOARD_CLEAR   202
+#define SYS_CLIPBOARD_QUERY   203
+
+/* SDK Extended Syscall Numbers - Window Extensions */
+#define SYS_WINDOW_STATE    220
+#define SYS_WINDOW_EX       221
+#define SYS_FOCUS_WINDOW    222
+#define SYS_RAISE_WINDOW    223
+#define SYS_GET_WIN_RECT    224
+
 extern void vga_print(const char *str);
+
+typedef struct {
+    pipe_t *pipe;
+    uint32_t flags;
+} pipe_fd_data_t;
+
+static int32_t pipe_read_fd(file_t *file, void *buf, uint32_t count) {
+    pipe_fd_data_t *data = (pipe_fd_data_t *)file->private_data;
+    if (!data || !data->pipe) return -1;
+    return pipe_read(data->pipe, buf, count);
+}
+
+static int32_t pipe_write_fd(file_t *file, const void *buf, uint32_t count) {
+    pipe_fd_data_t *data = (pipe_fd_data_t *)file->private_data;
+    if (!data || !data->pipe) return -1;
+    return pipe_write(data->pipe, buf, count);
+}
+
+static int32_t pipe_close_fd(file_t *file) {
+    pipe_fd_data_t *data = (pipe_fd_data_t *)file->private_data;
+    if (!data || !data->pipe) {
+        kfree(data);
+        return -1;
+    }
+    if (data->flags & 0x01) {
+        pipe_close_read(data->pipe);
+    }
+    if (data->flags & 0x02) {
+        pipe_close_write(data->pipe);
+    }
+    kfree(data);
+    return 0;
+}
+
+static file_ops_t pipe_read_ops = {
+    .open = NULL,
+    .read = pipe_read_fd,
+    .write = NULL,
+    .close = pipe_close_fd,
+    .seek = NULL,
+    .ioctl = NULL
+};
+
+static file_ops_t pipe_write_ops = {
+    .open = NULL,
+    .read = NULL,
+    .write = pipe_write_fd,
+    .close = pipe_close_fd,
+    .seek = NULL,
+    .ioctl = NULL
+};
 
 int32_t sys_exit(uint32_t status, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
     (void)arg2; (void)arg3; (void)arg4; (void)arg5;
@@ -245,7 +321,6 @@ int32_t sys_exec(uint32_t path, uint32_t argv, uint32_t arg3, uint32_t arg4, uin
 
 int32_t sys_sleep(uint32_t seconds, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
     (void)arg2; (void)arg3; (void)arg4; (void)arg5;
-    /* Use sched_sleep which takes milliseconds and properly wakes up */
     sched_sleep(seconds * 1000);
     return 0;
 }
@@ -257,8 +332,113 @@ int32_t sys_yield(uint32_t arg1, uint32_t arg2, uint32_t arg3, uint32_t arg4, ui
 }
 
 int32_t sys_pipe(uint32_t fd_ptr, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
-    (void)fd_ptr; (void)arg2; (void)arg3; (void)arg4; (void)arg5;
-    return -1;
+    (void)arg2; (void)arg3; (void)arg4; (void)arg5;
+    pcb_t *cur = sched_get_current();
+    if (!cur) return -1;
+
+    int32_t *fds = (int32_t *)(uintptr_t)fd_ptr;
+    if (!fds) return -1;
+
+    pipe_t *p = NULL;
+    if (pipe_create(&p) < 0 || !p) {
+        return -1;
+    }
+
+    int32_t fd_read = fd_alloc(cur);
+    if (fd_read < 0) {
+        pipe_destroy(p);
+        return -1;
+    }
+
+    int32_t fd_write = fd_alloc(cur);
+    if (fd_write < 0) {
+        fd_free(cur, fd_read);
+        pipe_destroy(p);
+        return -1;
+    }
+
+    file_t *read_file = (file_t *)kmalloc(sizeof(file_t));
+    file_t *write_file = (file_t *)kmalloc(sizeof(file_t));
+    if (!read_file || !write_file) {
+        kfree(read_file);
+        kfree(write_file);
+        fd_free(cur, fd_read);
+        fd_free(cur, fd_write);
+        pipe_destroy(p);
+        return -1;
+    }
+    memset(read_file, 0, sizeof(file_t));
+    memset(write_file, 0, sizeof(file_t));
+
+    pipe_fd_data_t *read_data = (pipe_fd_data_t *)kmalloc(sizeof(pipe_fd_data_t));
+    pipe_fd_data_t *write_data = (pipe_fd_data_t *)kmalloc(sizeof(pipe_fd_data_t));
+    if (!read_data || !write_data) {
+        kfree(read_data);
+        kfree(write_data);
+        kfree(read_file);
+        kfree(write_file);
+        fd_free(cur, fd_read);
+        fd_free(cur, fd_write);
+        pipe_destroy(p);
+        return -1;
+    }
+    read_data->pipe = p;
+    read_data->flags = 0x01;
+    write_data->pipe = p;
+    write_data->flags = 0x02;
+
+    read_file->ops = &pipe_read_ops;
+    read_file->private_data = read_data;
+    read_file->flags = FILE_MODE_READ;
+    read_file->ref_count = 1;
+
+    write_file->ops = &pipe_write_ops;
+    write_file->private_data = write_data;
+    write_file->flags = FILE_MODE_WRITE;
+    write_file->ref_count = 1;
+
+    file_descriptor_t *read_fdesc = (file_descriptor_t *)kmalloc(sizeof(file_descriptor_t));
+    file_descriptor_t *write_fdesc = (file_descriptor_t *)kmalloc(sizeof(file_descriptor_t));
+    if (!read_fdesc || !write_fdesc) {
+        kfree(read_fdesc);
+        kfree(write_fdesc);
+        kfree(read_data);
+        kfree(write_data);
+        kfree(read_file);
+        kfree(write_file);
+        fd_free(cur, fd_read);
+        fd_free(cur, fd_write);
+        pipe_destroy(p);
+        return -1;
+    }
+    read_fdesc->fd = fd_read;
+    read_fdesc->flags = FILE_MODE_READ;
+    read_fdesc->ref_count = 1;
+    read_fdesc->private_data = read_file;
+    read_fdesc->ops = NULL;
+
+    write_fdesc->fd = fd_write;
+    write_fdesc->flags = FILE_MODE_WRITE;
+    write_fdesc->ref_count = 1;
+    write_fdesc->private_data = write_file;
+    write_fdesc->ops = NULL;
+
+    if (fd_install(cur, fd_read, read_fdesc) < 0 || fd_install(cur, fd_write, write_fdesc) < 0) {
+        kfree(read_fdesc);
+        kfree(write_fdesc);
+        kfree(read_data);
+        kfree(write_data);
+        kfree(read_file);
+        kfree(write_file);
+        fd_free(cur, fd_read);
+        fd_free(cur, fd_write);
+        pipe_destroy(p);
+        return -1;
+    }
+
+    fds[0] = fd_read;
+    fds[1] = fd_write;
+    return 0;
 }
 
 int32_t sys_signal(uint32_t sig, uint32_t handler, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
@@ -302,6 +482,81 @@ int32_t sys_munmap(uint32_t addr, uint32_t length, uint32_t arg3, uint32_t arg4,
     return 0;
 }
 
+int32_t sys_ioctl(uint32_t fd, uint32_t cmd, uint32_t arg, uint32_t arg4, uint32_t arg5) {
+    (void)arg4; (void)arg5;
+
+    if (cmd == 0) {
+        int32_t *off_ptr = (int32_t *)(uintptr_t)arg;
+        if (fd == (uint32_t)-1 || !off_ptr) return -1;
+        pcb_t *cur = sched_get_current();
+        if (!cur) return -1;
+        file_descriptor_t *fdesc = fd_get_file(cur, (int32_t)fd);
+        if (!fdesc) return -1;
+        file_t *file = (file_t *)fdesc->private_data;
+        if (!file) return -1;
+        int32_t offset = *off_ptr;
+        return vfs_seek(file, offset, SEEK_SET);
+    }
+
+    if (cmd == 1) {
+        const char *path = (const char *)(uintptr_t)arg;
+        if (!path) return -1;
+        return vfs_unlink(path);
+    }
+
+    if (cmd == 2) {
+        const char *path = (const char *)(uintptr_t)arg;
+        if (!path) return -1;
+        return vfs_mkdir(path, 0755);
+    }
+
+    pcb_t *cur = sched_get_current();
+    if (!cur) return -1;
+    file_descriptor_t *fdesc = fd_get_file(cur, (int32_t)fd);
+    if (!fdesc) return -1;
+    file_t *file = (file_t *)fdesc->private_data;
+    if (!file || !file->ops || !file->ops->ioctl) return -1;
+    return file->ops->ioctl(file, cmd, (void *)(uintptr_t)arg);
+}
+
+int32_t sys_readdir(uint32_t fd, uint32_t buf, uint32_t count, uint32_t arg4, uint32_t arg5) {
+    (void)arg4; (void)arg5;
+    (void)count;
+    pcb_t *cur = sched_get_current();
+    if (!cur) return -1;
+
+    file_descriptor_t *fdesc = fd_get_file(cur, (int32_t)fd);
+    if (!fdesc) return -1;
+
+    file_t *dir = (file_t *)fdesc->private_data;
+    if (!dir) return -1;
+
+    vfs_dirent_t *entry = (vfs_dirent_t *)(uintptr_t)buf;
+    if (!entry) return -1;
+
+    return vfs_readdir(dir, entry);
+}
+
+int32_t sys_chdir(uint32_t path, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
+    (void)arg2; (void)arg3; (void)arg4; (void)arg5;
+    const char *path_str = (const char *)(uintptr_t)path;
+    if (!path_str) return -1;
+    return vfs_chdir(path_str);
+}
+
+int32_t sys_getcwd(uint32_t buf, uint32_t size, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
+    (void)arg3; (void)arg4; (void)arg5;
+    char *dst = (char *)(uintptr_t)buf;
+    if (!dst || size == 0) return -1;
+    const char *cwd = vfs_getcwd();
+    if (!cwd) return -1;
+    size_t len = strlen(cwd);
+    if (len >= size) len = size - 1;
+    memcpy(dst, cwd, len);
+    dst[len] = '\0';
+    return (int32_t)len;
+}
+
 int32_t sys_lseek(uint32_t fd, uint32_t offset, uint32_t whence, uint32_t arg4, uint32_t arg5) {
     (void)arg4; (void)arg5;
     pcb_t *cur = sched_get_current();
@@ -341,21 +596,19 @@ int32_t sys_mount_call(uint32_t path, uint32_t fs_type_str, uint32_t arg3, uint3
     else if (strcmp(type_str, "ext4") == 0) fs_type = FS_TYPE_EXT4;
     else if (strcmp(type_str, "devfs") == 0) fs_type = FS_TYPE_DEVFS;
     else if (strcmp(type_str, "tarfs") == 0) fs_type = FS_TYPE_TARFS;
-    else if (strcmp(type_str, "proc") == 0) fs_type = FS_TYPE_RAMFS; /* fallback */
-    else if (strcmp(type_str, "sysfs") == 0) fs_type = FS_TYPE_RAMFS; /* fallback */
+    else if (strcmp(type_str, "proc") == 0) fs_type = FS_TYPE_RAMFS;
+    else if (strcmp(type_str, "sysfs") == 0) fs_type = FS_TYPE_RAMFS;
     else return -1;
 
     return vfs_mount(path_str, fs_type, NULL);
 }
 
 int32_t sys_execve_call(uint32_t path, uint32_t argv, uint32_t envp, uint32_t arg4, uint32_t arg5) {
-    (void)arg4; (void)arg5;
+    (void)envp; (void)arg4; (void)arg5;
     const char *path_str = (const char *)(uintptr_t)path;
     if (!path_str) return -1;
     return process_exec(path_str, (char *const *)(uintptr_t)argv);
 }
-
-/* 信号增强系统调用 */
 
 int32_t sys_sigaction(uint32_t sig, uint32_t act_ptr, uint32_t oact_ptr, uint32_t arg4, uint32_t arg5) {
     (void)arg4; (void)arg5;
@@ -507,52 +760,65 @@ int32_t sys_sendfile_call(uint32_t out_fd, uint32_t in_fd,
 /* Window Management Syscalls */
 int32_t sys_create_window_call(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t title) {
     const char *title_str = (const char *)(uintptr_t)title;
-    sys_window_t *win = sys_window_create(title_str, (int32_t)x, (int32_t)y, w, h, 0);
-    return (int32_t)(uintptr_t)win;
+    uint32_t win_id = ds_create_window((int32_t)x, (int32_t)y, w, h, title_str);
+    return (int32_t)win_id;
 }
 
 int32_t sys_destroy_window_call(uint32_t win, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
     (void)arg2; (void)arg3; (void)arg4; (void)arg5;
-    sys_window_destroy((sys_window_t *)(uintptr_t)win);
+    ds_destroy_window(win);
     return 0;
 }
 
 int32_t sys_set_title_call(uint32_t win, uint32_t title, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
     (void)arg3; (void)arg4; (void)arg5;
     const char *title_str = (const char *)(uintptr_t)title;
-    sys_window_set_title((sys_window_t *)(uintptr_t)win, title_str);
+    ds_set_title(win, title_str);
+    return 0;
+}
+
+int32_t sys_invalidate_call(uint32_t win, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
+    (void)x; (void)y; (void)w; (void)h;
+    ds_invalidate(win, 0, 0, 4096, 4096);
     return 0;
 }
 
 int32_t sys_show_window_call(uint32_t win, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
     (void)arg2; (void)arg3; (void)arg4; (void)arg5;
-    sys_window_show((sys_window_t *)(uintptr_t)win);
+    ds_show_window(win);
     return 0;
 }
 
 int32_t sys_hide_window_call(uint32_t win, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
     (void)arg2; (void)arg3; (void)arg4; (void)arg5;
-    sys_window_hide((sys_window_t *)(uintptr_t)win);
+    ds_hide_window(win);
     return 0;
 }
 
 int32_t sys_move_window_call(uint32_t win, uint32_t x, uint32_t y, uint32_t arg4, uint32_t arg5) {
     (void)arg4; (void)arg5;
-    sys_window_move((sys_window_t *)(uintptr_t)win, (int32_t)x, (int32_t)y);
+    ds_move_window(win, (int32_t)x, (int32_t)y);
     return 0;
 }
 
 int32_t sys_resize_window_call(uint32_t win, uint32_t w, uint32_t h, uint32_t arg4, uint32_t arg5) {
     (void)arg4; (void)arg5;
-    sys_window_resize((sys_window_t *)(uintptr_t)win, w, h);
+    ds_resize_window(win, w, h);
     return 0;
+}
+
+int32_t sys_get_context_call(uint32_t win, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
+    (void)arg2; (void)arg3; (void)arg4; (void)arg5;
+    (void)win;
+    extern uint32_t *vbe_get_framebuffer(void);
+    return (int32_t)(uintptr_t)vbe_get_framebuffer();
 }
 
 /* Graphics Syscalls */
 int32_t sys_draw_rect_call(uint32_t win, uint32_t x, uint32_t y, uint32_t w, uint32_t color) {
-    /* h is passed in upper 16 bits of w */
     uint32_t h = (color >> 16) & 0xFFFF;
-    ds_draw_rect(win, x, y, w, h, color);
+    uint32_t c = color & 0x0000FFFF;
+    ds_draw_rect(win, x, y, w, h, c);
     return 0;
 }
 
@@ -563,9 +829,8 @@ int32_t sys_draw_text_call(uint32_t win, uint32_t x, uint32_t y, uint32_t text, 
 }
 
 int32_t sys_draw_line_call(uint32_t win, uint32_t x1, uint32_t y1, uint32_t x2, uint32_t color) {
-    /* y2 is passed in upper 16 bits of color */
     uint32_t y2 = (color >> 16) & 0xFFFF;
-    /* Bresenham line algorithm */
+    uint32_t c = color & 0x0000FFFF;
     int dx = (int)x2 - (int)x1; if (dx < 0) dx = -dx;
     int dy = (int)y2 - (int)y1; if (dy < 0) dy = -dy;
     int sx = ((int)x1 < (int)x2) ? 1 : -1;
@@ -573,7 +838,7 @@ int32_t sys_draw_line_call(uint32_t win, uint32_t x1, uint32_t y1, uint32_t x2, 
     int err = dx - dy;
     int cx = (int)x1, cy = (int)y1;
     while (1) {
-        ds_draw_pixel(win, (uint32_t)cx, (uint32_t)cy, color);
+        ds_draw_pixel(win, (uint32_t)cx, (uint32_t)cy, c);
         if (cx == (int)x2 && cy == (int)y2) break;
         int e2 = 2 * err;
         if (e2 > -dy) { err -= dy; cx += sx; }
@@ -588,17 +853,116 @@ int32_t sys_fill_window_call(uint32_t win, uint32_t color, uint32_t arg3, uint32
     return 0;
 }
 
+int32_t sys_fill_rect_call(uint32_t win, uint32_t x, uint32_t y, uint32_t w, uint32_t color) {
+    uint32_t h = (color >> 16) & 0xFFFF;
+    uint32_t c = color & 0x0000FFFF;
+    ds_draw_rect(win, x, y, w, h, c);
+    return 0;
+}
+
 /* Event Syscalls */
 int32_t sys_poll_event_call(uint32_t event_ptr, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
     (void)arg2; (void)arg3; (void)arg4; (void)arg5;
     sys_event_t *event = (sys_event_t *)(uintptr_t)event_ptr;
-    return sys_poll_event(event);
+    return sys_event_poll(event);
 }
 
 int32_t sys_wait_event_call(uint32_t event_ptr, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
     (void)arg2; (void)arg3; (void)arg4; (void)arg5;
     sys_event_t *event = (sys_event_t *)(uintptr_t)event_ptr;
     return sys_event_wait(event, 0);
+}
+
+int32_t sys_set_timer_call(uint32_t interval_ms, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
+    (void)arg2; (void)arg3; (void)arg4; (void)arg5;
+    return (int32_t)sys_timer_create(interval_ms, NULL, NULL);
+}
+
+int32_t sys_cancel_timer_call(uint32_t timer_id, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
+    (void)arg2; (void)arg3; (void)arg4; (void)arg5;
+    sys_timer_stop(timer_id);
+    return sys_timer_destroy(timer_id);
+}
+
+/* Audio Syscalls */
+int32_t sys_audio_init_call(uint32_t arg1, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
+    (void)arg1; (void)arg2; (void)arg3; (void)arg4; (void)arg5;
+    hdaudio_init();
+    return 0;
+}
+
+int32_t sys_audio_play_call(uint32_t freq, uint32_t duration_ms, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
+    (void)arg3; (void)arg4; (void)arg5;
+    extern void pit_beep(uint32_t freq, uint32_t duration_ms);
+    if (freq == 0) freq = 440;
+    if (duration_ms == 0) duration_ms = 100;
+    pit_beep(freq, duration_ms);
+    return 0;
+}
+
+int32_t sys_audio_stop_call(uint32_t dev_id, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
+    (void)dev_id; (void)arg2; (void)arg3; (void)arg4; (void)arg5;
+    hdaudio_stop();
+    return 0;
+}
+
+int32_t sys_audio_set_vol_call(uint32_t vol, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
+    (void)arg2; (void)arg3; (void)arg4; (void)arg5;
+    uint8_t hda_vol = (uint8_t)(vol & 0x7F);
+    return hdaudio_set_volume(hda_vol, hda_vol);
+}
+
+int32_t sys_audio_get_vol_call(uint32_t vol_ptr, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
+    (void)arg2; (void)arg3; (void)arg4; (void)arg5;
+    uint8_t left = 0, right = 0;
+    hdaudio_get_volume(&left, &right);
+    if (vol_ptr) {
+        uint8_t *out = (uint8_t *)(uintptr_t)vol_ptr;
+        out[0] = left;
+    }
+    return left;
+}
+
+int32_t sys_audio_play_wav_call(uint32_t path, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
+    (void)arg2; (void)arg3; (void)arg4; (void)arg5;
+    const char *path_str = (const char *)(uintptr_t)path;
+    if (!path_str) return -1;
+    file_t *file = NULL;
+    if (vfs_open(path_str, FILE_MODE_READ, &file) < 0 || !file) return -1;
+
+    uint8_t wav_header[44];
+    if (vfs_read(file, wav_header, 44) != 44) {
+        vfs_close(file);
+        return -1;
+    }
+
+    uint32_t data_size = *(uint32_t *)&wav_header[40];
+    uint16_t channels = *(uint16_t *)&wav_header[22];
+    uint32_t sample_rate = *(uint32_t *)&wav_header[24];
+    uint16_t bits_per_sample = *(uint16_t *)&wav_header[34];
+
+    if (bits_per_sample != 16) {
+        vfs_close(file);
+        return -1;
+    }
+
+    uint8_t *audio_buf = (uint8_t *)kmalloc(data_size);
+    if (!audio_buf) {
+        vfs_close(file);
+        return -1;
+    }
+
+    int32_t read_bytes = vfs_read(file, audio_buf, data_size);
+    vfs_close(file);
+
+    if (read_bytes <= 0) {
+        kfree(audio_buf);
+        return -1;
+    }
+
+    int32_t ret = hdaudio_play(audio_buf, (uint32_t)read_bytes, sample_rate, channels);
+    kfree(audio_buf);
+    return ret;
 }
 
 /* System Info Syscalls */
@@ -608,10 +972,133 @@ int32_t sys_get_ticks_call(uint32_t arg1, uint32_t arg2, uint32_t arg3, uint32_t
     return (int32_t)timer_get_ticks();
 }
 
+int32_t sys_get_version_call(uint32_t arg1, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
+    (void)arg1; (void)arg2; (void)arg3; (void)arg4; (void)arg5;
+    return (int32_t)(uintptr_t)KERNEL_STRING;
+}
+
+int32_t sys_get_mem_info_call(uint32_t total_ptr, uint32_t used_ptr, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
+    (void)arg3; (void)arg4; (void)arg5;
+    uint32_t *total = (uint32_t *)(uintptr_t)total_ptr;
+    uint32_t *used = (uint32_t *)(uintptr_t)used_ptr;
+
+    uint32_t total_pages = pmm_get_total_pages();
+    uint32_t used_pages = pmm_get_used_pages();
+    uint32_t page_size = 4096;
+
+    if (total) *total = total_pages * page_size;
+    if (used) *used = used_pages * page_size;
+    return 0;
+}
+
 int32_t sys_get_sysinfo_call(uint32_t info_ptr, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
     (void)arg2; (void)arg3; (void)arg4; (void)arg5;
     sys_info_t *info = (sys_info_t *)(uintptr_t)info_ptr;
     return sys_info_get(info);
+}
+
+int32_t sys_get_time_call(uint32_t arg1, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
+    (void)arg1; (void)arg2; (void)arg3; (void)arg4; (void)arg5;
+    return (int32_t)rtc_get_timestamp();
+}
+
+/* 3D Rendering Syscalls */
+int32_t sys_3d_init_call(uint32_t ctx, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
+    (void)ctx; (void)arg2; (void)arg3; (void)arg4; (void)arg5;
+    return 0;
+}
+
+int32_t sys_3d_render_call(uint32_t vertices, uint32_t count, uint32_t mvp, uint32_t mode, uint32_t arg5) {
+    (void)vertices; (void)count; (void)mvp; (void)mode; (void)arg5;
+    return 0;
+}
+
+int32_t sys_3d_clear_depth_call(uint32_t arg1, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
+    (void)arg1; (void)arg2; (void)arg3; (void)arg4; (void)arg5;
+    return 0;
+}
+
+/* Application Syscalls */
+int32_t sys_app_init_call(uint32_t config, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
+    (void)config; (void)arg2; (void)arg3; (void)arg4; (void)arg5;
+    return 0;
+}
+
+int32_t sys_app_cleanup_call(uint32_t arg1, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
+    (void)arg1; (void)arg2; (void)arg3; (void)arg4; (void)arg5;
+    return 0;
+}
+
+/* Dialog & Cursor Syscalls */
+int32_t sys_message_box_call(uint32_t parent, uint32_t type, uint32_t message, uint32_t buf, uint32_t bufsize) {
+    (void)parent; (void)type; (void)message; (void)buf; (void)bufsize;
+    return 0;
+}
+
+int32_t sys_set_cursor_call(uint32_t cursor_type, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
+    (void)cursor_type; (void)arg2; (void)arg3; (void)arg4; (void)arg5;
+    return 0;
+}
+
+/* Clipboard Syscalls */
+int32_t sys_clipboard_set_call(uint32_t text, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
+    (void)arg2; (void)arg3; (void)arg4; (void)arg5;
+    const char *text_str = (const char *)(uintptr_t)text;
+    if (!text_str) return -1;
+    return sys_clipboard_set_text(text_str);
+}
+
+int32_t sys_clipboard_get_call(uint32_t buf, uint32_t bufsize, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
+    (void)arg3; (void)arg4; (void)arg5;
+    char *dst = (char *)(uintptr_t)buf;
+    if (!dst || bufsize == 0) return -1;
+    return sys_clipboard_get_text(dst, bufsize);
+}
+
+int32_t sys_clipboard_clear_call(uint32_t arg1, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
+    (void)arg1; (void)arg2; (void)arg3; (void)arg4; (void)arg5;
+    return sys_clipboard_clear();
+}
+
+int32_t sys_clipboard_query_call(uint32_t arg1, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
+    (void)arg1; (void)arg2; (void)arg3; (void)arg4; (void)arg5;
+    return sys_clipboard_is_empty() ? 0 : 1;
+}
+
+/* Extended Window Management Syscalls */
+int32_t sys_window_state_call(uint32_t win, uint32_t state, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
+    (void)win; (void)state; (void)arg3; (void)arg4; (void)arg5;
+    return 0;
+}
+
+int32_t sys_window_ex_call(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t title) {
+    const char *title_str = (const char *)(uintptr_t)title;
+    uint32_t win_id = ds_create_window((int32_t)x, (int32_t)y, w, h, title_str);
+    return (int32_t)win_id;
+}
+
+int32_t sys_focus_window_call(uint32_t win, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
+    (void)arg2; (void)arg3; (void)arg4; (void)arg5;
+    (void)win;
+    return 0;
+}
+
+int32_t sys_raise_window_call(uint32_t win, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
+    (void)win; (void)arg2; (void)arg3; (void)arg4; (void)arg5;
+    return 0;
+}
+
+int32_t sys_get_win_rect_call(uint32_t win, uint32_t rect_ptr, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
+    (void)arg3; (void)arg4; (void)arg5;
+    (void)win;
+    typedef struct { int32_t x, y; uint32_t w, h; } rect_t;
+    rect_t *rect = (rect_t *)(uintptr_t)rect_ptr;
+    if (!rect) return -1;
+    rect->x = 0;
+    rect->y = 0;
+    rect->w = 0;
+    rect->h = 0;
+    return 0;
 }
 
 void init_syscall_impl(void) {
@@ -631,6 +1118,10 @@ void init_syscall_impl(void) {
     syscall_register(SYS_KILL, sys_kill);
     syscall_register(SYS_MMAP, sys_mmap);
     syscall_register(SYS_MUNMAP, sys_munmap);
+    syscall_register(SYS_IOCTL, sys_ioctl);
+    syscall_register(SYS_READDIR, sys_readdir);
+    syscall_register(SYS_CHDIR, sys_chdir);
+    syscall_register(SYS_GETCWD, sys_getcwd);
     syscall_register(SYS_SOCKET,    sys_socket_call);
     syscall_register(SYS_BIND,      sys_bind_call);
     syscall_register(SYS_CONNECT,   sys_connect_call);
@@ -664,22 +1155,64 @@ void init_syscall_impl(void) {
     syscall_register(SYS_CREATE_WINDOW,  sys_create_window_call);
     syscall_register(SYS_DESTROY_WINDOW, sys_destroy_window_call);
     syscall_register(SYS_SET_TITLE,      sys_set_title_call);
+    syscall_register(SYS_INVALIDATE,     sys_invalidate_call);
     syscall_register(SYS_SHOW_WINDOW,    sys_show_window_call);
     syscall_register(SYS_HIDE_WINDOW,    sys_hide_window_call);
     syscall_register(SYS_MOVE_WINDOW,    sys_move_window_call);
     syscall_register(SYS_RESIZE_WINDOW,  sys_resize_window_call);
+    syscall_register(SYS_GET_CONTEXT,    sys_get_context_call);
     
     /* Register SDK extended syscalls - Graphics */
     syscall_register(SYS_DRAW_RECT,      sys_draw_rect_call);
     syscall_register(SYS_DRAW_TEXT,      sys_draw_text_call);
     syscall_register(SYS_DRAW_LINE,      sys_draw_line_call);
     syscall_register(SYS_FILL_WINDOW,    sys_fill_window_call);
+    syscall_register(SYS_FILL_RECT,      sys_fill_rect_call);
     
     /* Register SDK extended syscalls - Events */
     syscall_register(SYS_POLL_EVENT,     sys_poll_event_call);
     syscall_register(SYS_WAIT_EVENT,     sys_wait_event_call);
+    syscall_register(SYS_SET_TIMER,      sys_set_timer_call);
+    syscall_register(SYS_CANCEL_TIMER,   sys_cancel_timer_call);
+    
+    /* Register SDK extended syscalls - Audio */
+    syscall_register(SYS_AUDIO_INIT,     sys_audio_init_call);
+    syscall_register(SYS_AUDIO_PLAY,     sys_audio_play_call);
+    syscall_register(SYS_AUDIO_STOP,     sys_audio_stop_call);
+    syscall_register(SYS_AUDIO_SET_VOL,  sys_audio_set_vol_call);
+    syscall_register(SYS_AUDIO_GET_VOL,  sys_audio_get_vol_call);
+    syscall_register(SYS_AUDIO_PLAY_WAV, sys_audio_play_wav_call);
     
     /* Register SDK extended syscalls - System Info */
     syscall_register(SYS_GET_TICKS,      sys_get_ticks_call);
+    syscall_register(SYS_GET_VERSION,    sys_get_version_call);
+    syscall_register(SYS_GET_MEM_INFO,   sys_get_mem_info_call);
     syscall_register(SYS_GET_SYSINFO,    sys_get_sysinfo_call);
+    syscall_register(SYS_GET_TIME,       sys_get_time_call);
+    
+    /* Register SDK extended syscalls - 3D Rendering */
+    syscall_register(SYS_3D_INIT,        sys_3d_init_call);
+    syscall_register(SYS_3D_RENDER,      sys_3d_render_call);
+    syscall_register(SYS_3D_CLEAR_DEPTH, sys_3d_clear_depth_call);
+    
+    /* Register SDK extended syscalls - Application */
+    syscall_register(SYS_APP_INIT,       sys_app_init_call);
+    syscall_register(SYS_APP_CLEANUP,    sys_app_cleanup_call);
+    
+    /* Register SDK extended syscalls - Dialogs & Cursor */
+    syscall_register(SYS_MESSAGE_BOX,    sys_message_box_call);
+    syscall_register(SYS_SET_CURSOR,     sys_set_cursor_call);
+    
+    /* Register SDK extended syscalls - Clipboard */
+    syscall_register(SYS_CLIPBOARD_SET,   sys_clipboard_set_call);
+    syscall_register(SYS_CLIPBOARD_GET,   sys_clipboard_get_call);
+    syscall_register(SYS_CLIPBOARD_CLEAR, sys_clipboard_clear_call);
+    syscall_register(SYS_CLIPBOARD_QUERY, sys_clipboard_query_call);
+    
+    /* Register SDK extended syscalls - Window Extensions */
+    syscall_register(SYS_WINDOW_STATE,   sys_window_state_call);
+    syscall_register(SYS_WINDOW_EX,      sys_window_ex_call);
+    syscall_register(SYS_FOCUS_WINDOW,   sys_focus_window_call);
+    syscall_register(SYS_RAISE_WINDOW,   sys_raise_window_call);
+    syscall_register(SYS_GET_WIN_RECT,   sys_get_win_rect_call);
 }

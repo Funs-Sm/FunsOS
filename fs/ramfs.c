@@ -27,6 +27,7 @@ static int32_t ramfs_file_read(file_t *file, void *buf, uint32_t count);
 static int32_t ramfs_file_write(file_t *file, const void *buf, uint32_t count);
 static int32_t ramfs_file_close(file_t *file);
 static int32_t ramfs_file_seek(file_t *file, int32_t offset, int32_t whence);
+static int32_t ramfs_file_ioctl(file_t *file, uint32_t cmd, void *arg);
 
 static inode_ops_t ramfs_inode_ops = {
     .lookup  = ramfs_lookup_op,
@@ -45,7 +46,7 @@ file_ops_t ramfs_file_ops = {
     .write = ramfs_file_write,
     .close = ramfs_file_close,
     .seek  = ramfs_file_seek,
-    .ioctl = NULL,
+    .ioctl = ramfs_file_ioctl,
 };
 
 /* ------------------------------------------------------------------ */
@@ -403,18 +404,36 @@ static int32_t ramfs_file_close(file_t *file) {
 }
 
 static int32_t ramfs_file_seek(file_t *file, int32_t offset, int32_t whence) {
-    if (!file || !file->inode || !file->inode->private_data) return -1;
+    if (!file || !file->inode || !file->inode->private_data) return -EBADF;
     ramfs_node_t *n = (ramfs_node_t *)file->inode->private_data;
     int32_t new_off;
     switch (whence) {
         case SEEK_SET: new_off = offset; break;
         case SEEK_CUR: new_off = (int32_t)file->offset + offset; break;
         case SEEK_END: new_off = (int32_t)n->size + offset; break;
-        default: return -1;
+        default: return -EINVAL;
     }
-    if (new_off < 0) return -1;
+    if (new_off < 0) return -EINVAL;
     file->offset = (uint32_t)new_off;
     return new_off;
+}
+
+static int32_t ramfs_file_ioctl(file_t *file, uint32_t cmd, void *arg) {
+    if (!file || !file->inode) return -EBADF;
+    switch (cmd) {
+        case FIONREAD:
+            if (arg) {
+                int32_t avail = (int32_t)file->inode->size - (int32_t)file->offset;
+                if (avail < 0) avail = 0;
+                *(int32_t *)arg = avail;
+                return 0;
+            }
+            return -EINVAL;
+        case FIONBIO:
+            return 0;
+        default:
+            return -ENOSYS;
+    }
 }
 
 int32_t ramfs_file_truncate(inode_t *inode, uint32_t size) {

@@ -4,7 +4,7 @@
 #include "vfs.h"
 #include "kernel_proc.h"
 
-#define MAX_PROCESS_FDS 256
+#define MAX_PROCESS_FDS MAX_OPEN_FILES
 
 int32_t fd_init(pcb_t *proc);
 int32_t fd_alloc(pcb_t *proc);

@@ -1369,7 +1369,16 @@ void tcp_receive(net_buffer_t *buf) {
 
     case TCP_STATE_SYN_RECEIVED:
         if (flags & TCP_ACK) {
-            if (hdr->ack_num == sock->snd_nxt) {
+            if (seq_ge(hdr->ack_num, sock->snd_una) && seq_le(hdr->ack_num, sock->snd_nxt)) {
+                sock->snd_una = hdr->ack_num;
+                sock->snd_wnd = hdr->window_size;
+                if (sock->wscale_peer)
+                    sock->snd_wnd = sock->snd_wnd << sock->wscale_peer;
+                sock->snd_wl1 = hdr->seq_num;
+                sock->snd_wl2 = hdr->ack_num;
+                sock->rcv_nxt = hdr->seq_num + 1;
+                rtx_advance(sock, sock->snd_una);
+                tcp_send_ack(sock);
                 tcp_transition_to_established(sock);
             }
         }

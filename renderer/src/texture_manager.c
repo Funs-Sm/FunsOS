@@ -8,8 +8,8 @@
 #include "texture_manager.h"
 #include "fr_texture.h"
 #include "fr_context.h"
-#include <stddef.h>
-#include <string.h>
+#include "stddef.h"
+#include "string.h"
 
 #ifndef abs
 #define abs(x) ((x) >= 0 ? (x) : -(x))

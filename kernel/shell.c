@@ -3,6 +3,7 @@
 #include "fb_console.h"
 #include "vga_text.h"
 #include "keyboard.h"
+#include "mouse.h"
 #include "string.h"
 #include "stdio.h"
 #include "stdlib.h"
@@ -13,6 +14,9 @@
 #include "devfs.h"
 #include "net.h"
 #include "icmp.h"
+#include "ip.h"
+#include "socket.h"
+#include "dns.h"
 #include "io.h"
 #include "vfs.h"
 #include "path.h"
@@ -76,8 +80,8 @@ static int history_head __attribute__((unused)) = 0;  /* oldest entry index */
 static int history_pos = 0;   /* next write position */
 
 /* Arrow-key command history for shell_read_line */
-#define SHELL_HISTORY_MAX 16
-static char *shell_history[SHELL_HISTORY_MAX];
+#define SHELL_HISTORY_MAX 32
+static char shell_history[SHELL_HISTORY_MAX][SHELL_HISTORY_LINE];
 static int shell_history_count = 0;
 static int shell_history_pos = -1;
 
@@ -187,6 +191,27 @@ static void history_add(const char *line) {
     history_buf[history_pos][SHELL_HISTORY_LINE - 1] = '\0';
     history_pos = (history_pos + 1) % SHELL_HISTORY_SIZE;
     if (history_count < SHELL_HISTORY_SIZE) history_count++;
+
+    /* Also add to shell_history for up/down arrow navigation (newest at index 0) */
+    if (shell_history_count >= SHELL_HISTORY_MAX) {
+        /* Shift all entries up, discard oldest */
+        for (int i = SHELL_HISTORY_MAX - 1; i > 0; i--) {
+            strncpy(shell_history[i], shell_history[i - 1], SHELL_HISTORY_LINE - 1);
+            shell_history[i][SHELL_HISTORY_LINE - 1] = '\0';
+        }
+    } else {
+        /* Shift existing entries up to make room for newest at index 0 */
+        for (int i = shell_history_count; i > 0; i--) {
+            strncpy(shell_history[i], shell_history[i - 1], SHELL_HISTORY_LINE - 1);
+            shell_history[i][SHELL_HISTORY_LINE - 1] = '\0';
+        }
+        shell_history_count++;
+    }
+    /* Place newest entry at index 0 */
+    strncpy(shell_history[0], line, SHELL_HISTORY_LINE - 1);
+    shell_history[0][SHELL_HISTORY_LINE - 1] = '\0';
+    /* Reset history navigation position */
+    shell_history_pos = -1;
 }
 
 /* ---- Alias functions ---- */
@@ -277,14 +302,22 @@ static int shell_read_line(char *buf, uint32_t size) {
     uint32_t pos = 0;
 
     while (1) {
-        /* Poll keyboard hardware directly.
-         * Note: keyboard_wait() (semaphore/IRQ-based) may not work if
-         * IRQ 1 is not firing in this QEMU config. Polling is the
-         * reliable fallback. */
         keyboard_poll();
 
+        if (mouse_has_data()) {
+            mouse_event_t mev;
+            while (mouse_get_event(&mev)) {
+                if (mev.wheel < 0) {
+                    if (vbe_mode_active) fb_console_scroll_up(3);
+                    else vga_text_scroll_up(3);
+                } else if (mev.wheel > 0) {
+                    if (vbe_mode_active) fb_console_scroll_down(3);
+                    else vga_text_scroll_down(3);
+                }
+            }
+        }
+
         if (!keyboard_has_data()) {
-            /* Short yield to avoid hogging CPU */
             for (volatile int y = 0; y < 1000; y++) { asm volatile("nop"); }
             continue;
         }
@@ -293,72 +326,79 @@ static int shell_read_line(char *buf, uint32_t size) {
         if (!keyboard_get_event(&event)) continue;
         if (!(event.flags & KEY_PRESSED)) continue;
 
-        /* Handle up/down arrow keys for command history */
         if ((event.flags & KEY_EXTENDED) &&
             (event.scancode == 0x48 || event.scancode == 0x50)) {
+            if (event.flags & KEY_SHIFT) {
+                if (event.scancode == 0x48) {
+                    if (vbe_mode_active) fb_console_scroll_up(1);
+                    else vga_text_scroll_up(1);
+                } else {
+                    if (vbe_mode_active) fb_console_scroll_down(1);
+                    else vga_text_scroll_down(1);
+                }
+                continue;
+            }
             if (event.scancode == 0x48) {
-                /* Up arrow: navigate to older history */
+                if (shell_history_count == 0) continue;
                 if (shell_history_pos < shell_history_count - 1) {
-                    /* Clear current input line */
                     while (pos > 0) {
                         pos--;
                         shell_putchar('\b');
                     }
                     shell_history_pos++;
-                    /* Restore history entry */
                     const char *hist = shell_history[shell_history_pos];
                     for (uint32_t i = 0; hist[i] && pos < size - 1; i++) {
                         buf[pos] = hist[i];
                         pos++;
                         shell_putchar(hist[i]);
                     }
-                } else if (shell_history_count > 0 && shell_history_pos < 0) {
-                    /* First up-press: go to most recent entry */
-                    while (pos > 0) {
-                        pos--;
-                        shell_putchar('\b');
-                    }
-                    shell_history_pos = 0;
-                    const char *hist = shell_history[shell_history_count - 1];
-                    for (uint32_t i = 0; hist[i] && pos < size - 1; i++) {
-                        buf[pos] = hist[i];
-                        pos++;
-                        shell_putchar(hist[i]);
-                    }
-                    shell_history_pos = shell_history_count - 1;
+                    buf[pos] = '\0';
                 }
             } else if (event.scancode == 0x50) {
-                /* Down arrow: navigate to newer history */
-                if (shell_history_pos >= 0) {
-                    /* Clear current input */
+                if (shell_history_pos > 0) {
                     while (pos > 0) {
                         pos--;
                         shell_putchar('\b');
                     }
                     shell_history_pos--;
-                    if (shell_history_pos >= 0) {
-                        const char *hist = shell_history[shell_history_pos];
-                        for (uint32_t i = 0; hist[i] && pos < size - 1; i++) {
-                            buf[pos] = hist[i];
-                            pos++;
-                            shell_putchar(hist[i]);
-                        }
+                    const char *hist = shell_history[shell_history_pos];
+                    for (uint32_t i = 0; hist[i] && pos < size - 1; i++) {
+                        buf[pos] = hist[i];
+                        pos++;
+                        shell_putchar(hist[i]);
                     }
-                    /* If pos==0, we're back to empty input state */
+                    buf[pos] = '\0';
+                } else if (shell_history_pos == 0) {
+                    while (pos > 0) {
+                        pos--;
+                        shell_putchar('\b');
+                    }
+                    shell_history_pos = -1;
+                    buf[0] = '\0';
                 }
             }
             continue;
         }
 
-        /* Page Up / Page Down for scrolling */
         if ((event.flags & KEY_EXTENDED) && event.scancode == 0x49) {
-            /* Page Up */
-            fb_console_scroll_up(5);
+            if (vbe_mode_active) fb_console_scroll_up(12);
+            else vga_text_scroll_up(12);
             continue;
         }
         if ((event.flags & KEY_EXTENDED) && event.scancode == 0x51) {
-            /* Page Down */
-            fb_console_scroll_down(5);
+            if (vbe_mode_active) fb_console_scroll_down(12);
+            else vga_text_scroll_down(12);
+            continue;
+        }
+
+        if ((event.flags & KEY_EXTENDED) && event.scancode == 0x47) {
+            if (vbe_mode_active) { fb_console_scroll_up(9999); }
+            else vga_text_scroll_home();
+            continue;
+        }
+        if ((event.flags & KEY_EXTENDED) && event.scancode == 0x4F) {
+            if (vbe_mode_active) { fb_console_scroll_down(9999); }
+            else vga_text_scroll_end();
             continue;
         }
 
@@ -490,7 +530,7 @@ static int shell_read_line(char *buf, uint32_t size) {
             if (spos > 0) {
                 /* 在历史中搜索匹配项 */
                 for (int i = shell_history_count - 1; i >= 0; i--) {
-                    if (shell_history[i]) {
+                    if (shell_history[i][0] != '\0') {
                         /* 简单子串搜索 */
                         const char *h = shell_history[i];
                         int found = 0;
@@ -569,49 +609,6 @@ static int shell_read_line(char *buf, uint32_t size) {
 
     buf[pos] = '\0';
 
-    /* Save non-empty command to history */
-    if (pos > 0) {
-        /* Don't duplicate the last entry */
-        if (shell_history_count == 0 ||
-            /* Use manual strcmp since we need to compare with heap strings */
-            /* Compare character by character */
-            (/* check not equal */ ({
-                int _diff = 0;
-                const char *h = shell_history[shell_history_count - 1];
-                uint32_t _i = 0;
-                while (buf[_i] || h[_i]) {
-                    if (buf[_i] != h[_i]) { _diff = 1; break; }
-                    _i++;
-                }
-                _diff;
-            }) != 0)) {
-            if (shell_history_count < SHELL_HISTORY_MAX) {
-                /* Allocate and copy using kheap_alloc + strcpy */
-                uint32_t len = 0;
-                while (buf[len]) len++;
-                shell_history[shell_history_count] = (char *)kmalloc(len + 1);
-                if (shell_history[shell_history_count]) {
-                    for (uint32_t i = 0; i <= len; i++)
-                        shell_history[shell_history_count][i] = buf[i];
-                    shell_history_count++;
-                }
-            } else {
-                /* Shift out oldest, add newest */
-                kfree(shell_history[0]);
-                for (int i = 0; i < SHELL_HISTORY_MAX - 1; i++)
-                    shell_history[i] = shell_history[i + 1];
-                uint32_t len = 0;
-                while (buf[len]) len++;
-                shell_history[SHELL_HISTORY_MAX - 1] = (char *)kmalloc(len + 1);
-                if (shell_history[SHELL_HISTORY_MAX - 1]) {
-                    for (uint32_t i = 0; i <= len; i++)
-                        shell_history[SHELL_HISTORY_MAX - 1][i] = buf[i];
-                }
-            }
-        }
-        shell_history_pos = -1;
-    }
-
     return (int)pos;
 }
 
@@ -662,7 +659,7 @@ static void env_init(void) {
     strcpy(env_vars[env_count].value, "/bin");
     env_count++;
     strcpy(env_vars[env_count].name, "USER");
-    strcpy(env_vars[env_count].value, "Sover");
+    strcpy(env_vars[env_count].value, "sover");
     env_count++;
     strcpy(env_vars[env_count].name, "SHELL");
     strcpy(env_vars[env_count].value, "/bin/funs");
@@ -833,7 +830,7 @@ static void cmd_df(void);
 static void cmd_ifconfig(void);
 static void cmd_route(void);
 static void cmd_dns(const char *host);
-static void cmd_wget(const char *url);
+static void cmd_wget(const char *url, const char *outfile);
 static void cmd_netstat(void);
 static void cmd_traceroute(const char *ip);
 static void cmd_arp(void);
@@ -844,7 +841,7 @@ static void cmd_lsblk(void);
 static void cmd_sensors(void);
 static void cmd_freq(const char *freq_str);
 static void cmd_calc(const char *expr);
-static void cmd_base64(const char *file);
+static void cmd_base64(const char *opt, const char *file);
 static void cmd_md5(const char *file);
 static void cmd_history(void);
 static void cmd_alias(const char *arg);
@@ -1188,92 +1185,192 @@ static void cmd_taskbar(const char *subcmd) {
 static void cmd_pt(const char *options) {
     /* List directory contents using VFS
      * 支持选项:
-     *   -l  长格式显示（权限 大小 名称）
+     *   -l  长格式显示（权限 链接数 所有者 大小 名称）
      *   -a  显示隐藏文件（以.开头的文件）
      *   -la / -al  同时启用长格式和隐藏文件
+     * 也支持: ls <path>  列出指定目录
      */
-    int show_long = 0;   /* -l 长格式 */
-    int show_all = 0;    /* -a 显示隐藏文件 */
+    int show_long = 0;
+    int show_all = 0;
+    const char *path_arg = 0;
 
-    /* 解析选项参数 */
-    if (options && options[0] == '-') {
-        const char *p = options + 1;
-        while (*p) {
-            if (*p == 'l') show_long = 1;
-            else if (*p == 'a') show_all = 1;
+    /* Parse options and path argument */
+    if (options && options[0]) {
+        const char *p = options;
+        if (p[0] == '-') {
             p++;
+            while (*p && *p != ' ') {
+                if (*p == 'l') show_long = 1;
+                else if (*p == 'a') show_all = 1;
+                p++;
+            }
+            while (*p == ' ') p++;
+            if (*p) path_arg = p;
+        } else {
+            path_arg = options;
         }
+    }
+
+    char list_path[512];
+    if (path_arg) {
+        /* Expand ~ in path */
+        if (path_arg[0] == '~') {
+            const char *home = env_get("HOME");
+            if (!home) home = "/";
+            snprintf(list_path, sizeof(list_path), "%s%s", home, path_arg + 1);
+        } else {
+            build_full_path(path_arg, list_path, sizeof(list_path));
+        }
+    } else {
+        strncpy(list_path, current_dir, sizeof(list_path) - 1);
+        list_path[sizeof(list_path) - 1] = '\0';
     }
 
     dentry_t *dir = 0;
-    if (path_resolve(current_dir, &dir) != 0 || !dir) {
-        shell_err_pt();
-        last_exit_code = 1;
-        return;
-    }
-    if (!dir->inode || !(dir->inode->mode & FILE_MODE_DIR)) {
-        shell_err_pt();
+    if (path_resolve(list_path, &dir) != 0 || !dir) {
+        shell_print("ls: cannot access '");
+        shell_print(path_arg ? path_arg : current_dir);
+        shell_print("'\n");
         last_exit_code = 1;
         return;
     }
 
-    shell_print("Directory listing for: ");
-    shell_print(current_dir);
-    shell_print("\n");
+    /* If path is a file, just show its info */
+    if (dir->inode && !(dir->inode->mode & FILE_MODE_DIR)) {
+        if (show_long) {
+            char perm[11] = "----------";
+            if (dir->inode->mode & FILE_MODE_DIR) perm[0] = 'd';
+            else if (dir->inode->mode & FILE_MODE_LNK) perm[0] = 'l';
+            /* Owner */
+            if (dir->inode->mode & PERM_READ)  perm[1] = 'r';
+            if (dir->inode->mode & PERM_WRITE) perm[2] = 'w';
+            if (dir->inode->mode & PERM_EXEC)  perm[3] = 'x';
+            /* Group (same as owner for now) */
+            perm[4] = perm[1]; perm[5] = perm[2]; perm[6] = perm[3];
+            /* Other (read-only) */
+            perm[7] = 'r'; perm[8] = '-'; perm[9] = '-';
+            char line[320];
+            uint32_t sz = dir->inode->size;
+            int n = snprintf(line, sizeof(line), " %s %4u %8u  ", perm, 1u, sz);
+            uint32_t i;
+            for (i = 0; i < 254 && dir->name[i]; i++) line[n + i] = dir->name[i];
+            line[n + i] = '\n';
+            line[n + i + 1] = '\0';
+            shell_print(line);
+        } else {
+            shell_print(dir->name);
+            shell_print("\n");
+        }
+        last_exit_code = 0;
+        return;
+    }
 
+    if (!dir->inode) {
+        shell_print("ls: cannot access '");
+        shell_print(list_path);
+        shell_print("'\n");
+        last_exit_code = 1;
+        return;
+    }
+
+    if (path_arg) {
+        shell_print(list_path);
+        shell_print(":\n");
+    }
+
+    /* Count entries and calculate total for -l */
     dentry_t *child = dir->child;
     int count = 0;
+    uint64_t total_blocks = 0;
     while (child) {
-        /* 跳过隐藏文件（除非 -a） */
-        if (!show_all && child->name[0] == '.' && child->name[1] != '\0'
-            && !(child->name[1] == '.' && child->name[2] == '\0')) {
+        int hidden = (child->name[0] == '.' && child->name[1] != '\0'
+                     && !(child->name[1] == '.' && child->name[2] == '\0'));
+        if (!hidden || show_all) {
+            count++;
+            if (child->inode) {
+                total_blocks += (child->inode->size + 511) / 512;
+            }
+        }
+        child = child->next_sibling;
+    }
+
+    if (show_long) {
+        char total_buf[32];
+        snprintf(total_buf, sizeof(total_buf), "total %llu\n",
+                 (unsigned long long)(total_blocks > 0 ? total_blocks : (uint64_t)count * 2));
+        shell_print(total_buf);
+    }
+
+    child = dir->child;
+    while (child) {
+        int is_dot = (strcmp(child->name, ".") == 0);
+        int is_dotdot = (strcmp(child->name, "..") == 0);
+        int hidden = child->name[0] == '.' && !is_dot && !is_dotdot;
+        if (hidden && !show_all) {
             child = child->next_sibling;
             continue;
         }
+
         if (show_long) {
-            /* 长格式: 权限 大小 名称 */
-            char perm[12] = "----------";
+            char perm[11] = "----------";
+            uint32_t sz = 0;
+            uint32_t nlinks = 1;
             if (child->inode) {
                 if (child->inode->mode & FILE_MODE_DIR) perm[0] = 'd';
+                else if (child->inode->mode & FILE_MODE_LNK) perm[0] = 'l';
+                /* Owner rwx */
                 if (child->inode->mode & PERM_READ)  perm[1] = 'r';
                 if (child->inode->mode & PERM_WRITE) perm[2] = 'w';
                 if (child->inode->mode & PERM_EXEC)  perm[3] = 'x';
+                /* Group rwx - same as owner for this simple FS */
+                perm[4] = perm[1]; perm[5] = perm[2]; perm[6] = perm[3];
+                /* Other r-x for dirs, r-- for files */
+                if (child->inode->mode & FILE_MODE_DIR) {
+                    perm[7] = 'r'; perm[8] = '-'; perm[9] = 'x';
+                } else {
+                    perm[7] = 'r'; perm[8] = '-'; perm[9] = '-';
+                }
+                sz = child->inode->size;
+                nlinks = child->inode->nlinks ? child->inode->nlinks : 1;
             }
             char line[320];
-            uint32_t sz = (child->inode) ? child->inode->size : 0;
-            int n = snprintf(line, sizeof(line), " %s %8u  ", perm, sz);
+            int n = snprintf(line, sizeof(line), "%s %2u root %8u  ", perm, nlinks, sz);
             uint32_t i;
             for (i = 0; i < 254 && child->name[i]; i++) line[n + i] = child->name[i];
             if (child->inode && (child->inode->mode & FILE_MODE_DIR)) {
                 line[n + i] = '/';
-                line[n + i + 1] = '\n';
-                line[n + i + 2] = '\0';
-            } else {
-                line[n + i] = '\n';
-                line[n + i + 1] = '\0';
+                i++;
+            } else if (child->inode && (child->inode->mode & FILE_MODE_LNK)) {
+                line[n + i] = '@';
+                i++;
+            } else if (child->inode && (child->inode->mode & PERM_EXEC)) {
+                line[n + i] = '*';
+                i++;
             }
+            line[n + i] = '\n';
+            line[n + i + 1] = '\0';
             shell_print(line);
         } else {
             char line[280];
-            line[0] = ' ';
-            line[1] = ' ';
             uint32_t i;
-            for (i = 0; i < 254 && child->name[i]; i++) line[i + 2] = child->name[i];
+            for (i = 0; i < 254 && child->name[i]; i++) line[i] = child->name[i];
             if (child->inode && (child->inode->mode & FILE_MODE_DIR)) {
-                line[i + 2] = '/';
-                line[i + 3] = '\n';
-                line[i + 4] = '\0';
-            } else {
-                line[i + 2] = '\n';
-                line[i + 3] = '\0';
+                line[i++] = '/';
+            } else if (child->inode && (child->inode->mode & FILE_MODE_LNK)) {
+                line[i++] = '@';
+            } else if (child->inode && (child->inode->mode & PERM_EXEC)) {
+                line[i++] = '*';
             }
+            line[i++] = '\t';
+            line[i] = '\0';
             shell_print(line);
         }
         child = child->next_sibling;
-        count++;
     }
     if (count == 0) {
-        shell_print("  (empty directory)\n");
+        shell_print("\n");
+    } else if (!show_long) {
+        shell_print("\n");
     }
     last_exit_code = 0;
 }
@@ -1323,51 +1420,55 @@ static void cmd_show(const char *file) {
 }
 
 static void cmd_go(const char *dir) {
+    char target[512];
+
     if (!dir || !*dir) {
-        shell_err_go(dir);
-        last_exit_code = 1;
-        return;
-    }
-    if (strcmp(dir, "..") == 0) {
-        char *last_slash = strrchr(current_dir, '/');
-        if (last_slash && last_slash != current_dir) {
+        const char *home = env_get("HOME");
+        if (!home) home = "/";
+        strncpy(target, home, sizeof(target) - 1);
+        target[sizeof(target) - 1] = '\0';
+    } else if (dir[0] == '~') {
+        const char *home = env_get("HOME");
+        if (!home) home = "/";
+        snprintf(target, sizeof(target), "%s%s", home, dir + 1);
+    } else if (strcmp(dir, "-") == 0) {
+        const char *old = env_get("OLDPWD");
+        if (old && *old) {
+            strncpy(target, old, sizeof(target) - 1);
+        } else {
+            strcpy(target, "/");
+        }
+    } else if (strcmp(dir, "..") == 0) {
+        strncpy(target, current_dir, sizeof(target) - 1);
+        target[sizeof(target) - 1] = '\0';
+        char *last_slash = strrchr(target, '/');
+        if (last_slash && last_slash != target) {
             *last_slash = '\0';
-        } else if (last_slash == current_dir) {
-            current_dir[1] = '\0';
+        } else {
+            strcpy(target, "/");
         }
     } else if (strcmp(dir, "/") == 0) {
-        strcpy(current_dir, "/");
+        strcpy(target, "/");
     } else {
-        /* Verify directory exists via VFS */
-        char new_path[256];
-        if (dir[0] == '/') {
-            strncpy(new_path, dir, 255);
-            new_path[255] = '\0';
-        } else {
-            strncpy(new_path, current_dir, 255);
-            new_path[255] = '\0';
-            if (strcmp(current_dir, "/") != 0) strcat(new_path, "/");
-            strncat(new_path, dir, 254);
-        }
-
-        dentry_t *d = 0;
-        if (path_resolve(new_path, &d) == 0 && d && d->inode && (d->inode->mode & FILE_MODE_DIR)) {
-            strncpy(current_dir, new_path, 255);
-            current_dir[255] = '\0';
-        } else {
-            shell_err_go(dir);
-            last_exit_code = 1;
-            return;
-        }
+        build_full_path(dir, target, sizeof(target));
     }
-    shell_print("cwd: ");
-    shell_print(current_dir);
-    shell_print("\n");
-    last_exit_code = 0;
+
+    if (vfs_chdir(target) == 0) {
+        env_set("OLDPWD", current_dir);
+        strncpy(current_dir, target, 255);
+        current_dir[255] = '\0';
+        last_exit_code = 0;
+    } else {
+        shell_print("cd: no such directory: ");
+        shell_print(dir ? dir : "");
+        shell_print("\n");
+        last_exit_code = 1;
+    }
 }
 
 static void cmd_where(void) {
-    shell_print(current_dir);
+    const char *cwd = vfs_getcwd();
+    shell_print(cwd ? cwd : current_dir);
     shell_print("\n");
     last_exit_code = 0;
 }
@@ -2282,19 +2383,25 @@ static void cmd_copy(const char *src, const char *dst) {
     }
 
     char src_path[512], dst_path[512];
-    if (src[0] == '/') {
-        strncpy(src_path, src, 511); src_path[511] = '\0';
-    } else {
-        strncpy(src_path, current_dir, 255); src_path[255] = '\0';
-        if (strcmp(current_dir, "/") != 0) strcat(src_path, "/");
-        strncat(src_path, src, 254);
-    }
-    if (dst[0] == '/') {
-        strncpy(dst_path, dst, 511); dst_path[511] = '\0';
-    } else {
-        strncpy(dst_path, current_dir, 255); dst_path[255] = '\0';
-        if (strcmp(current_dir, "/") != 0) strcat(dst_path, "/");
-        strncat(dst_path, dst, 254);
+    build_full_path(src, src_path, sizeof(src_path));
+    build_full_path(dst, dst_path, sizeof(dst_path));
+
+    /* Check if destination is a directory - if so, append source filename */
+    {
+        dentry_t *dst_d = 0;
+        if (path_resolve(dst_path, &dst_d) == 0 && dst_d && dst_d->inode &&
+            (dst_d->inode->mode & FILE_MODE_DIR)) {
+            const char *src_name = src;
+            const char *slash = strrchr(src, '/');
+            if (slash) src_name = slash + 1;
+            uint32_t dlen = len_strlen(dst_path);
+            if (dlen > 0 && dst_path[dlen - 1] != '/' && dlen + 1 < sizeof(dst_path)) {
+                dst_path[dlen] = '/';
+                dlen++;
+                dst_path[dlen] = '\0';
+            }
+            strncat(dst_path, src_name, sizeof(dst_path) - dlen - 1);
+        }
     }
 
     file_t *sf = 0;
@@ -2304,25 +2411,91 @@ static void cmd_copy(const char *src, const char *dst) {
         return;
     }
 
-    /* For now, just read and report - VFS write support depends on filesystem */
-    char buf[256];
+    /* Create destination file */
+    if (vfs_creat(dst_path, FILE_MODE_WRITE | FILE_MODE_READ) != 0) {
+        vfs_close(sf);
+        shell_print("copy: cannot create ");
+        shell_print(dst);
+        shell_print("\n");
+        last_exit_code = 1;
+        return;
+    }
+
+    file_t *df = 0;
+    if (vfs_open(dst_path, FILE_MODE_WRITE, &df) != 0 || !df) {
+        vfs_close(sf);
+        shell_print("copy: cannot open ");
+        shell_print(dst);
+        shell_print(" for writing\n");
+        last_exit_code = 1;
+        return;
+    }
+
+    char buf[4096];
     int32_t total = 0;
     int32_t n;
-    while ((n = vfs_read(sf, buf, 255)) > 0) {
-        total += n;
+    while ((n = vfs_read(sf, buf, sizeof(buf))) > 0) {
+        int32_t w = vfs_write(df, buf, n);
+        if (w > 0) total += w;
+        if (w != n) {
+            shell_print("copy: write error\n");
+            break;
+        }
     }
     vfs_close(sf);
+    vfs_close(df);
 
     char num[32];
     snprintf(num, sizeof(num), "%d", total);
-    shell_print("Copied ");
-    shell_print(num);
-    shell_print(" bytes from ");
+    shell_print("'");
     shell_print(src);
-    shell_print(" to ");
+    shell_print("' -> '");
     shell_print(dst);
-    shell_print("\n");
+    shell_print("' (");
+    shell_print(num);
+    shell_print(" bytes)\n");
     last_exit_code = 0;
+}
+
+static int shell_rm_recursive(const char *path) {
+    dentry_t *dir = 0;
+    if (path_resolve((char *)path, &dir) != 0 || !dir || !dir->inode) {
+        return -1;
+    }
+
+    if (!(dir->inode->mode & FILE_MODE_DIR)) {
+        /* It's a file or symlink - unlink it */
+        return vfs_unlink(path);
+    }
+
+    /* It's a directory - first recursively delete all children */
+    dentry_t *child = dir->child;
+    while (child) {
+        dentry_t *next = child->next_sibling;
+        char child_path[512];
+        strncpy(child_path, path, sizeof(child_path) - 1);
+        child_path[sizeof(child_path) - 1] = '\0';
+        uint32_t plen = len_strlen(child_path);
+        if (plen > 0 && child_path[plen - 1] != '/') {
+            if (plen + 1 < sizeof(child_path)) {
+                child_path[plen] = '/';
+                plen++;
+            }
+        }
+        if (plen < sizeof(child_path) - 1) {
+            strncat(child_path, child->name, sizeof(child_path) - plen - 1);
+        }
+
+        if (child->inode && (child->inode->mode & FILE_MODE_DIR)) {
+            if (shell_rm_recursive(child_path) != 0) return -1;
+        } else {
+            if (vfs_unlink(child_path) != 0) return -1;
+        }
+        child = next;
+    }
+
+    /* Now remove the empty directory */
+    return vfs_rmdir(path);
 }
 
 static void cmd_del(const char *file) {
@@ -2332,24 +2505,53 @@ static void cmd_del(const char *file) {
         return;
     }
 
-    char full_path[512];
-    if (file[0] == '/') {
-        strncpy(full_path, file, 511); full_path[511] = '\0';
-    } else {
-        strncpy(full_path, current_dir, 255); full_path[255] = '\0';
-        if (strcmp(current_dir, "/") != 0) strcat(full_path, "/");
-        strncat(full_path, file, 254);
+    int recursive = 0;
+    int force = 0;
+    const char *target = file;
+
+    /* Parse options */
+    if (file[0] == '-') {
+        const char *p = file + 1;
+        while (*p && *p != ' ') {
+            if (*p == 'r' || *p == 'R') recursive = 1;
+            else if (*p == 'f') force = 1;
+            p++;
+        }
+        while (*p == ' ') p++;
+        target = p;
+        if (!*target) {
+            shell_print("Usage: del [-rf] <file/dir>\n       rm [-rf] <file/dir>\n");
+            last_exit_code = 1;
+            return;
+        }
     }
 
-    if (vfs_unlink(full_path) == 0) {
-        shell_print("Deleted: ");
-        shell_print(file);
-        shell_print("\n");
+    char full_path[512];
+    build_full_path(target, full_path, sizeof(full_path));
+
+    int ret;
+    if (recursive) {
+        ret = shell_rm_recursive(full_path);
+    } else {
+        /* Try unlink first (file), if fails try rmdir (empty dir) */
+        ret = vfs_unlink(full_path);
+        if (ret != 0) {
+            ret = vfs_rmdir(full_path);
+        }
+    }
+
+    if (ret == 0) {
+        shell_print("removed '");
+        shell_print(target);
+        shell_print("'\n");
         last_exit_code = 0;
     } else {
-        shell_err_del(file);
+        if (!force) {
+            shell_print("del: cannot remove '");
+            shell_print(target);
+            shell_print("'\n");
+        }
         last_exit_code = 1;
-        return;
     }
 }
 
@@ -2361,21 +2563,18 @@ static void cmd_mkdir(const char *dir) {
     }
 
     char full_path[512];
-    if (dir[0] == '/') {
-        strncpy(full_path, current_dir, 255); full_path[255] = '\0';
-        if (strcmp(current_dir, "/") != 0) strcat(full_path, "/");
-        strncat(full_path, dir, 254);
-    }
+    build_full_path(dir, full_path, sizeof(full_path));
 
-    if (vfs_mkdir(full_path, FILE_MODE_DIR | FILE_MODE_READ | FILE_MODE_WRITE) == 0) {
-        shell_print("Created directory: ");
+    if (vfs_mkdir(full_path, FILE_MODE_DIR | PERM_READ | PERM_WRITE | PERM_EXEC) == 0) {
+        shell_print("Created directory: '");
         shell_print(dir);
-        shell_print("\n");
+        shell_print("'\n");
         last_exit_code = 0;
     } else {
-        shell_err_mkdir(dir);
+        shell_print("mkdir: cannot create '");
+        shell_print(dir);
+        shell_print("'\n");
         last_exit_code = 1;
-        return;
     }
 }
 
@@ -4061,13 +4260,21 @@ static void cmd_ifconfig(void) {
         net_interface_t *iface = net_get_interface(i);
         if (!iface) continue;
 
+        char buf[192];
+
         shell_print(iface->name);
-        shell_print(": ");
-        if (iface->up) shell_print("UP"); else shell_print("DOWN");
+        shell_print("  ");
+        if (iface->up) shell_print("UP ");
+        if (iface->flags & IFF_BROADCAST) shell_print("BROADCAST ");
+        if (iface->flags & IFF_RUNNING) shell_print("RUNNING ");
+        if (iface->flags & IFF_MULTICAST) shell_print("MULTICAST ");
+        if (iface->flags & IFF_LOOPBACK) shell_print("LOOPBACK ");
+        shell_print("MTU:");
+        snprintf(buf, sizeof(buf), "%u", iface->mtu);
+        shell_print(buf);
         shell_print("\n");
 
-        char buf[128];
-        snprintf(buf, sizeof(buf), "  HWaddr %02x:%02x:%02x:%02x:%02x:%02x\n",
+        snprintf(buf, sizeof(buf), "        ether %02x:%02x:%02x:%02x:%02x:%02x\n",
                  iface->mac.bytes[0], iface->mac.bytes[1], iface->mac.bytes[2],
                  iface->mac.bytes[3], iface->mac.bytes[4], iface->mac.bytes[5]);
         shell_print(buf);
@@ -4076,27 +4283,34 @@ static void cmd_ifconfig(void) {
         uint8_t b = (iface->ip.addr >> 8) & 0xFF;
         uint8_t c = (iface->ip.addr >> 16) & 0xFF;
         uint8_t d = (iface->ip.addr >> 24) & 0xFF;
-        snprintf(buf, sizeof(buf), "  inet addr:%u.%u.%u.%u\n", a, b, c, d);
+
+        uint8_t ma = iface->mask.addr & 0xFF;
+        uint8_t mb = (iface->mask.addr >> 8) & 0xFF;
+        uint8_t mc = (iface->mask.addr >> 16) & 0xFF;
+        uint8_t md = (iface->mask.addr >> 24) & 0xFF;
+
+        uint8_t ba = a | (~ma & 0xFF);
+        uint8_t bb = b | (~mb & 0xFF);
+        uint8_t bc = c | (~mc & 0xFF);
+        uint8_t bd = d | (~md & 0xFF);
+
+        snprintf(buf, sizeof(buf), "        inet %u.%u.%u.%u  netmask %u.%u.%u.%u  broadcast %u.%u.%u.%u\n",
+                 a, b, c, d, ma, mb, mc, md, ba, bb, bc, bd);
         shell_print(buf);
 
-        a = iface->mask.addr & 0xFF;
-        b = (iface->mask.addr >> 8) & 0xFF;
-        c = (iface->mask.addr >> 16) & 0xFF;
-        d = (iface->mask.addr >> 24) & 0xFF;
-        snprintf(buf, sizeof(buf), "  Mask:%u.%u.%u.%u\n", a, b, c, d);
-        shell_print(buf);
+        uint8_t ga = iface->gateway.addr & 0xFF;
+        uint8_t gb = (iface->gateway.addr >> 8) & 0xFF;
+        uint8_t gc = (iface->gateway.addr >> 16) & 0xFF;
+        uint8_t gd = (iface->gateway.addr >> 24) & 0xFF;
+        if (iface->gateway.addr != 0) {
+            snprintf(buf, sizeof(buf), "        gateway %u.%u.%u.%u\n", ga, gb, gc, gd);
+            shell_print(buf);
+        }
 
-        a = iface->gateway.addr & 0xFF;
-        b = (iface->gateway.addr >> 8) & 0xFF;
-        c = (iface->gateway.addr >> 16) & 0xFF;
-        d = (iface->gateway.addr >> 24) & 0xFF;
-        snprintf(buf, sizeof(buf), "  Gateway:%u.%u.%u.%u\n", a, b, c, d);
-        shell_print(buf);
-
-        snprintf(buf, sizeof(buf), "  RX packets:%u bytes:%u errors:%u\n",
+        snprintf(buf, sizeof(buf), "        RX packets:%u bytes:%u errors:%u\n",
                  iface->rx_packets, iface->rx_bytes, iface->rx_errors);
         shell_print(buf);
-        snprintf(buf, sizeof(buf), "  TX packets:%u bytes:%u errors:%u\n",
+        snprintf(buf, sizeof(buf), "        TX packets:%u bytes:%u errors:%u\n",
                  iface->tx_packets, iface->tx_bytes, iface->tx_errors);
         shell_print(buf);
     }
@@ -4138,17 +4352,90 @@ static void cmd_dns(const char *host) {
     last_exit_code = 0;
 }
 
-/* 36. wget - Download file (stub) */
-static void cmd_wget(const char *url) {
+/* 36. wget - Download file via HTTP */
+static void cmd_wget(const char *url, const char *outfile) {
     if (!url || !*url) {
         shell_error(SHELL_ERR_NO_NETWORK, "wget");
         last_exit_code = 1;
         return;
     }
+
+    net_interface_t *iface = net_get_default_interface();
+    if (!iface) {
+        shell_error(SHELL_ERR_NO_NETWORK, "wget");
+        last_exit_code = 1;
+        return;
+    }
+
     shell_print("wget: Downloading ");
     shell_print(url);
-    shell_print("...\n");
-    shell_print("wget: Download complete (simulated)\n");
+    shell_print("\n");
+
+    http_response_t resp;
+    memset(&resp, 0, sizeof(resp));
+    int ret = http_get(url, &resp);
+    if (ret != 0) {
+        shell_print("wget: download failed\n");
+        last_exit_code = 1;
+        return;
+    }
+
+    char buf[128];
+    snprintf(buf, sizeof(buf), "wget: HTTP %u\n", resp.status_code);
+    shell_print(buf);
+
+    if (resp.status_code != HTTP_STATUS_OK) {
+        http_free_response(&resp);
+        shell_print("wget: HTTP error\n");
+        last_exit_code = 1;
+        return;
+    }
+
+    const char *filename = outfile;
+    if (!filename || !*filename) {
+        const char *p = url;
+        if (strncmp(p, "http://", 7) == 0) p += 7;
+        const char *last_slash = p;
+        while (*p) {
+            if (*p == '/') last_slash = p + 1;
+            p++;
+        }
+        filename = last_slash;
+        if (!*filename) filename = "index.html";
+    }
+
+    char filepath[512];
+    if (filename[0] == '/') {
+        strncpy(filepath, filename, sizeof(filepath) - 1);
+        filepath[sizeof(filepath) - 1] = '\0';
+    } else {
+        strncpy(filepath, current_dir, sizeof(filepath) - 1);
+        filepath[sizeof(filepath) - 1] = '\0';
+        if (strcmp(current_dir, "/") != 0) strncat(filepath, "/", sizeof(filepath) - strlen(filepath) - 1);
+        strncat(filepath, filename, sizeof(filepath) - strlen(filepath) - 1);
+    }
+
+    vfs_creat(filepath, FILE_MODE_WRITE | FILE_MODE_READ);
+    file_t *f = 0;
+    if (vfs_open(filepath, FILE_MODE_WRITE, &f) != 0 || !f) {
+        shell_print("wget: cannot create file ");
+        shell_print(filepath);
+        shell_print("\n");
+        http_free_response(&resp);
+        last_exit_code = 1;
+        return;
+    }
+
+    uint32_t total = 0;
+    if (resp.body && resp.body_len > 0) {
+        vfs_write(f, resp.body, resp.body_len);
+        total = resp.body_len;
+    }
+    vfs_close(f);
+    http_free_response(&resp);
+
+    snprintf(buf, sizeof(buf), "wget: saved %u bytes to %s\n", total, filepath);
+    shell_print(buf);
     last_exit_code = 0;
 }
 
@@ -4169,26 +4456,181 @@ static void cmd_netstat(void) {
     last_exit_code = 0;
 }
 
-/* 38. traceroute - Trace route to host (stub) */
-static void cmd_traceroute(const char *ip) {
-    if (!ip || !*ip) {
-        shell_err_traceroute(ip);
+/* 38. traceroute - Trace route to host */
+static volatile uint8_t tr_received;
+static volatile ipv4_addr_t tr_from_addr;
+
+static uint16_t tr_checksum(const void *data, uint32_t len) {
+    uint32_t sum = 0;
+    const uint16_t *ptr = (const uint16_t *)data;
+    while (len > 1) {
+        sum += *ptr++;
+        len -= 2;
+    }
+    if (len == 1) {
+        sum += *(const uint8_t *)ptr;
+    }
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    return (uint16_t)(~sum);
+}
+
+static void tr_callback(ipv4_addr_t from, uint8_t code,
+                         ipv4_addr_t inner_dst, uint16_t inner_sport) {
+    (void)code; (void)inner_dst; (void)inner_sport;
+    tr_from_addr = from;
+    tr_received = 1;
+}
+
+static void cmd_traceroute(const char *ip_str) {
+    if (!ip_str || !*ip_str) {
+        shell_err_traceroute(ip_str);
         last_exit_code = 1;
         return;
     }
-    char buf[128];
+
+    net_interface_t *iface = net_get_default_interface();
+    if (!iface) {
+        shell_error(SHELL_ERR_NO_NETWORK, "traceroute");
+        last_exit_code = 1;
+        return;
+    }
+
+    uint32_t a = 0, b = 0, c = 0, d = 0;
+    int parsed = 0;
+    uint32_t *vals[4] = { &a, &b, &c, &d };
+    const char *p = ip_str;
+    for (int i = 0; i < 4; i++) {
+        uint32_t val = 0;
+        int digits = 0;
+        while (*p >= '0' && *p <= '9') {
+            val = val * 10 + (*p - '0');
+            digits++;
+            p++;
+        }
+        if (digits == 0) break;
+        *vals[i] = val;
+        parsed++;
+        if (i < 3 && *p == '.') p++;
+    }
+
+    ipv4_addr_t dst;
+    if (parsed != 4 || a > 255 || b > 255 || c > 255 || d > 255) {
+        if (dns_resolve(ip_str, &dst) != 0) {
+            shell_print("traceroute: cannot resolve host: ");
+            shell_print(ip_str);
+            shell_print("\n");
+            last_exit_code = 1;
+            return;
+        }
+    } else {
+        dst.addr = (d << 24) | (c << 16) | (b << 8) | a;
+    }
+
     shell_print("traceroute to ");
-    shell_print(ip);
-    shell_print(", 30 hops max\n");
-    snprintf(buf, sizeof(buf), "  1  *      *      *     Request timed out\n"); shell_print(buf);
-    snprintf(buf, sizeof(buf), "  2  *      *      *     Request timed out\n"); shell_print(buf);
-    snprintf(buf, sizeof(buf), "  3  *      *      *     Request timed out\n"); shell_print(buf);
-    snprintf(buf, sizeof(buf), "  4  *      *      *     Request timed out\n"); shell_print(buf);
-    snprintf(buf, sizeof(buf), "  5  192.168.1.1  0.5ms  gateway.local\n"); shell_print(buf);
-    snprintf(buf, sizeof(buf), "  6  10.0.0.1     2.3ms  isp-gw.provider.net\n"); shell_print(buf);
-    snprintf(buf, sizeof(buf), "  7  72.14.204.0  8.1ms  edge-node.google.com\n"); shell_print(buf);
-    snprintf(buf, sizeof(buf), "  8  %s  12.4ms  destination reached\n", ip); shell_print(buf);
-    last_exit_code = 0;
+    shell_print(ip_str);
+    shell_print(" (");
+    {
+        char ibuf[16];
+        uint8_t ia = dst.addr & 0xFF;
+        uint8_t ib = (dst.addr >> 8) & 0xFF;
+        uint8_t ic = (dst.addr >> 16) & 0xFF;
+        uint8_t id = (dst.addr >> 24) & 0xFF;
+        snprintf(ibuf, sizeof(ibuf), "%u.%u.%u.%u", ia, ib, ic, id);
+        shell_print(ibuf);
+    }
+    shell_print("), 30 hops max\n");
+
+    icmp_set_traceroute_callback(tr_callback);
+
+    uint16_t tr_id = 0xDEAD;
+    uint16_t tr_seq_base = 0;
+    int reached = 0;
+
+    for (int ttl = 1; ttl <= 30; ttl++) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), " %2d  ", ttl);
+        shell_print(buf);
+
+        int got_any = 0;
+        ipv4_addr_t hop_addr;
+        hop_addr.addr = 0;
+        uint32_t best_rtt = 0xFFFFFFFF;
+
+        for (int probe = 0; probe < 3; probe++) {
+            tr_received = 0;
+            tr_from_addr.addr = 0;
+
+            uint32_t total = sizeof(icmp_header_t) + 32;
+            uint8_t *packet = (uint8_t *)kmalloc(total);
+            if (!packet) break;
+
+            icmp_header_t *hdr = (icmp_header_t *)packet;
+            hdr->type = ICMP_TYPE_ECHO_REQUEST;
+            hdr->code = 0;
+            hdr->checksum = 0;
+            hdr->identifier = ((tr_id >> 8) & 0xFF) | ((tr_id & 0xFF) << 8);
+            uint16_t seq = tr_seq_base++;
+            hdr->sequence = ((seq >> 8) & 0xFF) | ((seq & 0xFF) << 8);
+            memset(packet + sizeof(icmp_header_t), (uint8_t)(ttl + probe), 32);
+
+            uint16_t csum = tr_checksum(packet, total);
+            packet[2] = (uint8_t)(csum & 0xFF);
+            packet[3] = (uint8_t)((csum >> 8) & 0xFF);
+
+            uint32_t send_time = timer_get_ticks();
+            int ret = ip_send_with_ttl(iface, dst, IP_PROTO_ICMP, packet, total, (uint8_t)ttl, 0);
+            kfree(packet);
+
+            if (ret != 0) {
+                shell_print("* ");
+                continue;
+            }
+
+            uint32_t wait_end = send_time + 10;
+            while (timer_get_ticks() < wait_end) {
+                if (tr_received) {
+                    uint32_t now = timer_get_ticks();
+                    uint32_t rtt = (now - send_time) * 10;
+                    if (rtt < best_rtt) best_rtt = rtt;
+                    hop_addr = tr_from_addr;
+                    got_any = 1;
+                    break;
+                }
+            }
+
+            if (tr_received) {
+                char rttbuf[16];
+                snprintf(rttbuf, sizeof(rttbuf), "%ums ", best_rtt);
+                shell_print(rttbuf);
+            } else {
+                shell_print("* ");
+            }
+        }
+
+        if (got_any) {
+            char ipbuf[20];
+            uint8_t ha = hop_addr.addr & 0xFF;
+            uint8_t hb = (hop_addr.addr >> 8) & 0xFF;
+            uint8_t hc = (hop_addr.addr >> 16) & 0xFF;
+            uint8_t hd = (hop_addr.addr >> 24) & 0xFF;
+            snprintf(ipbuf, sizeof(ipbuf), "%u.%u.%u.%u", ha, hb, hc, hd);
+            shell_print(ipbuf);
+            if (hop_addr.addr == dst.addr) {
+                shell_print("  destination reached");
+                reached = 1;
+            }
+        } else {
+            shell_print("Request timed out");
+        }
+        shell_print("\n");
+
+        if (reached) break;
+    }
+
+    icmp_set_traceroute_callback(NULL);
+    last_exit_code = reached ? 0 : 1;
 }
 
 /* 39. arp - Show ARP table */
@@ -4373,67 +4815,268 @@ static void cmd_calc(const char *expr) {
     last_exit_code = 0;
 }
 
-/* 47. base64 - Base64 encode/decode (stub) */
+/* 47. base64 - Base64 encode/decode */
 static const char b64_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-static void cmd_base64(const char *file) {
-    if (!file || !*file) {
-        shell_err_base64(file);
+static const int8_t b64_rev_table[256] = {
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,
+    52,53,54,55,56,57,58,59,60,61,-1,-1,-1,-1,-1,-1,
+    -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,
+    15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1,
+    -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
+    41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+};
+
+static void cmd_base64(const char *opt, const char *file) {
+    int decode_mode = 0;
+    const char *filename = file;
+
+    if (opt && strcmp(opt, "-d") == 0) {
+        decode_mode = 1;
+        if (!filename || !*filename) {
+            shell_err_base64(filename);
+            last_exit_code = 1;
+            return;
+        }
+    } else {
+        filename = opt;
+    }
+
+    if (!filename || !*filename) {
+        shell_err_base64(filename);
         last_exit_code = 1;
         return;
     }
 
-    /* Check for decode mode */
-    if (strcmp(file, "-d") == 0) {
-        shell_print("base64: Decode mode not yet implemented\n");
-        last_exit_code = 1;
-        return;
-    }
-
-    /* Try to open and read the file */
     file_t *f = 0;
-    if (vfs_open(file, FILE_MODE_READ, &f) != 0 || !f) {
-        shell_err_base64(file);
+    if (vfs_open(filename, FILE_MODE_READ, &f) != 0 || !f) {
+        shell_err_base64(filename);
         last_exit_code = 1;
         return;
     }
 
-    char buf[1024];
+    char buf[2048];
     int n = vfs_read(f, buf, sizeof(buf) - 1);
     vfs_close(f);
 
     if (n <= 0) {
-        shell_err_base64(file);
+        shell_err_base64(filename);
         last_exit_code = 1;
         return;
     }
     buf[n] = '\0';
 
-    /* Base64 encode the content */
-    char out[(sizeof(buf) * 4 / 3) + 4];
-    int i, j = 0;
-    for (i = 0; i + 2 < n; i += 3) {
-        out[j++] = b64_table[(buf[i] >> 2) & 0x3F];
-        out[j++] = b64_table[((buf[i] & 0x3) << 4) | ((buf[i+1] >> 4) & 0xF)];
-        out[j++] = b64_table[((buf[i+1] & 0xF) << 2) | ((buf[i+2] >> 6) & 0x3)];
-        out[j++] = b64_table[buf[i+2] & 0x3F];
-    }
-    if (i < n) {
-        out[j++] = b64_table[(buf[i] >> 2) & 0x3F];
-        if (i + 1 < n)
-            out[j++] = b64_table[((buf[i] & 0x3) << 4) | ((buf[i+1] >> 4) & 0xF)];
-        else
-            out[j++] = '=';
-        out[j++] = '=';
-    }
-    out[j] = '\0';
+    if (decode_mode) {
+        int in_len = n;
+        while (in_len > 0 && (buf[in_len-1] == '\n' || buf[in_len-1] == '\r' || buf[in_len-1] == ' ' || buf[in_len-1] == '\t'))
+            in_len--;
 
-    shell_print(out);
-    shell_print("\n");
+        char out[(sizeof(buf) * 3 / 4) + 4];
+        int j = 0;
+        int i = 0;
+        while (i < in_len) {
+            while (i < in_len && (buf[i] == '\n' || buf[i] == '\r' || buf[i] == ' ' || buf[i] == '\t')) i++;
+            if (i >= in_len) break;
+
+            uint32_t sextets[4] = {0};
+            int pad = 0;
+            int k;
+            for (k = 0; k < 4 && i < in_len; k++) {
+                while (i < in_len && (buf[i] == '\n' || buf[i] == '\r' || buf[i] == ' ' || buf[i] == '\t')) i++;
+                if (i >= in_len) break;
+                if (buf[i] == '=') {
+                    sextets[k] = 0;
+                    pad++;
+                } else {
+                    int v = b64_rev_table[(uint8_t)buf[i]];
+                    if (v < 0) {
+                        shell_print("base64: invalid character in input\n");
+                        last_exit_code = 1;
+                        return;
+                    }
+                    sextets[k] = (uint32_t)v;
+                }
+                i++;
+            }
+
+            uint32_t triple = (sextets[0] << 18) | (sextets[1] << 12) | (sextets[2] << 6) | sextets[3];
+            if (k >= 2) out[j++] = (char)((triple >> 16) & 0xFF);
+            if (k >= 3 && pad < 2) out[j++] = (char)((triple >> 8) & 0xFF);
+            if (k >= 4 && pad < 1) out[j++] = (char)(triple & 0xFF);
+        }
+
+        for (int oi = 0; oi < j; oi++) {
+            char c[2] = { out[oi], '\0' };
+            shell_print(c);
+        }
+        shell_print("\n");
+    } else {
+        char out[(sizeof(buf) * 4 / 3) + 4];
+        int i, j = 0;
+        for (i = 0; i + 2 < n; i += 3) {
+            out[j++] = b64_table[(buf[i] >> 2) & 0x3F];
+            out[j++] = b64_table[((buf[i] & 0x3) << 4) | ((buf[i+1] >> 4) & 0xF)];
+            out[j++] = b64_table[((buf[i+1] & 0xF) << 2) | ((buf[i+2] >> 6) & 0x3)];
+            out[j++] = b64_table[buf[i+2] & 0x3F];
+        }
+        if (i < n) {
+            out[j++] = b64_table[(buf[i] >> 2) & 0x3F];
+            if (i + 1 < n)
+                out[j++] = b64_table[((buf[i] & 0x3) << 4) | ((buf[i+1] >> 4) & 0xF)];
+            else
+                out[j++] = '=';
+            out[j++] = '=';
+        }
+        out[j] = '\0';
+
+        shell_print(out);
+        shell_print("\n");
+    }
     last_exit_code = 0;
 }
 
-/* 48. md5 - Calculate MD5 hash (stub) */
+/* 48. md5 - Calculate MD5 hash per RFC 1321 */
+typedef struct {
+    uint32_t state[4];
+    uint32_t count[2];
+    uint8_t  buffer[64];
+} md5_ctx_t;
+
+#define MD5_F(x,y,z) (((x) & (y)) | ((~x) & (z)))
+#define MD5_G(x,y,z) (((x) & (z)) | ((y) & (~z)))
+#define MD5_H(x,y,z) ((x) ^ (y) ^ (z))
+#define MD5_I(x,y,z) ((y) ^ ((x) | (~z)))
+#define MD5_ROT(x,n) (((x) << (n)) | ((x) >> (32-(n))))
+
+static const uint32_t md5_t[64] = {
+    0xd76aa478,0xe8c7b756,0x242070db,0xc1bdceee,
+    0xf57c0faf,0x4787c62a,0xa8304613,0xfd469501,
+    0x698098d8,0x8b44f7af,0xffff5bb1,0x895cd7be,
+    0x6b901122,0xfd987193,0xa679438e,0x49b40821,
+    0xf61e2562,0xc040b340,0x265e5a51,0xe9b6c7aa,
+    0xd62f105d,0x02441453,0xd8a1e681,0xe7d3fbc8,
+    0x21e1cde6,0xc33707d6,0xf4d50d87,0x455a14ed,
+    0xa9e3e905,0xfcefa3f8,0x676f02d9,0x8d2a4c8a,
+    0xfffa3942,0x8771f681,0x6d9d6122,0xfde5380c,
+    0xa4beea44,0x4bdecfa9,0xf6bb4b60,0xbebfbc70,
+    0x289b7ec6,0xeaa127fa,0xd4ef3085,0x04881d05,
+    0xd9d4d039,0xe6db99e5,0x1fa27cf8,0xc4ac5665,
+    0xf4292244,0x432aff97,0xab9423a7,0xfc93a039,
+    0x655b59c3,0x8f0ccc92,0xffeff47d,0x85845dd1,
+    0x6fa87e4f,0xfe2ce6e0,0xa3014314,0x4e0811a1,
+    0xf7537e82,0xbd3af235,0x2ad7d2bb,0xeb86d391
+};
+
+static const uint8_t md5_s[64] = {
+    7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22,
+    5, 9,14,20,5, 9,14,20,5, 9,14,20,5, 9,14,20,
+    4,11,16,23,4,11,16,23,4,11,16,23,4,11,16,23,
+    6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21
+};
+
+static void md5_transform(uint32_t state[4], const uint8_t block[64]) {
+    uint32_t a = state[0], b = state[1], c = state[2], d = state[3];
+    uint32_t x[16];
+    int i, j;
+    for (i = 0, j = 0; i < 16; i++, j += 4) {
+        x[i] = (uint32_t)block[j] | ((uint32_t)block[j+1] << 8) |
+               ((uint32_t)block[j+2] << 16) | ((uint32_t)block[j+3] << 24);
+    }
+
+    for (i = 0; i < 64; i++) {
+        uint32_t f, g;
+        if (i < 16) {
+            f = MD5_F(b, c, d);
+            g = i;
+        } else if (i < 32) {
+            f = MD5_G(b, c, d);
+            g = (5 * i + 1) % 16;
+        } else if (i < 48) {
+            f = MD5_H(b, c, d);
+            g = (3 * i + 5) % 16;
+        } else {
+            f = MD5_I(b, c, d);
+            g = (7 * i) % 16;
+        }
+        uint32_t temp = d;
+        d = c;
+        c = b;
+        b = b + MD5_ROT(a + f + md5_t[i] + x[g], md5_s[i]);
+        a = temp;
+    }
+
+    state[0] += a;
+    state[1] += b;
+    state[2] += c;
+    state[3] += d;
+}
+
+static void md5_init(md5_ctx_t *ctx) {
+    ctx->state[0] = 0x67452301;
+    ctx->state[1] = 0xefcdab89;
+    ctx->state[2] = 0x98badcfe;
+    ctx->state[3] = 0x10325476;
+    ctx->count[0] = 0;
+    ctx->count[1] = 0;
+}
+
+static void md5_update(md5_ctx_t *ctx, const uint8_t *input, uint32_t len) {
+    uint32_t index = (ctx->count[0] >> 3) & 0x3F;
+    uint32_t part_len = 64 - index;
+
+    ctx->count[0] += (uint32_t)(len << 3);
+    if (ctx->count[0] < (uint32_t)(len << 3))
+        ctx->count[1]++;
+    ctx->count[1] += (uint32_t)(len >> 29);
+
+    uint32_t i = 0;
+    if (len >= part_len) {
+        memcpy(&ctx->buffer[index], input, part_len);
+        md5_transform(ctx->state, ctx->buffer);
+        for (i = part_len; i + 63 < len; i += 64)
+            md5_transform(ctx->state, &input[i]);
+        index = 0;
+    }
+    memcpy(&ctx->buffer[index], &input[i], len - i);
+}
+
+static void md5_final(md5_ctx_t *ctx, uint8_t digest[16]) {
+    static const uint8_t padding[64] = {
+        0x80,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    };
+    uint8_t bits[8];
+    uint32_t index = (ctx->count[0] >> 3) & 0x3F;
+    uint32_t pad_len = (index < 56) ? (56 - index) : (120 - index);
+
+    for (int i = 0; i < 4; i++) {
+        bits[i]   = (uint8_t)((ctx->count[0] >> (i * 8)) & 0xFF);
+        bits[i+4] = (uint8_t)((ctx->count[1] >> (i * 8)) & 0xFF);
+    }
+
+    md5_update(ctx, padding, pad_len);
+    md5_update(ctx, bits, 8);
+
+    for (int i = 0; i < 4; i++) {
+        digest[i*4+0] = (uint8_t)(ctx->state[i] & 0xFF);
+        digest[i*4+1] = (uint8_t)((ctx->state[i] >> 8) & 0xFF);
+        digest[i*4+2] = (uint8_t)((ctx->state[i] >> 16) & 0xFF);
+        digest[i*4+3] = (uint8_t)((ctx->state[i] >> 24) & 0xFF);
+    }
+}
+
 static void cmd_md5(const char *file) {
     if (!file || !*file) {
         shell_err_md5(file);
@@ -4441,7 +5084,6 @@ static void cmd_md5(const char *file) {
         return;
     }
 
-    /* Open file and compute a simple hash */
     file_t *f = 0;
     if (vfs_open(file, FILE_MODE_READ, &f) != 0 || !f) {
         shell_err_md5(file);
@@ -4449,29 +5091,24 @@ static void cmd_md5(const char *file) {
         return;
     }
 
+    md5_ctx_t ctx;
+    md5_init(&ctx);
+
     unsigned char buf[1024];
-    unsigned int hash = 0;
-    int total = 0;
     int n;
     while ((n = vfs_read(f, buf, sizeof(buf))) > 0) {
-        for (int i = 0; i < n; i++)
-            hash = hash * 31 + buf[i];
-        total += n;
+        md5_update(&ctx, buf, n);
     }
     vfs_close(f);
 
-    if (total == 0) {
-        shell_err_md5(file);
-        last_exit_code = 1;
-        return;
-    }
+    uint8_t digest[16];
+    md5_final(&ctx, digest);
 
-    /* Format as hex-like string (32 chars) using the hash + size as seed */
     char hex[33];
-    unsigned int h = hash ^ (total * 0x9e3779b9);
-    for (int i = 0; i < 32; i++) {
-        h = h * 1103515245 + 12345;
-        hex[i] = "0123456789abcdef"[(h >> 16) & 0xF];
+    static const char hex_chars[] = "0123456789abcdef";
+    for (int i = 0; i < 16; i++) {
+        hex[i*2+0] = hex_chars[(digest[i] >> 4) & 0xF];
+        hex[i*2+1] = hex_chars[digest[i] & 0xF];
     }
     hex[32] = '\0';
 
@@ -6282,16 +6919,15 @@ static void shell_login(void) {
         }
 
         if (active_user_count <= 1) {
-            /* 首次使用 - 引导创建账户 */
             shell_print("\n  First-time setup detected.\n");
             shell_print("  Creating default accounts...\n\n");
             shell_print("  Available accounts:\n");
-            shell_print("    Sover  - System owner (no password)\n");
-            shell_print("    Admin  - Administrator (password: admin)\n");
-            shell_print("    User   - Regular user (no password)\n\n");
+            shell_print("    sover  - System owner (no password)\n");
+            shell_print("    admin  - Administrator (password: admin)\n");
+            shell_print("    nobody - unprivileged user (disabled)\n\n");
         } else {
-            shell_print("    Accounts: Sover(admin)  Admin(admin)  User(user)\n");
-            shell_print("    Password: Sover/User=(none)  Admin=admin\n\n");
+            shell_print("    Accounts: sover(admin)  admin(admin)\n");
+            shell_print("    Password: sover=(none)  admin=admin\n\n");
         }
 
         shell_print("login: ");
@@ -6326,17 +6962,86 @@ static void shell_login(void) {
     }
 }
 
-/* Bypass login for quick testing (currently unused, forced login enabled) */
-static void __attribute__((unused)) shell_auto_login(void) {
+static void shell_auto_login(void) {
+    user_t *sover = user_find_by_name("sover");
+    const char *home = "/root";
+    if (sover) {
+        user_set_current(sover->uid);
+        env_set("USER", sover->username);
+        home = sover->home[0] ? sover->home : "/root";
+        env_set("HOME", home);
+    } else {
+        user_set_current(0);
+        env_set("USER", "sover");
+        env_set("HOME", "/root");
+    }
+    env_set("SHELL", "/bin/sh");
+    env_set("PATH", "/bin:/sbin:/usr/bin:/usr/sbin");
+    env_set("OLDPWD", "/");
+    vfs_chdir(home);
+    strncpy(current_dir, home, 255);
+    current_dir[255] = '\0';
+    env_set("PWD", current_dir);
+
     logged_in = 1;
-    user_set_current(0);
-    env_set("USER", "Sover");
-    env_set("HOME", "/home/sover");
+    login_tick = timer_get_ticks();
     shell_print("  +------------------------------------------+\n");
     shell_print("  |          FUNSOS Operating System         |\n");
     shell_print("  |           Version 1.0 - Shell            |\n");
     shell_print("  +------------------------------------------+\n\n");
-    shell_print("  Auto-logged in as Sover. Type 'help' for commands.\n\n");
+    shell_print("  Auto-logged in as ");
+    shell_print(env_get("USER") ? env_get("USER") : "sover");
+    shell_print(".\n");
+    shell_print("  Type 'help' for available commands.\n");
+    shell_print("  Type 'login' to switch users.\n\n");
+}
+
+void shell_run(void) {
+    /* 尝试从磁盘加载持久化的用户数据 */
+    user_persist_init();
+    user_persist_load();
+
+    /* 自动登录为 sover（系统所有者），跳过登录界面 */
+    shell_auto_login();
+
+    while (1) {
+        if (!logged_in) {
+            shell_login();
+            continue;
+        }
+
+        /* Build dynamic prompt: user@funsos:dir# (root) or user@funsos:dir$ (user) */
+        user_t *u = user_get_current();
+        char prompt[192];
+        int pi = 0;
+        const char *uname = (u && u->username[0]) ? u->username : "?";
+        while (*uname && pi < 50) prompt[pi++] = *uname++;
+        const char *at = "@funsos:";
+        while (*at && pi < 70) prompt[pi++] = *at++;
+        const char *home = env_get("HOME");
+        const char *cwd = vfs_getcwd();
+        if (!cwd) cwd = current_dir;
+        const char *disp = cwd;
+        int home_len = home ? (int)strlen(home) : 0;
+        if (home && home_len > 1 && strncmp(cwd, home, home_len) == 0 &&
+            (cwd[home_len] == '/' || cwd[home_len] == '\0')) {
+            prompt[pi++] = '~';
+            disp = cwd + home_len;
+            if (*disp == '/') disp++;
+        }
+        while (*disp && pi < 186) prompt[pi++] = *disp++;
+        prompt[pi++] = (u && u->uid == 0) ? '#' : '$';
+        prompt[pi++] = ' ';
+        prompt[pi] = '\0';
+
+        shell_print(prompt);
+        char line[SHELL_MAX_LINE] = {0};
+        int len = shell_read_line(line, SHELL_MAX_LINE);
+        if (len > 0) {
+            history_add(line);
+            shell_execute(line);
+        }
+    }
 }
 
 static void cmd_whoami(void) {
@@ -6347,6 +7052,72 @@ static void cmd_whoami(void) {
     } else {
         shell_print("unknown\n");
     }
+    last_exit_code = 0;
+}
+
+static void cmd_id(void) {
+    user_t *u = user_get_current();
+    if (!u) {
+        shell_print("uid=65534(nobody) gid=65534(nogroup) groups=65534(nogroup)\n");
+        last_exit_code = 0;
+        return;
+    }
+    char numbuf[16];
+    shell_print("uid=");
+    itoa(u->uid, numbuf, 10); shell_print(numbuf);
+    shell_print("("); shell_print(u->username); shell_print(") ");
+    shell_print("gid=");
+    itoa(u->gid, numbuf, 10); shell_print(numbuf);
+    shell_print("("); shell_print(u->username); shell_print(") ");
+    shell_print("groups=");
+    itoa(u->gid, numbuf, 10); shell_print(numbuf);
+    shell_print("("); shell_print(u->username); shell_print(")");
+    if (u->is_admin) shell_print(",10(wheel)");
+    shell_print(" context=");
+    shell_print(perm_level_name(perm_get_level()));
+    shell_print("\n");
+    last_exit_code = 0;
+}
+
+static void cmd_umask(const char *arg) {
+    while (arg && *arg == ' ') arg++;
+    if (!arg || !*arg) {
+        uint32_t m = perm_umask_get();
+        shell_print("0");
+        if (m >= 01000) { shell_print("4"); m -= 01000; } else shell_print("0");
+        shell_print("0");
+        char nb[8];
+        itoa((m >> 6) & 7, nb, 8); shell_print(nb);
+        itoa((m >> 3) & 7, nb, 8); shell_print(nb);
+        itoa(m & 7, nb, 8); shell_print(nb);
+        shell_print("\n");
+        last_exit_code = 0;
+        return;
+    }
+    uint32_t new_mask = 0;
+    const char *p = arg;
+    if (*p == '0') {
+        while (*p >= '0' && *p <= '7') {
+            new_mask = new_mask * 8 + (*p - '0');
+            p++;
+        }
+        if (*p != '\0' && *p != ' ') {
+            shell_print("umask: invalid octal number\n");
+            last_exit_code = 1;
+            return;
+        }
+    } else {
+        while (*p >= '0' && *p <= '9') {
+            new_mask = new_mask * 10 + (*p - '0');
+            p++;
+        }
+        if (*p != '\0' && *p != ' ') {
+            shell_print("umask: invalid number\n");
+            last_exit_code = 1;
+            return;
+        }
+    }
+    perm_umask_set(new_mask & 0777);
     last_exit_code = 0;
 }
 
@@ -6518,7 +7289,7 @@ static void cmd_passwd(const char *name) {
 }
 
 static void cmd_su(const char *name) {
-    if (!name || !*name) name = "Sover";
+    if (!name || !*name) name = "sover";
 
     user_t *target = user_find_by_name(name);
     if (!target) {
@@ -6835,13 +7606,21 @@ static int shell_execute_single(const char *cmd) {
         cmd_dev();
     } else if (strcmp(line, "ping") == 0) {
         cmd_ping(arg);
-    } else if (strcmp(line, "copy") == 0) {
+    } else if (strcmp(line, "copy") == 0 || strcmp(line, "cp") == 0) {
         cmd_copy(arg, arg2);
-    } else if (strcmp(line, "del") == 0) {
+    } else if (strcmp(line, "del") == 0 || strcmp(line, "rm") == 0) {
         cmd_del(arg);
     } else if (strcmp(line, "mkdir") == 0) {
         cmd_mkdir(arg);
-    } else if (strcmp(line, "ren") == 0) {
+    } else if (strcmp(line, "rmdir") == 0) {
+        /* rmdir - remove empty directory */
+        if (!arg || !*arg) { shell_print("Usage: rmdir <dir>\n"); last_exit_code = 1; }
+        else {
+            char fp[512]; build_full_path(arg, fp, sizeof(fp));
+            if (vfs_rmdir(fp) == 0) { shell_print("removed directory '"); shell_print(arg); shell_print("'\n"); last_exit_code = 0; }
+            else { shell_print("rmdir: failed to remove '"); shell_print(arg); shell_print("'\n"); last_exit_code = 1; }
+        }
+    } else if (strcmp(line, "ren") == 0 || strcmp(line, "mv") == 0) {
         cmd_ren(arg, arg2);
     } else if (strcmp(line, "type") == 0) {
         cmd_type(arg);
@@ -6951,7 +7730,7 @@ static int shell_execute_single(const char *cmd) {
     } else if (strcmp(line, "dns") == 0) {
         cmd_dns(arg);
     } else if (strcmp(line, "wget") == 0) {
-        cmd_wget(arg);
+        cmd_wget(arg, arg2);
     } else if (strcmp(line, "netstat") == 0) {
         cmd_netstat();
     } else if (strcmp(line, "traceroute") == 0) {
@@ -6997,7 +7776,7 @@ static int shell_execute_single(const char *cmd) {
             app_calc_main(1, av);  /* 无参数: 交互计算器 */
         }
     } else if (strcmp(line, "base64") == 0) {
-        cmd_base64(arg);
+        cmd_base64(arg, arg2);
     } else if (strcmp(line, "md5") == 0) {
         cmd_md5(arg);
     } else if (strcmp(line, "history") == 0) {
@@ -7138,6 +7917,10 @@ static int shell_execute_single(const char *cmd) {
     /* User management commands */
     else if (strcmp(line, "whoami") == 0) {
         cmd_whoami();
+    } else if (strcmp(line, "id") == 0) {
+        cmd_id();
+    } else if (strcmp(line, "umask") == 0) {
+        cmd_umask(arg);
     } else if (strcmp(line, "users") == 0) {
         cmd_users();
     } else if (strcmp(line, "useradd") == 0) {
@@ -7150,6 +7933,8 @@ static int shell_execute_single(const char *cmd) {
         cmd_su(arg);
     } else if (strcmp(line, "logout") == 0) {
         cmd_logout();
+    } else if (strcmp(line, "login") == 0) {
+        shell_login();
     }
     /* VM state commands */
     else if (strcmp(line, "save") == 0) {
@@ -7318,42 +8103,4 @@ void shell_init(void) {
     alias_count = 0;
 }
 
-void shell_run(void) {
-    /* 不自动登录，强制用户通过登录界面认证 */
-    /* logged_in 初始为 0，while 循环会自动进入 shell_login() */
 
-    /* 尝试从磁盘加载持久化的用户数据 */
-    user_persist_init();
-    user_persist_load();
-
-    while (1) {
-        if (!logged_in) {
-            shell_login();
-            continue;
-        }
-
-        /* Build dynamic prompt: user@funsos:dir> */
-        user_t *u = user_get_current();
-        char prompt[128];
-        int pi = 0;
-        if (u) {
-            const char *n = u->username;
-            while (*n && pi < 60) prompt[pi++] = *n++;
-        }
-        const char *at = "@funsos:";
-        while (*at && pi < 120) prompt[pi++] = *at++;
-        const char *d = current_dir;
-        while (*d && pi < 126) prompt[pi++] = *d++;
-        prompt[pi++] = '>';
-        prompt[pi++] = ' ';
-        prompt[pi] = '\0';
-
-        shell_print(prompt);
-        char line[SHELL_MAX_LINE] = {0};
-        int len = shell_read_line(line, SHELL_MAX_LINE);
-        if (len > 0) {
-            history_add(line);
-            shell_execute(line);
-        }
-    }
-}

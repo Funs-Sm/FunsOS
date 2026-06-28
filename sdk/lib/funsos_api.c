@@ -9,6 +9,7 @@
 
 #include "funsos.h"
 #include "stddef.h"
+#include "math.h"
 
 /* ---- 系统调用号（与 apps/user_syscall.h 保持一致） ---- */
 #define SYS_EXIT      1
@@ -67,6 +68,7 @@
 #define SYS_DRAW_TEXT      111
 #define SYS_DRAW_LINE      112
 #define SYS_FILL_WINDOW    113
+#define SYS_FILL_RECT      114
 
 /* ---- 事件系统扩展系统调用号 ---- */
 #define SYS_POLL_EVENT     120
@@ -78,9 +80,11 @@
 #define SYS_AUDIO_INIT     130
 #define SYS_AUDIO_PLAY     131
 #define SYS_AUDIO_STOP     132
-#define SYS_AUDIO_SET_VOL  133
+#define SYS_AUDIO_VOLUME   133
 #define SYS_AUDIO_GET_VOL  134
 #define SYS_AUDIO_PLAY_WAV 135
+
+static uint8_t last_volume = 128;
 
 /* ---- 系统信息扩展系统调用号 ---- */
 #define SYS_GET_TICKS      140
@@ -229,7 +233,14 @@ void *funsos_get_window_context(uint32_t win_handle)
 
 int funsos_draw_rect(uint32_t win_handle, int x, int y, int w, int h, funsos_color_t color)
 {
-    return syscall5(SYS_DRAW_RECT, (int)win_handle, x, y, w, (int)color);
+    uint32_t packed = ((uint32_t)h << 16) | (color & 0xFFFF);
+    return syscall5(SYS_DRAW_RECT, (int)win_handle, x, y, w, (int)packed);
+}
+
+int funsos_fill_rect(uint32_t win_handle, int x, int y, int w, int h, funsos_color_t color)
+{
+    uint32_t packed = ((uint32_t)h << 16) | (color & 0xFFFF);
+    return syscall5(SYS_FILL_RECT, (int)win_handle, x, y, w, (int)packed);
 }
 
 int funsos_draw_text(uint32_t win_handle, int x, int y, const char *text, funsos_color_t fg)
@@ -239,7 +250,8 @@ int funsos_draw_text(uint32_t win_handle, int x, int y, const char *text, funsos
 
 int funsos_draw_line(uint32_t win_handle, int x1, int y1, int x2, int y2, funsos_color_t color)
 {
-    return syscall5(SYS_DRAW_LINE, (int)win_handle, x1, y1, x2, (int)color);
+    uint32_t packed = ((uint32_t)y2 << 16) | (color & 0xFFFF);
+    return syscall5(SYS_DRAW_LINE, (int)win_handle, x1, y1, x2, (int)packed);
 }
 
 int funsos_fill_window(uint32_t win_handle, funsos_color_t bg)
@@ -503,7 +515,7 @@ funsos_mat4_t funsos_3d_mul_matrix(funsos_mat4_t a, funsos_mat4_t b)
 funsos_mat4_t funsos_3d_rotate_y(float angle)
 {
     funsos_mat4_t result;
-    float c = 1, s = 0;  /* 简化: 实际应使用 cos/sin */
+    float c = cosf(angle), s = sinf(angle);
     result.m[0]  = c;  result.m[1]  = 0; result.m[2]  = -s; result.m[3]  = 0;
     result.m[4]  = 0;  result.m[5]  = 1; result.m[6]  = 0;  result.m[7]  = 0;
     result.m[8]  = s;  result.m[9]  = 0; result.m[10] = c;   result.m[11] = 0;
@@ -514,11 +526,32 @@ funsos_mat4_t funsos_3d_rotate_y(float angle)
 funsos_mat4_t funsos_3d_rotate_x(float angle)
 {
     funsos_mat4_t result;
-    float c = 1, s = 0;
+    float c = cosf(angle), s = sinf(angle);
     result.m[0]  = 1; result.m[1]  = 0;  result.m[2]  = 0; result.m[3]  = 0;
     result.m[4]  = 0; result.m[5]  = c;   result.m[6]  = s; result.m[7]  = 0;
     result.m[8]  = 0; result.m[9]  = -s;  result.m[10] = c; result.m[11] = 0;
     result.m[12] = 0; result.m[13] = 0;   result.m[14] = 0; result.m[15] = 1;
+    return result;
+}
+
+funsos_mat4_t funsos_3d_rotate_z(float angle)
+{
+    funsos_mat4_t result;
+    float c = cosf(angle), s = sinf(angle);
+    result.m[0]  = c; result.m[1]  = s;  result.m[2]  = 0; result.m[3]  = 0;
+    result.m[4]  = -s; result.m[5]  = c; result.m[6]  = 0; result.m[7]  = 0;
+    result.m[8]  = 0; result.m[9]  = 0;  result.m[10] = 1; result.m[11] = 0;
+    result.m[12] = 0; result.m[13] = 0;  result.m[14] = 0; result.m[15] = 1;
+    return result;
+}
+
+funsos_mat4_t funsos_3d_scale(float sx, float sy, float sz)
+{
+    funsos_mat4_t result;
+    result.m[0]  = sx; result.m[1]  = 0;  result.m[2]  = 0;  result.m[3]  = 0;
+    result.m[4]  = 0;  result.m[5]  = sy; result.m[6]  = 0;  result.m[7]  = 0;
+    result.m[8]  = 0;  result.m[9]  = 0;  result.m[10] = sz; result.m[11] = 0;
+    result.m[12] = 0;  result.m[13] = 0;  result.m[14] = 0;  result.m[15] = 1;
     return result;
 }
 
@@ -557,7 +590,7 @@ int funsos_wait_event(funsos_event_t *event)
     return syscall1(SYS_WAIT_EVENT, (int)event);
 }
 
-int funsos_set_timer(uint32_t interval_ms)
+int funsos_set_timer(uint32_t *interval_ms)
 {
     return syscall1(SYS_SET_TIMER, (int)interval_ms);
 }
@@ -840,42 +873,31 @@ int funsos_audio_init(void)
     return syscall0(SYS_AUDIO_INIT);
 }
 
-int funsos_audio_get_device(uint32_t index, audio_device_t *info)
+int funsos_audio_play_tone(uint32_t frequency, uint32_t duration_ms)
 {
-    /* 通过 ioctl 获取设备信息 */
-    return syscall3(SYS_IOCTL, -1, 10, (int)info);
+    return syscall2(SYS_AUDIO_PLAY, (int)frequency, (int)duration_ms);
 }
 
-int funsos_audio_play(uint32_t dev_id, const void *data, uint32_t size)
+int funsos_audio_stop(void)
 {
-    return syscall3(SYS_AUDIO_PLAY, (int)dev_id, (int)data, (int)size);
+    return syscall0(SYS_AUDIO_STOP);
 }
 
-int funsos_audio_stop(uint32_t dev_id)
+int funsos_audio_set_volume(uint8_t volume)
 {
-    return syscall1(SYS_AUDIO_STOP, (int)dev_id);
+    last_volume = volume;
+    return syscall1(SYS_AUDIO_VOLUME, (int)volume);
 }
 
-int funsos_audio_set_volume(uint32_t dev_id, uint8_t left, uint8_t right)
+uint8_t funsos_audio_get_volume(void)
 {
-    uint8_t vol[2] = {left, right};
-    return syscall3(SYS_AUDIO_SET_VOL, (int)dev_id, (int)vol, 2);
+    return last_volume;
 }
 
-int funsos_audio_get_volume(uint32_t dev_id, uint8_t *left, uint8_t *right)
+int funsos_audio_play_wav(const void *data, uint32_t size)
 {
-    uint8_t vol[2] = {0, 0};
-    int ret = syscall3(SYS_AUDIO_GET_VOL, (int)dev_id, (int)vol, 2);
-    if (ret == 0) {
-        *left = vol[0];
-        *right = vol[1];
-    }
-    return ret;
-}
-
-int funsos_audio_play_wav(const char *path)
-{
-    return syscall1(SYS_AUDIO_PLAY_WAV, (int)path);
+    uint32_t packed = ((uint32_t)(uintptr_t)data & 0xFFFF) | ((size & 0xFFFF) << 16);
+    return syscall2(SYS_AUDIO_PLAY_WAV, (int)(uintptr_t)data, (int)size);
 }
 
 /* ================================================================
@@ -903,6 +925,11 @@ int funsos_get_sysinfo(funsos_sysinfo_t *info)
 }
 
 uint32_t funsos_get_time(void)
+{
+    return (uint32_t)syscall0(SYS_GET_TIME);
+}
+
+uint32_t funsos_get_system_time(void)
 {
     return (uint32_t)syscall0(SYS_GET_TIME);
 }
@@ -945,24 +972,38 @@ int funs_get_system_info(funsos_sysinfo_t *info)
 }
 
 /*
- * funs_app_init() - Initialize application with configuration
+ * funsos_app_init() - Initialize application with configuration
  */
-int funs_app_init(const funsos_app_config_t *config)
+int funsos_app_init(const funsos_app_config_t *config)
 {
-    /* If no config provided, use defaults via simple init call */
     if (config == NULL) {
         return syscall0(SYS_APP_INIT);
     }
-    /* Pass config pointer to kernel for structured initialization */
     return syscall1(SYS_APP_INIT, (int)config);
 }
 
 /*
- * funs_app_cleanup() - Clean up application resources
+ * funsos_app_cleanup() - Clean up application resources
+ */
+int funsos_app_cleanup(void)
+{
+    return syscall0(SYS_APP_CLEANUP);
+}
+
+/*
+ * funs_app_init() - Initialize application with configuration (legacy alias)
+ */
+int funs_app_init(const funsos_app_config_t *config)
+{
+    return funsos_app_init(config);
+}
+
+/*
+ * funs_app_cleanup() - Clean up application resources (legacy alias)
  */
 int funs_app_cleanup(void)
 {
-    return syscall0(SYS_APP_CLEANUP);
+    return funsos_app_cleanup();
 }
 
 /* ================================================================
@@ -1066,14 +1107,21 @@ int funs_is_hotkey_registered(uint32_t key, uint32_t mods)
 #define FUNSOS_IDYES           6
 
 /*
- * funs_message_box() - Show a modal message dialog box
+ * funsos_message_box() - Show a modal message dialog box
+ */
+int funsos_message_box(funsos_window_t parent, const char *title,
+                     const char *message, uint32_t type)
+{
+    return syscall4(SYS_MESSAGE_BOX, (int)parent.handle, (int)title, (int)message, (int)type);
+}
+
+/*
+ * funs_message_box() - Show a modal message dialog box (legacy alias)
  */
 int funs_message_box(funsos_window_t parent, const char *title,
                      const char *message, uint32_t type)
 {
-    /* Pack parameters: parent | type in param1, title in param2, message via buffer */
-    /* Simplified: pass type as primary parameter */
-    return syscall3(SYS_MESSAGE_BOX, (int)parent.handle, (int)type, (int)message);
+    return funsos_message_box(parent, title, message, type);
 }
 
 /*
@@ -1118,13 +1166,21 @@ int funs_input_dialog(funsos_window_t parent, const char *title,
 #define CURSOR_MOVE      10
 
 /*
- * funs_set_cursor() - Change the mouse cursor shape
+ * funsos_set_cursor() - Change the mouse cursor shape
  * Parameters: cursor_type - one of CURSOR_* constants above
  * Returns: 0 on success, -1 on failure
  */
-int funs_set_cursor(int cursor_type)
+int funsos_set_cursor(int cursor_type)
 {
     return syscall1(SYS_SET_CURSOR, cursor_type);
+}
+
+/*
+ * funs_set_cursor() - Change the mouse cursor shape (legacy alias)
+ */
+int funs_set_cursor(int cursor_type)
+{
+    return funsos_set_cursor(cursor_type);
 }
 
 /* ================================================================
@@ -1164,37 +1220,71 @@ int funsos_get_timer_remaining(int timer_id)
  * ================================================================ */
 
 /*
- * funs_set_clipboard_text() - Copy text to system clipboard
+ * funsos_clipboard_set_text() - Copy text to system clipboard
  */
-int funs_set_clipboard_text(const char *text)
+int funsos_clipboard_set_text(const char *text)
 {
     if (text == NULL) return FUNSOS_ERR_INVAL;
-    return syscall1(SYS_CLIPBOARD_SET, (int)text);
+    uint32_t size = 0;
+    while (text[size]) size++;
+    return syscall2(SYS_CLIPBOARD_SET, (int)text, (int)size);
 }
 
 /*
- * funs_get_clipboard_text() - Retrieve text from system clipboard
+ * funsos_clipboard_get_text() - Retrieve text from system clipboard
  */
-int funs_get_clipboard_text(char *buf, uint32_t bufsize)
+int funsos_clipboard_get_text(char *buf, uint32_t bufsize)
 {
     if (buf == NULL || bufsize == 0) return FUNSOS_ERR_INVAL;
     return syscall2(SYS_CLIPBOARD_GET, (int)buf, (int)bufsize);
 }
 
 /*
- * funs_clear_clipboard() - Clear all clipboard contents
+ * funsos_clipboard_clear() - Clear all clipboard contents
  */
-int funs_clear_clipboard(void)
+int funsos_clipboard_clear(void)
 {
     return syscall0(SYS_CLIPBOARD_CLEAR);
 }
 
 /*
- * funs_clipboard_has_data() - Check if clipboard contains data
+ * funsos_clipboard_has_text() - Check if clipboard contains text
+ */
+int funsos_clipboard_has_text(void)
+{
+    return (int)syscall0(SYS_CLIPBOARD_QUERY);
+}
+
+/*
+ * funs_set_clipboard_text() - Copy text to system clipboard (legacy alias)
+ */
+int funs_set_clipboard_text(const char *text)
+{
+    return funsos_clipboard_set_text(text);
+}
+
+/*
+ * funs_get_clipboard_text() - Retrieve text from system clipboard (legacy alias)
+ */
+int funs_get_clipboard_text(char *buf, uint32_t bufsize)
+{
+    return funsos_clipboard_get_text(buf, bufsize);
+}
+
+/*
+ * funs_clear_clipboard() - Clear all clipboard contents (legacy alias)
+ */
+int funs_clear_clipboard(void)
+{
+    return funsos_clipboard_clear();
+}
+
+/*
+ * funs_clipboard_has_data() - Check if clipboard contains data (legacy alias)
  */
 uint32_t funs_clipboard_has_data(void)
 {
-    return (uint32_t)syscall0(SYS_CLIPBOARD_QUERY);
+    return (uint32_t)funsos_clipboard_has_text();
 }
 
 /* ================================================================
@@ -1259,8 +1349,7 @@ int funs_bypass_filters(int bypass)
 {
     int old = filters_bypassed;
     filters_bypassed = bypass;
-    return syscall1(SYS_BYPASS_FILTERS, bypass);
-    /* Return previous state (syscall may override, use local value) */
+    syscall1(SYS_BYPASS_FILTERS, bypass);
     return old;
 }
 
@@ -1307,16 +1396,39 @@ static inline int syscall6(int num, int a1, int a2, int a3, int a4, int a5, int 
 }
 
 /*
- * funsos_create_window_ex() - Create window with style options
+ * funsos_create_window_ex() - Create window with extended style options
  */
 funsos_window_t funsos_create_window_ex(int x, int y, int w, int h,
-                                        const char *title, uint32_t style)
+                                        const char *title, uint32_t style, uint32_t ex_style)
 {
-    /* Pass style as additional parameter to extended create syscall */
     funsos_window_t win = {0};
     win.handle = (uint32_t)syscall6(SYS_WINDOW_EX, x, y, w, h,
-                                     (int)title, (int)style);
+                                     (int)title, (int)(style | (ex_style << 16)));
     return win;
+}
+
+/*
+ * funsos_window_get_state() - Get current window state
+ */
+int funsos_window_get_state(funsos_window_t win)
+{
+    return syscall2(SYS_WINDOW_STATE, (int)win.handle, -1);
+}
+
+/*
+ * funsos_invalidate_rect() - Invalidate a rectangular region
+ */
+int funsos_invalidate_rect(uint32_t win_handle, int x, int y, int w, int h)
+{
+    return syscall5(SYS_INVALIDATE, (int)win_handle, x, y, w, h);
+}
+
+/*
+ * funsos_get_context() - Get framebuffer address
+ */
+void *funsos_get_context(uint32_t win_handle)
+{
+    return (void *)syscall1(SYS_GET_CONTEXT, (int)win_handle);
 }
 
 /*
@@ -1328,11 +1440,11 @@ int funsos_set_window_state(funsos_window_t win, int state)
 }
 
 /*
- * funsos_get_window_state() - Get current window state
+ * funsos_get_window_state() - Get current window state (legacy alias)
  */
 int funsos_get_window_state(funsos_window_t win)
 {
-    return syscall2(SYS_WINDOW_STATE, (int)win.handle, -1);  /* -1 = query mode */
+    return funsos_window_get_state(win);
 }
 
 /*

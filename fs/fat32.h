@@ -85,8 +85,8 @@ typedef struct {
 
 int32_t fat32_init(uint32_t drive, uint32_t partition_start);
 int32_t fat32_mount(superblock_t *sb, void *data);
-int32_t fat32_read(inode_t *inode, void *buf, uint32_t count);
-int32_t fat32_write(inode_t *inode, const void *buf, uint32_t count);
+int32_t fat32_read(inode_t *inode, void *buf, uint32_t count, uint32_t offset);
+int32_t fat32_write(inode_t *inode, const void *buf, uint32_t count, uint32_t offset);
 uint32_t fat32_open_dir(uint32_t cluster);
 int32_t fat32_read_dir(uint32_t cluster, FAT32_DIR_ENTRY *entries, uint32_t max);
 int32_t fat32_find_entry(uint32_t dir_cluster, const char *name, FAT32_DIR_ENTRY *out);

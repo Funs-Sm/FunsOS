@@ -38,4 +38,10 @@ void vga_text_print_hex(uint32_t val);
 void vga_text_print_dec(uint32_t val);
 void vga_text_font_diagnostic(void);
 
+void vga_text_scroll_up(int lines);
+void vga_text_scroll_down(int lines);
+void vga_text_scroll_home(void);
+void vga_text_scroll_end(void);
+int vga_text_in_scrollback(void);
+
 #endif

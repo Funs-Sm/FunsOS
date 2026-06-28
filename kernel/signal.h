@@ -104,7 +104,9 @@ typedef struct sig_pending {
 } sig_pending_t;
 
 /* 实时信号队列条目 */
+#ifndef MAX_SIG_QUEUE_SIZE
 #define MAX_SIG_QUEUE_SIZE 32
+#endif
 
 typedef struct sig_queue_entry {
     int signo;           /* 信号编号 */

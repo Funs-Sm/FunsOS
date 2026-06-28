@@ -14,7 +14,7 @@
  *   - 软件回退: 基于定时器抖动的伪随机
  */
 
-#include <stdint.h>
+#include "stdint.h"
 
 /* ---- 初始化 ---- */
 int  hw_rng_init(void);              /* 探测并初始化可用的硬件RNG */

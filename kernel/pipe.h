@@ -2,6 +2,9 @@
 #define PIPE_H
 
 #include "sync.h"
+#include "stdint.h"
+
+#define PIPE_BUFFER_SIZE 4096
 
 typedef struct {
     uint8_t *buffer;
@@ -14,6 +17,14 @@ typedef struct {
     int32_t readers;
     int32_t writers;
 } pipe_t;
+
+static inline int pipe_is_empty(pipe_t *pipe) {
+    return pipe->count == 0;
+}
+
+static inline int pipe_is_full(pipe_t *pipe) {
+    return pipe->count >= PIPE_BUFFER_SIZE;
+}
 
 int pipe_create(pipe_t **pipe);
 int pipe_read(pipe_t *pipe, void *buf, uint32_t count);

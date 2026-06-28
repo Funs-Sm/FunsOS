@@ -878,6 +878,50 @@ int32_t sys_poll(void *fds, uint32_t nfds, int32_t timeout_ms) {
 }
 
 /* ------------------------------------------------------------------------- */
+/*  Socket helper functions                                                  */
+/* ------------------------------------------------------------------------- */
+
+void sock_set_nonblock(socket_t *sock, int on) {
+    if (!sock) return;
+    if (on) sock->flags |= SO_NONBLOCK;
+    else    sock->flags &= ~SO_NONBLOCK;
+    if (sock->type == SOCK_STREAM && sock->private_data) {
+        tcp_set_nonblock((tcp_socket_t *)sock->private_data, on);
+    }
+}
+
+int32_t sock_get_remote_addr(socket_t *sock, sockaddr_in_t *addr) {
+    if (!sock || !addr) return -1;
+    memset(addr, 0, sizeof(*addr));
+    addr->sin_family = AF_INET;
+    if (sock->type == SOCK_STREAM && sock->private_data) {
+        tcp_socket_t *t = (tcp_socket_t *)sock->private_data;
+        addr->sin_port = t->remote_port;
+        addr->sin_addr = t->remote_ip;
+        return 0;
+    } else if (sock->type == SOCK_DGRAM && sock->private_data) {
+        udp_socket_t *u = (udp_socket_t *)sock->private_data;
+        addr->sin_port = u->remote_port;
+        addr->sin_addr = u->remote_ip;
+        return 0;
+    }
+    return -1;
+}
+
+void sock_set_timeout(socket_t *sock, uint32_t recv_timeout, uint32_t send_timeout) {
+    if (!sock) return;
+    sock->rcv_timeout_ms = recv_timeout;
+    sock->snd_timeout_ms = send_timeout;
+}
+
+int sys_socket_get_error(socket_t *sock) {
+    if (!sock) return -1;
+    int err = sock->err;
+    sock->err = 0;
+    return err;
+}
+
+/* ------------------------------------------------------------------------- */
 /*  sendfile / splice (zero-copy)                                            */
 /* ------------------------------------------------------------------------- */
 

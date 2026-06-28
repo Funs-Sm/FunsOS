@@ -17,6 +17,8 @@ typedef struct sig_queue_entry {
     int value;
 } sig_queue_entry_t;
 
+#define MAX_SIG_QUEUE_SIZE 32
+
 #include "signal.h"
 
 /* Forward declaration */
@@ -24,7 +26,7 @@ struct file_descriptor;
 typedef struct file_descriptor file_descriptor_t;
 
 #define MAX_PROCESSES 256
-#define MAX_OPEN_FILES 16
+#define MAX_OPEN_FILES 256
 #define DEFAULT_TIME_SLICE 10
 #define KERNEL_STACK_SIZE 8192
 #define USER_STACK_TOP 0xBFFFF000
@@ -91,7 +93,6 @@ struct pcb_t {
     uint32_t signal_frame_addr;   /* 当前信号帧地址 (用于 sigreturn) */
 
     /* 扩展信号字段（完整sigaction支持） */
-#define MAX_SIG_QUEUE_SIZE 8
     sigaction_entry_t signal_actions[32];  /* 每个信号的sigaction */
     uint32_t         sig_pending_bits[1];   /* 待处理信号位图 */
     sig_queue_entry_t sig_queue[MAX_SIG_QUEUE_SIZE]; /* 实时信号队列 */
@@ -100,6 +101,8 @@ struct pcb_t {
     uint32_t nice;
     uint8_t *comm;
     uint8_t fpu_saved;
+    uint8_t need_resched;      /* CFS: 需要重新调度标志 */
+    uint64_t exec_start;       /* CFS: 本次调度开始的执行时间 */
     uint8_t fpu_state[108];
     void *tls_data[128];  /* TLS slots for pthread_key_t */
 };

@@ -7,8 +7,8 @@
 
 #include "shader.h"
 #include "math_util.h"
-#include <stddef.h>
-#include <string.h>
+#include "stddef.h"
+#include "string.h"
 
 /* ================================================================
  *  全局状态

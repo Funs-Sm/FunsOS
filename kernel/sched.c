@@ -513,170 +513,221 @@ void sched_print_stats(void) {
  * CFS (Completely Fair Scheduler) 完全公平调度器
  * ============================================================ */
 
-/* CFS红黑树节点 - 简化为有序链表实现 */
-typedef struct cfs_node {
-    pcb_t          *proc;
-    uint64_t        vruntime;   /* 虚拟运行时间 */
-    struct cfs_node *next;
-} cfs_node_t;
-
-#define CFS_MAX_PROCS 256
 static cfs_node_t cfs_runqueue[CFS_MAX_PROCS];
-static uint32_t   cfs_count;
-static uint64_t   min_vruntime;
-static uint64_t   cfs_tick_granularity; /* 默认1ms */
+static cfs_rq_t    cfs_rq;
+static uint64_t    cfs_tick_granularity;
 
-/* 初始化CFS调度器 */
+uint32_t sched_slice(cfs_rq_t *rq) {
+    uint32_t nr = rq->nr_running + 1;
+    if (nr < 1) nr = 1;
+    uint32_t slice = sched_latency / nr;
+    if (slice < sched_min_granularity) {
+        slice = sched_min_granularity;
+    }
+    return slice;
+}
+
+int wakeup_preempt(cfs_rq_t *rq, pcb_t *se) {
+    if (rq->curr == NULL || rq->curr == se) {
+        return 0;
+    }
+    uint64_t curr_vruntime = rq->curr->vruntime;
+    uint64_t se_vruntime = se->vruntime;
+    uint64_t gran = sched_wakeup_granularity;
+
+    if (se_vruntime + gran < curr_vruntime) {
+        return 1;
+    }
+    return 0;
+}
+
 void sched_cfs_init(void) {
     for (int i = 0; i < CFS_MAX_PROCS; i++) {
         cfs_runqueue[i].proc = NULL;
         cfs_runqueue[i].vruntime = 0;
         cfs_runqueue[i].next = NULL;
     }
-    cfs_count = 0;
-    min_vruntime = 0;
-    cfs_tick_granularity = 1; /* 默认1ms粒度 */
+    cfs_rq.head = NULL;
+    cfs_rq.curr = NULL;
+    cfs_rq.min_vruntime = 0;
+    cfs_rq.nr_running = 0;
+    cfs_tick_granularity = 1;
 }
 
-/* 将进程加入CFS运行队列（按vruntime排序插入） */
-void sched_cfs_enqueue(pcb_t *proc) {
-    if (!proc || cfs_count >= CFS_MAX_PROCS) return;
-
-    /* 找到空闲槽位 */
-    int slot = -1;
+static cfs_node_t *cfs_alloc_node(void) {
     for (int i = 0; i < CFS_MAX_PROCS; i++) {
         if (cfs_runqueue[i].proc == NULL) {
-            slot = i;
-            break;
+            return &cfs_runqueue[i];
         }
     }
-    if (slot < 0) return; /* 队列满 */
-
-    /* 计算初始vruntime：继承min_vruntime或使用进程权重调整 */
-    cfs_node_t *node = &cfs_runqueue[slot];
-    node->proc = proc;
-    node->vruntime = (proc->vruntime > min_vruntime) ? proc->vruntime : min_vruntime;
-    node->next = NULL;
-
-    /* 有序链表插入：按vruntime升序排列 */
-    if (cfs_count == 0) {
-        /* 队列为空，直接作为头节点 */
-        node->next = NULL;
-    } else {
-        /* 找到合适的插入位置 */
-        cfs_node_t *prev = NULL;
-        cfs_node_t *curr = &cfs_runqueue[0]; /* 假设第一个节点是链表头 */
-
-        /* 查找实际的链表头 */
-        int head_idx = -1;
-        for (int i = 0; i < CFS_MAX_PROCS; i++) {
-            if (cfs_runqueue[i].proc != NULL) {
-                head_idx = i;
-                break;
-            }
-        }
-        if (head_idx < 0) return;
-
-        curr = &cfs_runqueue[head_idx];
-
-        while (curr && curr->vruntime < node->vruntime) {
-            prev = curr;
-            curr = curr->next;
-        }
-
-        if (prev == NULL) {
-            /* 插入到链表头部 */
-            node->next = &cfs_runqueue[head_idx];
-        } else {
-            node->next = prev->next;
-            prev->next = node;
-        }
-    }
-
-    cfs_count++;
+    return NULL;
 }
 
-/* 从CFS队列中取出vruntime最小的进程 */
-pcb_t *sched_cfs_dequeue(void) {
-    if (cfs_count == 0) return NULL;
-
-    /* 找到vruntime最小的节点（链表头） */
-    int min_idx = -1;
-    uint64_t min_val = UINT64_MAX;
-
-    for (int i = 0; i < CFS_MAX_PROCS; i++) {
-        if (cfs_runqueue[i].proc != NULL && cfs_runqueue[i].vruntime < min_val) {
-            min_val = cfs_runqueue[i].vruntime;
-            min_idx = i;
-        }
-    }
-
-    if (min_idx < 0) return NULL;
-
-    cfs_node_t *node = &cfs_runqueue[min_idx];
-    pcb_t *proc = node->proc;
-
-    /* 更新min_vruntime */
-    if (node->vruntime > min_vruntime) {
-        min_vruntime = node->vruntime;
-    }
-
-    /* 清除节点 */
+static void cfs_free_node(cfs_node_t *node) {
     node->proc = NULL;
     node->vruntime = 0;
     node->next = NULL;
-    cfs_count--;
+}
+
+void enqueue_entity(cfs_rq_t *rq, pcb_t *se) {
+    if (!rq || !se) return;
+
+    cfs_node_t *node = cfs_alloc_node();
+    if (!node) return;
+
+    node->proc = se;
+    node->vruntime = (se->vruntime > rq->min_vruntime) ? se->vruntime : rq->min_vruntime;
+    se->exec_start = sched.tick_count;
+
+    cfs_node_t *prev = NULL;
+    cfs_node_t *curr = rq->head;
+
+    while (curr && curr->vruntime < node->vruntime) {
+        prev = curr;
+        curr = curr->next;
+    }
+
+    if (prev == NULL) {
+        node->next = rq->head;
+        rq->head = node;
+    } else {
+        node->next = prev->next;
+        prev->next = node;
+    }
+
+    rq->nr_running++;
+
+    if (rq->curr != se) {
+        uint32_t slice = sched_slice(rq);
+        uint64_t curr_v = rq->curr ? rq->curr->vruntime : 0;
+        if (wakeup_preempt(rq, se)) {
+            if (rq->curr) {
+                rq->curr->need_resched = 1;
+            }
+        } else {
+            uint64_t gran = sched_wakeup_granularity;
+            if (node->vruntime + gran < curr_v) {
+                if (rq->curr) {
+                    rq->curr->need_resched = 1;
+                }
+            }
+        }
+        (void)slice;
+    }
+}
+
+pcb_t *pick_next_entity(cfs_rq_t *rq) {
+    if (!rq || rq->nr_running == 0 || rq->head == NULL) {
+        return NULL;
+    }
+
+    cfs_node_t *leftmost = rq->head;
+    pcb_t *curr = rq->curr;
+
+    if (curr != NULL && leftmost->proc != curr) {
+        uint64_t left_vruntime = leftmost->vruntime;
+        uint64_t curr_vruntime = curr->vruntime;
+
+        if (left_vruntime < curr_vruntime - sched_min_granularity) {
+            return leftmost->proc;
+        }
+    }
+
+    return leftmost->proc;
+}
+
+void task_tick_fair(cfs_rq_t *rq, pcb_t *curr) {
+    if (!rq || !curr) return;
+
+    uint64_t delta_exec = sched.tick_count - curr->exec_start;
+    uint64_t vruntime_delta = sched_calc_vruntime(curr, cfs_tick_granularity);
+    curr->vruntime += vruntime_delta;
+
+    uint32_t slice = sched_slice(rq);
+    if (delta_exec >= slice) {
+        curr->need_resched = 1;
+    }
+}
+
+void sched_cfs_enqueue(pcb_t *proc) {
+    enqueue_entity(&cfs_rq, proc);
+}
+
+static cfs_node_t *cfs_find_node(pcb_t *proc, cfs_node_t **pprev) {
+    cfs_node_t *prev = NULL;
+    cfs_node_t *curr = cfs_rq.head;
+    while (curr) {
+        if (curr->proc == proc) {
+            if (pprev) *pprev = prev;
+            return curr;
+        }
+        prev = curr;
+        curr = curr->next;
+    }
+    return NULL;
+}
+
+pcb_t *sched_cfs_dequeue(void) {
+    if (cfs_rq.nr_running == 0 || cfs_rq.head == NULL) return NULL;
+
+    pcb_t *next = pick_next_entity(&cfs_rq);
+    if (!next) return NULL;
+
+    cfs_node_t *prev = NULL;
+    cfs_node_t *node = cfs_find_node(next, &prev);
+    if (!node) return NULL;
+
+    if (prev) {
+        prev->next = node->next;
+    } else {
+        cfs_rq.head = node->next;
+    }
+
+    if (node->vruntime > cfs_rq.min_vruntime) {
+        cfs_rq.min_vruntime = node->vruntime;
+    }
+
+    pcb_t *proc = node->proc;
+    cfs_free_node(node);
+    cfs_rq.nr_running--;
 
     return proc;
 }
 
-/* 计算虚拟运行时间增量 */
 uint64_t sched_calc_vruntime(pcb_t *proc, uint64_t delta_exec) {
     if (!proc) return 0;
 
-    /* 根据进程优先级/权重计算vruntime增量
-     * 权重越高，vruntime增长越慢，获得更多CPU时间
-     * 公式: vruntime += delta_exec * 1024 / weight
-     * 这里简化为根据优先级线性调整 */
     uint32_t priority = proc->effective_priority;
-    uint64_t weight = 1024; /* 基准权重 */
+    uint64_t weight = 1024;
 
-    /* 优先级越高，权重越大 */
     if (priority > SCHED_DEFAULT_PRIORITY) {
         weight += (priority - SCHED_DEFAULT_PRIORITY) * 10;
     } else if (priority < SCHED_DEFAULT_PRIORITY) {
         weight -= (SCHED_DEFAULT_PRIORITY - priority) * 5;
-        if (weight < 100) weight = 100; /* 最小权重 */
+        if (weight < 100) weight = 100;
     }
 
     return (delta_exec * 1024) / weight;
 }
 
-/* CFS时钟滴答处理 */
 void sched_cfs_tick(pcb_t *proc) {
     if (!proc) return;
 
-    /* 更新进程的vruntime */
-    uint64_t delta = cfs_tick_granularity;
-    uint64_t vruntime_delta = sched_calc_vruntime(proc, delta);
-    proc->vruntime += vruntime_delta;
+    task_tick_fair(&cfs_rq, proc);
 
-    /* 如果时间片用完，重新入队 */
-    proc->time_slice--;
-    if (proc->time_slice <= 0 && proc->state == PROCESS_RUNNING) {
-        /* 重新加入CFS队列 */
+    if (proc->need_resched && proc->state == PROCESS_RUNNING) {
+        proc->need_resched = 0;
         proc->state = PROCESS_READY;
-        sched_cfs_enqueue(proc);
+        enqueue_entity(&cfs_rq, proc);
+        schedule();
     }
 }
 
-/* 设置进程的调度策略为CFS */
 int sched_set_policy_cfs(pcb_t *proc) {
     if (!proc) return -1;
 
     uint32_t flags = spinlock_irq_save(&sched.lock);
 
-    /* 从当前队列移除 */
     if (proc->state == PROCESS_READY) {
         if (proc->sched_policy & PROCESS_REAL_TIME) {
             int rt_level = proc->priority / 50;
@@ -689,13 +740,15 @@ int sched_set_policy_cfs(pcb_t *proc) {
         }
     }
 
-    /* 设置为CFS策略 */
     proc->sched_policy |= PROCESS_CFS;
-    proc->vruntime = min_vruntime;
+    proc->vruntime = cfs_rq.min_vruntime;
+    proc->need_resched = 0;
+    proc->exec_start = sched.tick_count;
 
-    /* 加入CFS队列 */
-    if (proc->state == PROCESS_READY || proc->state == PROCESS_RUNNING) {
-        sched_cfs_enqueue(proc);
+    if (proc->state == PROCESS_READY) {
+        enqueue_entity(&cfs_rq, proc);
+    } else if (proc->state == PROCESS_RUNNING) {
+        cfs_rq.curr = proc;
     }
 
     spinlock_irq_restore(&sched.lock, flags);
@@ -875,14 +928,14 @@ void sched_dump_queue(int queue_index) {
         }
     } else if (queue_index == -1) {
         /* 打印CFS队列 */
-        printf("CFS Queue (%d processes):\n", cfs_count);
-        for (int i = 0; i < CFS_MAX_PROCS && cfs_count > 0; i++) {
-            if (cfs_runqueue[i].proc) {
-                printf("  PID %d: %s, vruntime=%llu\n",
-                       cfs_runqueue[i].proc->pid,
-                       cfs_runqueue[i].proc->name,
-                       cfs_runqueue[i].vruntime);
-            }
+        printf("CFS Queue (%d processes):\n", cfs_rq.nr_running);
+        cfs_node_t *node = cfs_rq.head;
+        while (node) {
+            printf("  PID %d: %s, vruntime=%llu\n",
+                   node->proc->pid,
+                   node->proc->name,
+                   node->vruntime);
+            node = node->next;
         }
     } else {
         printf("Invalid queue index: %d\n", queue_index);

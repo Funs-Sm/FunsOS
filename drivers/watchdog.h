@@ -13,7 +13,7 @@
  *   - 通用软件模拟看门狗（基于定时器中断）
  */
 
-#include <stdint.h>
+#include "stdint.h"
 
 /* ---- 看门狗状态 ---- */
 typedef enum {

@@ -70,11 +70,18 @@ typedef struct {
 /* ---- 2D 绘图 API ---- */
 
 /*
- * 在窗口上绘制填充矩形
+ * 在窗口上绘制矩形轮廓
  * 参数: win - 窗口句柄; x, y, w, h - 矩形位置和尺寸; color - 颜色
  * 返回: 0 成功, -1 失败
  */
 int funsos_draw_rect(uint32_t win_handle, int x, int y, int w, int h, funsos_color_t color);
+
+/*
+ * 在窗口上绘制填充矩形
+ * 参数: win - 窗口句柄; x, y, w, h - 矩形位置和尺寸; color - 填充颜色
+ * 返回: 0 成功, -1 失败
+ */
+int funsos_fill_rect(uint32_t win_handle, int x, int y, int w, int h, funsos_color_t color);
 
 /*
  * 在窗口上绘制文本

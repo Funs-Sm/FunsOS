@@ -258,7 +258,7 @@ static void fat32_free_cluster(uint32_t cluster) {
         (uint8_t *)fat_cache + fat_sector * fs_info.bytes_per_sector);
 }
 
-int32_t fat32_read(inode_t *inode, void *buf, uint32_t count) {
+int32_t fat32_read(inode_t *inode, void *buf, uint32_t count, uint32_t offset) {
     if (!inode || !buf || !fat_cache) return -1;
 
     mutex_lock(&fat32_lock);
@@ -274,7 +274,7 @@ int32_t fat32_read(inode_t *inode, void *buf, uint32_t count) {
     uint32_t cluster_size = fs_info.sectors_per_cluster * fs_info.bytes_per_sector;
     uint32_t bytes_read = 0;
     uint32_t remaining = count;
-    if (remaining > inode->size) remaining = inode->size;
+    if (offset + remaining > inode->size) remaining = inode->size - offset;
 
     uint8_t *dst = (uint8_t *)buf;
     uint8_t *tmp = (uint8_t *)kmalloc(cluster_size);
@@ -283,17 +283,22 @@ int32_t fat32_read(inode_t *inode, void *buf, uint32_t count) {
         return -1;
     }
 
-    for (int32_t i = 0; i < chain_len && remaining > 0; i++) {
+    uint32_t start_cluster_idx = offset / cluster_size;
+    uint32_t offset_in_cluster = offset % cluster_size;
+
+    for (int32_t i = start_cluster_idx; i < chain_len && remaining > 0; i++) {
         uint32_t lba = fat32_cluster_to_lba(chain[i]);
         for (uint32_t s = 0; s < fs_info.sectors_per_cluster; s++) {
             fat32_read_sector(lba + s, tmp + s * fs_info.bytes_per_sector);
         }
 
-        uint32_t to_copy = remaining > cluster_size ? cluster_size : remaining;
-        memcpy(dst, tmp, to_copy);
+        uint32_t to_copy = remaining > cluster_size - offset_in_cluster ?
+                           cluster_size - offset_in_cluster : remaining;
+        memcpy(dst, tmp + offset_in_cluster, to_copy);
         dst += to_copy;
         bytes_read += to_copy;
         remaining -= to_copy;
+        offset_in_cluster = 0;
     }
 
     kfree(tmp);
@@ -301,14 +306,14 @@ int32_t fat32_read(inode_t *inode, void *buf, uint32_t count) {
     return (int32_t)bytes_read;
 }
 
-int32_t fat32_write(inode_t *inode, const void *buf, uint32_t count) {
+int32_t fat32_write(inode_t *inode, const void *buf, uint32_t count, uint32_t offset) {
     if (!inode || !buf || !fat_cache) return -1;
 
     mutex_lock(&fat32_lock);
 
     uint32_t start_cluster = (uint32_t)(uintptr_t)inode->private_data;
     uint32_t cluster_size = fs_info.sectors_per_cluster * fs_info.bytes_per_sector;
-    uint32_t clusters_needed = (count + cluster_size - 1) / cluster_size;
+    uint32_t clusters_needed = ((offset + count) + cluster_size - 1) / cluster_size;
 
     uint32_t chain[4096];
     int32_t chain_len = 0;
@@ -336,7 +341,10 @@ int32_t fat32_write(inode_t *inode, const void *buf, uint32_t count) {
     uint32_t bytes_written = 0;
     uint32_t remaining = count;
 
-    for (int32_t i = 0; i < chain_len && remaining > 0; i++) {
+    uint32_t start_cluster_idx = offset / cluster_size;
+    uint32_t offset_in_cluster = offset % cluster_size;
+
+    for (int32_t i = start_cluster_idx; i < chain_len && remaining > 0; i++) {
         uint8_t *tmp = (uint8_t *)kmalloc(cluster_size);
         if (!tmp) {
             mutex_unlock(&fat32_lock);
@@ -344,10 +352,17 @@ int32_t fat32_write(inode_t *inode, const void *buf, uint32_t count) {
         }
         memset(tmp, 0, cluster_size);
 
-        uint32_t to_write = remaining > cluster_size ? cluster_size : remaining;
-        memcpy(tmp, src, to_write);
-
         uint32_t lba = fat32_cluster_to_lba(chain[i]);
+        if (offset_in_cluster > 0 || remaining < cluster_size - offset_in_cluster) {
+            for (uint32_t s = 0; s < fs_info.sectors_per_cluster; s++) {
+                fat32_read_sector(lba + s, tmp + s * fs_info.bytes_per_sector);
+            }
+        }
+
+        uint32_t to_write = remaining > cluster_size - offset_in_cluster ?
+                            cluster_size - offset_in_cluster : remaining;
+        memcpy(tmp + offset_in_cluster, src, to_write);
+
         for (uint32_t s = 0; s < fs_info.sectors_per_cluster; s++) {
             fat32_write_sector(lba + s, tmp + s * fs_info.bytes_per_sector);
         }
@@ -355,10 +370,13 @@ int32_t fat32_write(inode_t *inode, const void *buf, uint32_t count) {
         src += to_write;
         bytes_written += to_write;
         remaining -= to_write;
+        offset_in_cluster = 0;
         kfree(tmp);
     }
 
-    inode->size = bytes_written > inode->size ? bytes_written : inode->size;
+    if (offset + bytes_written > inode->size) {
+        inode->size = offset + bytes_written;
+    }
     mutex_unlock(&fat32_lock);
     return (int32_t)bytes_written;
 }
@@ -370,15 +388,15 @@ static int32_t fat32_file_open(inode_t *inode, file_t *file) {
 }
 
 static int32_t fat32_file_read(file_t *file, void *buf, uint32_t count) {
-    if (!file || !file->inode) return -1;
-    int32_t ret = fat32_read(file->inode, buf, count);
+    if (!file || !file->inode) return -EBADF;
+    int32_t ret = fat32_read(file->inode, buf, count, file->offset);
     if (ret > 0) file->offset += ret;
     return ret;
 }
 
 static int32_t fat32_file_write(file_t *file, const void *buf, uint32_t count) {
-    if (!file || !file->inode) return -1;
-    int32_t ret = fat32_write(file->inode, buf, count);
+    if (!file || !file->inode) return -EBADF;
+    int32_t ret = fat32_write(file->inode, buf, count, file->offset);
     if (ret > 0) file->offset += ret;
     return ret;
 }
@@ -888,13 +906,31 @@ static int32_t fat32_vfs_rename(dentry_t *old_dir, const char *old_name,
     return 0;
 }
 
+static int32_t fat32_file_ioctl(file_t *file, uint32_t cmd, void *arg) {
+    if (!file || !file->inode) return -EBADF;
+    switch (cmd) {
+        case FIONREAD:
+            if (arg) {
+                int32_t avail = (int32_t)file->inode->size - (int32_t)file->offset;
+                if (avail < 0) avail = 0;
+                *(int32_t *)arg = avail;
+                return 0;
+            }
+            return -EINVAL;
+        case FIONBIO:
+            return 0;
+        default:
+            return -ENOSYS;
+    }
+}
+
 file_ops_t fat32_file_ops = {
     .open = fat32_file_open,
     .read = fat32_file_read,
     .write = fat32_file_write,
     .close = fat32_file_close,
     .seek = fat32_file_seek,
-    .ioctl = NULL
+    .ioctl = fat32_file_ioctl
 };
 
 int32_t fat32_mount(superblock_t *sb, void *data) {

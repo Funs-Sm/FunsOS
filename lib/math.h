@@ -14,11 +14,16 @@
 double sin(double x);
 double cos(double x);
 double tan(double x);
+float sinf(float x);
+float cosf(float x);
+float tanf(float x);
 double asin(double x);
 double acos(double x);
 double atan(double x);
 double atan2(double y, double x);
+float atan2f(float y, float x);
 double sqrt(double x);
+float sqrtf(float x);
 double pow(double base, double exp);
 double exp(double x);
 double log(double x);

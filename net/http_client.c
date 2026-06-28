@@ -326,7 +326,7 @@ void http_free_response(http_response_t *response)
  */
 
 #include "ssl_tls.h"
-#include <stdio.h>
+#include "stdio.h"
 
 #define HTTPS_DEFAULT_PORT 443
 #define HTTP_MAX_URL_LEN   2048

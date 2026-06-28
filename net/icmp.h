@@ -78,7 +78,14 @@ void icmp_init(void);
 int  icmp_send_echo_request(net_interface_t *iface, ipv4_addr_t dst,
                             uint16_t id, uint16_t seq);
 int  icmp_send_echo_reply(net_interface_t *iface, ipv4_addr_t dst,
-                          uint16_t id, uint16_t seq);
+                          uint16_t id, uint16_t seq,
+                          const void *data, uint32_t data_len);
+
+/* Traceroute callback type for Time Exceeded messages */
+typedef void (*icmp_traceroute_cb)(ipv4_addr_t from, uint8_t code,
+                                   ipv4_addr_t inner_dst, uint16_t inner_sport);
+
+void icmp_set_traceroute_callback(icmp_traceroute_cb cb);
 
 /* Error-type helpers - used by TCP, UDP, IP to signal failures. */
 int  icmp_send_dest_unreach(net_interface_t *iface, ipv4_addr_t dst,

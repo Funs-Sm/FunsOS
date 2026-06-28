@@ -88,8 +88,30 @@ typedef struct dns_stats {
     uint32_t cache_misses;
     uint32_t server_timeouts;
     uint32_t parse_errors;
+    uint32_t cname_follows;
 } dns_stats_t;
 
 dns_stats_t dns_get_stats(void);
+
+/* DNS解析结果结构 */
+typedef struct {
+    ipv4_addr_t ip;
+    char       cname[DNS_MAX_NAME];
+    uint8_t    have_ip;
+    uint8_t    have_cname;
+    uint32_t   ttl;
+} dns_result_t;
+
+/*
+ * dns_parse_response - 解析DNS响应报文
+ * 参数:
+ *   msg: DNS响应报文
+ *   len: 报文长度
+ *   expected_id: 期望的事务ID
+ *   result: 输出解析结果
+ * 返回值: 0=成功, -1=解析错误, -2=格式错误
+ */
+int dns_parse_response(const uint8_t *msg, uint32_t len,
+                       uint16_t expected_id, dns_result_t *result);
 
 #endif

@@ -4,6 +4,7 @@
 #include "stddef.h"
 
 extern dentry_t *root_dentry;
+extern dentry_t *cwd_dentry;
 extern mount_t *mount_list;
 
 int32_t path_normalize(const char *path, char *out, uint32_t out_size) {
@@ -198,14 +199,22 @@ static int32_t path_resolve_internal(const char *path, dentry_t **out, int follo
     if (path_normalize(path, work, PATH_MAX) != 0) return -1;
 
     int32_t symlink_depth = 0;
+    int is_relative = 0;
 
 restart:
     if (symlink_depth > SYMLINK_MAX_FOLLOW) return -1;
 
-    dentry_t *current = root_dentry;
-    if (work[0] != '/') return -1;
+    dentry_t *current;
+    uint32_t i;
+    if (work[0] == '/') {
+        current = root_dentry;
+        i = 1;
+    } else {
+        current = cwd_dentry ? cwd_dentry : root_dentry;
+        i = 0;
+        is_relative = 1;
+    }
 
-    uint32_t i = 1;
     while (work[i]) {
         while (work[i] == '/') i++;
         if (!work[i]) break;

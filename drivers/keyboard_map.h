@@ -9,7 +9,9 @@
 #define KEY_RSHIFT     54
 #define KEY_LCTRL      29
 #define KEY_LALT       56
+#ifndef KEY_CAPS
 #define KEY_CAPS       58
+#endif
 #define KEY_BACKSPACE  14
 #define KEY_TAB        15
 #define KEY_F1         59
@@ -34,7 +36,9 @@
 #define KEY_PGDN       81
 #define KEY_DELETE     83
 
+#ifndef KEY_EXTENDED
 #define KEY_EXTENDED   0xE0
+#endif
 
 static const char key_map_normal[KEY_MAP_SIZE] = {
     0, 27, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',

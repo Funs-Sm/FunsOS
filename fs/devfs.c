@@ -5,6 +5,7 @@
 #include "vga_text.h"
 #include "keyboard.h"
 #include "io.h"
+#include "rtc.h"
 
 static devfs_device_t *device_list = NULL;
 
@@ -12,17 +13,19 @@ static int32_t devfs_open(inode_t *inode, file_t *file);
 static int32_t devfs_read(file_t *file, void *buf, uint32_t count);
 static int32_t devfs_write(file_t *file, const void *buf, uint32_t count);
 static int32_t devfs_close(file_t *file);
+static int32_t devfs_seek(file_t *file, int32_t offset, int32_t whence);
+static int32_t devfs_ioctl(file_t *file, uint32_t cmd, void *arg);
 
 file_ops_t devfs_file_ops = {
     .open = devfs_open,
     .read = devfs_read,
     .write = devfs_write,
     .close = devfs_close,
-    .seek = NULL,
-    .ioctl = NULL
+    .seek = devfs_seek,
+    .ioctl = devfs_ioctl
 };
 
-static dentry_t *devfs_root_dentry;
+dentry_t *devfs_root_dentry;
 static inode_t *devfs_root_inode;
 
 int32_t devfs_mount_internal(superblock_t *sb, void *data) {
@@ -93,7 +96,7 @@ int32_t devfs_register(const char *name, uint32_t type, uint32_t major, uint32_t
         memset(inode, 0, sizeof(inode_t));
         inode->ino = (major << 8) | minor;
         if (type == DEVICE_BLOCK) {
-            inode->mode = FILE_MODE_DIR | FILE_MODE_READ | FILE_MODE_WRITE;
+            inode->mode = FILE_MODE_REG | FILE_MODE_READ | FILE_MODE_WRITE;
         } else {
             inode->mode = FILE_MODE_REG | FILE_MODE_READ | FILE_MODE_WRITE;
         }
@@ -188,6 +191,30 @@ static int32_t devfs_close(file_t *file) {
         return dev->ops->close(file);
     }
     return 0;
+}
+
+static int32_t devfs_seek(file_t *file, int32_t offset, int32_t whence) {
+    devfs_device_t *dev = (devfs_device_t *)file->private_data;
+    if (dev && dev->ops && dev->ops->seek) {
+        return dev->ops->seek(file, offset, whence);
+    }
+    /* For most character devices, seeking is not supported (return 0 for no-op) */
+    if (!file->inode || (file->inode->mode & FILE_MODE_DIR)) return -ENOTDIR;
+    switch (whence) {
+        case SEEK_SET: file->offset = (uint32_t)offset; break;
+        case SEEK_CUR: file->offset += offset; break;
+        case SEEK_END: file->offset = file->inode->size + offset; break;
+        default: return -EINVAL;
+    }
+    return (int32_t)file->offset;
+}
+
+static int32_t devfs_ioctl(file_t *file, uint32_t cmd, void *arg) {
+    devfs_device_t *dev = (devfs_device_t *)file->private_data;
+    if (dev && dev->ops && dev->ops->ioctl) {
+        return dev->ops->ioctl(file, cmd, arg);
+    }
+    return -ENOSYS;
 }
 
 /* ------------------------------------------------------------------ */
@@ -355,6 +382,97 @@ static file_ops_t port_ops = {
     .ioctl = NULL
 };
 
+/* Simple LCG pseudo-random number generator for /dev/random and /dev/urandom */
+static uint32_t random_seed = 0;
+
+static uint32_t dev_random_next(void) {
+    if (random_seed == 0) {
+        random_seed = rtc_get_timestamp() ^ 0xDEADBEEF;
+    }
+    random_seed = random_seed * 1103515245 + 12345;
+    return random_seed;
+}
+
+/* /dev/random - Returns pseudo-random bytes */
+static int32_t random_read(file_t *file, void *buf, uint32_t count) {
+    (void)file;
+    uint8_t *out = (uint8_t *)buf;
+    for (uint32_t i = 0; i < count; i++) {
+        if (i % 4 == 0) {
+            uint32_t r = dev_random_next();
+            out[i] = (uint8_t)(r & 0xFF);
+        } else {
+            uint32_t r = dev_random_next();
+            out[i] = (uint8_t)((r >> ((i % 4) * 8)) & 0xFF);
+        }
+    }
+    return (int32_t)count;
+}
+
+static int32_t random_write(file_t *file, const void *buf, uint32_t count) {
+    (void)file;
+    (void)buf;
+    /* Allow writing to seed the random pool */
+    if (count > 0) {
+        const uint8_t *p = (const uint8_t *)buf;
+        random_seed ^= p[0];
+        for (uint32_t i = 1; i < count; i++) {
+            random_seed = random_seed * 31 + p[i];
+        }
+    }
+    return (int32_t)count;
+}
+
+static file_ops_t random_ops = {
+    .open = NULL,
+    .read = random_read,
+    .write = random_write,
+    .close = NULL,
+    .seek = NULL,
+    .ioctl = NULL
+};
+
+/* /dev/urandom - Same as /dev/random for now (non-blocking) */
+static int32_t urandom_read(file_t *file, void *buf, uint32_t count) {
+    return random_read(file, buf, count);
+}
+
+static int32_t urandom_write(file_t *file, const void *buf, uint32_t count) {
+    return random_write(file, buf, count);
+}
+
+static file_ops_t urandom_ops = {
+    .open = NULL,
+    .read = urandom_read,
+    .write = urandom_write,
+    .close = NULL,
+    .seek = NULL,
+    .ioctl = NULL
+};
+
+/* /dev/sda, /dev/sda1, etc. - Disk device stubs */
+static int32_t disk_read(file_t *file, void *buf, uint32_t count) {
+    (void)file;
+    (void)buf;
+    (void)count;
+    return 0;
+}
+
+static int32_t disk_write(file_t *file, const void *buf, uint32_t count) {
+    (void)file;
+    (void)buf;
+    return (int32_t)count;
+}
+
+static file_ops_t disk_ops = {
+    .open = NULL,
+    .read = disk_read,
+    .write = disk_write,
+    .close = NULL,
+    .seek = NULL,
+    .ioctl = NULL
+};
+
 void devfs_create_std_devices(void) {
     devfs_register("null",    DEVICE_CHAR, 1, 3, &null_ops,    NULL);
     devfs_register("zero",    DEVICE_CHAR, 1, 5, &zero_ops,    NULL);
@@ -363,4 +481,15 @@ void devfs_create_std_devices(void) {
     devfs_register("kbd",     DEVICE_CHAR, 4, 0, &kbd_ops,     NULL);
     devfs_register("mem",     DEVICE_CHAR, 1, 1, &mem_ops,     NULL);
     devfs_register("port",    DEVICE_CHAR, 1, 4, &port_ops,    NULL);
+    devfs_register("random",  DEVICE_CHAR, 1, 8, &random_ops,  NULL);
+    devfs_register("urandom", DEVICE_CHAR, 1, 9, &urandom_ops, NULL);
+
+    /* Disk devices (stubs) */
+    devfs_register("sda",     DEVICE_BLOCK, 8, 0, &disk_ops,   NULL);
+    devfs_register("sda1",    DEVICE_BLOCK, 8, 1, &disk_ops,   NULL);
+    devfs_register("sda2",    DEVICE_BLOCK, 8, 2, &disk_ops,   NULL);
+    devfs_register("sda3",    DEVICE_BLOCK, 8, 3, &disk_ops,   NULL);
+    devfs_register("sda4",    DEVICE_BLOCK, 8, 4, &disk_ops,   NULL);
+    devfs_register("sdb",     DEVICE_BLOCK, 8, 16, &disk_ops,  NULL);
+    devfs_register("sdb1",    DEVICE_BLOCK, 8, 17, &disk_ops,  NULL);
 }

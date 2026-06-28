@@ -1,6 +1,7 @@
 #include "dhcp.h"
 #include "udp.h"
 #include "ip.h"
+#include "arp.h"
 #include "ethernet.h"
 #include "kheap.h"
 #include "string.h"
@@ -12,10 +13,31 @@ static dhcp_lease_t   lease;
 static net_interface_t *bound_iface;
 static uint8_t         pending_options[64];
 static uint8_t         pending_options_len;
+static uint8_t         dhcp_configured;
 
-/* Forward declarations for the UDP socket used to listen for replies. */
-static void dhcp_udp_recv(udp_socket_t *u, void *buf, uint32_t len,
-                          ipv4_addr_t from_ip, uint16_t from_port);
+static void arp_send_gratuitous(net_interface_t *iface, ipv4_addr_t ip) {
+    if (!iface) return;
+    arp_header_t arp;
+    memset(&arp, 0, sizeof(arp));
+    arp.htype = ARP_HW_ETHERNET;
+    arp.ptype = ARP_PROTO_IP;
+    arp.hlen = 6;
+    arp.plen = 4;
+    arp.opcode = ARP_OP_REQUEST;
+    arp.sender_mac = iface->mac;
+    arp.sender_ip = ip;
+    arp.target_ip = ip;
+    arp.target_mac.bytes[0] = 0xFF; arp.target_mac.bytes[1] = 0xFF;
+    arp.target_mac.bytes[2] = 0xFF; arp.target_mac.bytes[3] = 0xFF;
+    arp.target_mac.bytes[4] = 0xFF; arp.target_mac.bytes[5] = 0xFF;
+
+    mac_addr_t broadcast;
+    broadcast.bytes[0] = 0xFF; broadcast.bytes[1] = 0xFF;
+    broadcast.bytes[2] = 0xFF; broadcast.bytes[3] = 0xFF;
+    broadcast.bytes[4] = 0xFF; broadcast.bytes[5] = 0xFF;
+
+    ethernet_send(iface, broadcast, ETH_P_ARP, &arp, sizeof(arp_header_t));
+}
 
 static uint32_t now_ms(void) { return timer_get_ticks() * 10U; }
 
@@ -26,6 +48,7 @@ void dhcp_client_init(void) {
     memset(&lease, 0, sizeof(lease));
     bound_iface = NULL;
     lease.state = DHCP_STATE_IDLE;
+    dhcp_configured = 0;
 }
 
 int dhcp_client_start(net_interface_t *iface) {
@@ -36,7 +59,7 @@ int dhcp_client_start(net_interface_t *iface) {
     lease.xid          = DHCP_XID_DEFAULT + (now_ms() & 0xFFFF);
     lease.started_ms   = now_ms();
     lease.attempts     = 0;
-    /* Build parameter request list. */
+    dhcp_configured    = 0;
     pending_options_len = 0;
     pending_options[pending_options_len++] = DHCP_OPT_SUBNET;
     pending_options[pending_options_len++] = DHCP_OPT_ROUTER;
@@ -135,6 +158,112 @@ static ipv4_addr_t read_be32(const uint8_t *p) {
 /* ------------------------------------------------------------------ */
 /*  Receive                                                            */
 /* ------------------------------------------------------------------ */
+
+void dhcp_udp_recv(void *data, uint32_t length, ipv4_addr_t src_ip, uint16_t src_port) {
+    (void)src_port;
+    const dhcp_packet_t *pkt = (const dhcp_packet_t *)data;
+    if (!pkt || length < sizeof(dhcp_packet_t)) return;
+
+    if (lease.state == DHCP_STATE_INIT || lease.state == DHCP_STATE_BOUND) return;
+
+    if (pkt->op != DHCP_OP_REPLY) return;
+    if (pkt->xid != lease.xid) return;
+    if (!bound_iface) return;
+    if (pkt->hlen != 6) return;
+    if (memcmp(pkt->chaddr, bound_iface->mac.bytes, 6) != 0) return;
+
+    const uint8_t *opt = pkt->options + 4;
+    uint32_t opt_len = sizeof(pkt->options) - 4;
+    uint8_t msg_type = 0;
+    ipv4_addr_t subnet_mask = {0};
+    ipv4_addr_t router = {0};
+    ipv4_addr_t dns[DHCP_MAX_DNS];
+    uint8_t dns_count = 0;
+    uint32_t lease_secs = 0;
+    ipv4_addr_t server_id = {0};
+    memset(dns, 0, sizeof(dns));
+
+    uint32_t i = 0;
+    while (i < opt_len) {
+        uint8_t k = opt[i++];
+        if (k == DHCP_OPT_PAD) continue;
+        if (k == DHCP_OPT_END) break;
+        if (i >= opt_len) break;
+        uint8_t l = opt[i++];
+        if (i + l > opt_len) break;
+        switch (k) {
+        case DHCP_OPT_MSGTYPE:
+            if (l >= 1) msg_type = opt[i];
+            break;
+        case DHCP_OPT_SUBNET:
+            if (l == 4) subnet_mask = read_be32(&opt[i]);
+            break;
+        case DHCP_OPT_ROUTER:
+            if (l == 4) router = read_be32(&opt[i]);
+            break;
+        case DHCP_OPT_DNS:
+            if (l >= 4 && (l % 4) == 0) {
+                dns_count = l / 4;
+                if (dns_count > DHCP_MAX_DNS) dns_count = DHCP_MAX_DNS;
+                for (uint8_t j = 0; j < dns_count; j++)
+                    dns[j] = read_be32(&opt[i + j * 4]);
+            }
+            break;
+        case DHCP_OPT_LEASE:
+            if (l == 4) {
+                lease_secs = ((uint32_t)opt[i] << 24) | ((uint32_t)opt[i+1] << 16) |
+                             ((uint32_t)opt[i+2] << 8) | (uint32_t)opt[i+3];
+            }
+            break;
+        case DHCP_OPT_SERVER:
+            if (l == 4) server_id = read_be32(&opt[i]);
+            break;
+        default:
+            break;
+        }
+        i += l;
+    }
+
+    if (lease.state == DHCP_STATE_SELECTING) {
+        if (msg_type == DHCP_MSG_OFFER) {
+            lease.offered_ip = pkt->yiaddr;
+            if (server_id.addr != 0) lease.server_id = server_id;
+            lease.state = DHCP_STATE_REQUESTING;
+            lease.retries = 0;
+            dhcp_send_request();
+        }
+        return;
+    }
+
+    if (lease.state == DHCP_STATE_REQUESTING) {
+        if (msg_type == DHCP_MSG_ACK) {
+            lease.offered_ip = pkt->yiaddr;
+            if (server_id.addr != 0) lease.server_id = server_id;
+            if (subnet_mask.addr != 0) lease.subnet = subnet_mask;
+            if (router.addr != 0) lease.router = router;
+            for (uint8_t j = 0; j < dns_count; j++) lease.dns[j] = dns[j];
+            lease.dns_count = dns_count;
+            if (lease_secs > 0) {
+                lease.lease_obtained_ms = now_ms();
+                lease.lease_expire_ms = lease.lease_obtained_ms + lease_secs * 1000U;
+                lease.lease_t1_ms = lease.lease_obtained_ms + (lease_secs / 2U) * 1000U;
+                lease.lease_t2_ms = lease.lease_obtained_ms + (lease_secs * 7U / 8U) * 1000U;
+            }
+            net_set_interface_address(bound_iface, lease.offered_ip, lease.subnet, lease.router);
+            arp_send_gratuitous(bound_iface, lease.offered_ip);
+            dhcp_configured = 1;
+            lease.state = DHCP_STATE_BOUND;
+            lease.retries = 0;
+        } else if (msg_type == DHCP_MSG_NAK) {
+            lease.state = DHCP_STATE_INIT;
+            lease.retries = 0;
+            lease.attempts++;
+            dhcp_configured = 0;
+            if (lease.attempts < 4) dhcp_send_discover();
+        }
+        return;
+    }
+}
 
 void dhcp_handle_packet(const dhcp_packet_t *pkt) {
     if (!pkt || pkt->op != DHCP_OP_REPLY) return;

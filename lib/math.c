@@ -204,3 +204,9 @@ int isinf(double x) {
 int isfinite(double x) {
     return !isnan(x) && !isinf(x);
 }
+
+float sinf(float x) { return (float)sin((double)x); }
+float cosf(float x) { return (float)cos((double)x); }
+float tanf(float x) { return (float)tan((double)x); }
+float sqrtf(float x) { return (float)sqrt((double)x); }
+float atan2f(float y, float x) { return (float)atan2((double)y, (double)x); }

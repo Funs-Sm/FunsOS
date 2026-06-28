@@ -156,45 +156,86 @@ a20_wait_kbd1:
 a20_done:
     MOV AL, 0x35
     CALL debug_char
+
+;------------------------------------------------------------------
+; Load 8x16 ROM font into VGA character generator RAM (plane 2).
+; Must be done BEFORE setting VBE graphics mode (while still in text
+; mode) because INT 10h AH=11h is a text-mode BIOS call. Doing this
+; after setting VBE mode can disrupt the graphics state.
+; The kernel uses software font rendering on the framebuffer, so
+; this font is only needed as a fallback for VGA text mode.
+;------------------------------------------------------------------
+    MOV AX, 0x1112          ; INT 10h AH=11h AL=12h: load 8x16 ROM font
+    MOV BL, 0              ; block 0 of character generator
+    MOV BH, 16             ; 16 bytes per character (8x16 font)
+    INT 10h
+
     MOV SI, msg_vesa
     CALL print_string_16
 
+; Try 32bpp (ARGB) linear framebuffer modes first, highest resolution first.
+; Mode numbers: 0x41XX = LFB (bit14=1) + VBE mode 0x1XX.
+; QEMU/Bochs VBE extended 32-bit modes:
+;   0x4145 = 1280x1024x32 LFB
+;   0x4144 = 1024x768x32 LFB
+;   0x4143 = 800x600x32 LFB
+;   0x4142 = 640x480x32 LFB
+; Standard 24bpp modes as fallback:
+;   0x4118 = 1024x768x24 LFB
+;   0x4115 = 800x600x24 LFB
+;   0x4112 = 640x480x24 LFB
+;   0x0013 = 320x200x8 (VGA, last resort)
+
+    ; 1280x1024 32bpp
     MOV AX, 0x4F02
-    MOV BX, 0x4112
+    MOV BX, 0x4145
     INT 10h
     CMP AX, 0x004F
     JE vesa_ok
 
+    ; 1024x768 32bpp
     MOV AX, 0x4F02
-    MOV BX, 0x4115
+    MOV BX, 0x4144
     INT 10h
     CMP AX, 0x004F
     JE vesa_ok
 
+    ; 800x600 32bpp
+    MOV AX, 0x4F02
+    MOV BX, 0x4143
+    INT 10h
+    CMP AX, 0x004F
+    JE vesa_ok
+
+    ; 640x480 32bpp
+    MOV AX, 0x4F02
+    MOV BX, 0x4142
+    INT 10h
+    CMP AX, 0x004F
+    JE vesa_ok
+
+    ; 1024x768 24bpp fallback
     MOV AX, 0x4F02
     MOV BX, 0x4118
     INT 10h
     CMP AX, 0x004F
     JE vesa_ok
 
+    ; 800x600 24bpp fallback
     MOV AX, 0x4F02
-    MOV BX, 0x411B
+    MOV BX, 0x4115
     INT 10h
     CMP AX, 0x004F
     JE vesa_ok
 
+    ; 640x480 24bpp fallback
     MOV AX, 0x4F02
-    MOV BX, 0x4117
+    MOV BX, 0x4112
     INT 10h
     CMP AX, 0x004F
     JE vesa_ok
 
-    MOV AX, 0x4F02
-    MOV BX, 0x4103
-    INT 10h
-    CMP AX, 0x004F
-    JE vesa_ok
-
+    ; VGA mode 13h (320x200 8-bit) last resort
     MOV AX, 0x0013
     INT 0x10
 
@@ -215,19 +256,23 @@ vesa_ok:
     CMP AX, 0x004F
     JNE .vesa_no_info
 
-    MOV DWORD [ES:0x700], 0xB007F1E0
+    ; Store VBE magic and parameters at physical address 0x800.
+    ; Note: 0x700 is INSIDE the kernel info block (0x600-0x7FF) which is
+    ; overwritten by the disk read at step 271-278.  Using 0x800 which is
+    ; safely after the kernel info block and before the VBE mode info at 0x900.
+    MOV DWORD [ES:0x800], 0xB007F1E0
     MOVZX EAX, CX
-    MOV [ES:0x704], EAX
+    MOV [ES:0x804], EAX
     MOV EAX, [ES:0x0900 + 0x28]
-    MOV [ES:0x708], EAX
+    MOV [ES:0x808], EAX
     MOVZX EAX, WORD [ES:0x0900 + 0x12]
-    MOV [ES:0x70C], EAX
+    MOV [ES:0x80C], EAX
     MOVZX EAX, WORD [ES:0x0900 + 0x14]
-    MOV [ES:0x710], EAX
+    MOV [ES:0x810], EAX
     MOVZX EAX, BYTE [ES:0x0900 + 0x19]
-    MOV [ES:0x714], EAX
+    MOV [ES:0x814], EAX
     MOVZX EAX, WORD [ES:0x0900 + 0x10]
-    MOV [ES:0x718], EAX
+    MOV [ES:0x818], EAX
     POP ES
     JMP .vesa_info_done
 
@@ -240,28 +285,16 @@ vesa_ok:
     CALL debug_char
 
 ;------------------------------------------------------------------
-; Load 8x16 ROM font into VGA character generator RAM (plane 2).
-; Must be done in real mode via BIOS INT 10h AH=11h before we
-; switch to protected mode.  Without this, the CGRAM contains
-; garbage from the VBE graphics mode and text output is garbled.
+; For CLI mode: switch back to VGA text mode 3 now that VBE info
+; is saved. BIOS INT 10h AH=00 AL=03 properly resets all VGA
+; registers to 80x25 16-color text mode, so the text buffer at
+; 0xB8000 becomes visible and the shell can output directly.
+; The kernel will force VGA text mode anyway, but doing the mode
+; switch here via BIOS (the only reliable way while in real mode)
+; ensures the display hardware is in a known good state.
 ;------------------------------------------------------------------
-    MOV AX, 0x1112          ; INT 10h AH=11h AL=12h: load 8x16 ROM font
-    MOV BL, 0              ; block 0 of character generator
-    MOV BH, 16             ; 16 bytes per character (8x16 font)
-    INT 10h
-
-;------------------------------------------------------------------
-; Switch to VGA text mode 3 (80x25) before entering protected mode.
-; This ensures:
-;   - CRTC registers are correctly programmed for text output
-;   - Standard 8x16 ROM font is loaded into CGRAM (plane 2)
-;   - Text buffer at 0xB8000 is cleared and ready
-;   - All timing/sequencer registers are in known-good state
-;
-; The kernel will use this text-mode display when VBE is unavailable.
-;------------------------------------------------------------------
-    MOV AX, 0x0003          ; INT 10h: set video mode = text mode 3 (80x25)
-    INT 10h
+    MOV AX, 0x0003
+    INT 0x10
 
 ;------------------------------------------------------------------
 ; Read kernel info block from sector 1 (written by mkimg.py)

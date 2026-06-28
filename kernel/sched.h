@@ -73,6 +73,9 @@ static inline void sched_block_current(int reason) {
  * ============================================================ */
 
 #define CFS_MAX_PROCS 256
+#define sched_min_granularity  10   /* 最小调度粒度 (tick) */
+#define sched_latency          20   /* 调度周期 (tick) */
+#define sched_wakeup_granularity 4  /* 唤醒抢占粒度 (tick) */
 
 typedef struct cfs_node {
     pcb_t          *proc;
@@ -80,12 +83,26 @@ typedef struct cfs_node {
     struct cfs_node *next;
 } cfs_node_t;
 
+typedef struct cfs_rq {
+    cfs_node_t *head;           /* vruntime最小的节点 (leftmost) */
+    pcb_t      *curr;           /* 当前运行的进程 */
+    uint64_t    min_vruntime;   /* CFS队列最小虚拟运行时间 */
+    uint32_t    nr_running;     /* 队列中运行进程数 */
+} cfs_rq_t;
+
 void sched_cfs_init(void);
 void sched_cfs_enqueue(pcb_t *proc);
 pcb_t *sched_cfs_dequeue(void);
 uint64_t sched_calc_vruntime(pcb_t *proc, uint64_t delta_exec);
 void sched_cfs_tick(pcb_t *proc);
 int sched_set_policy_cfs(pcb_t *proc);
+
+/* CFS 标准接口 (enqueue_entity/pick_next_entity/task_tick_fair) */
+void enqueue_entity(cfs_rq_t *rq, pcb_t *se);
+pcb_t *pick_next_entity(cfs_rq_t *rq);
+void task_tick_fair(cfs_rq_t *rq, pcb_t *curr);
+uint32_t sched_slice(cfs_rq_t *rq);
+int wakeup_preempt(cfs_rq_t *rq, pcb_t *se);
 
 /* ============================================================
  * 负载均衡模块

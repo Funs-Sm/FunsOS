@@ -103,4 +103,6 @@ int  dhcp_client_is_bound(void);
 const dhcp_lease_t *dhcp_client_get_lease(void);
 ipv4_addr_t dhcp_get_ip(void);
 
+void dhcp_udp_recv(void *data, uint32_t length, ipv4_addr_t src_ip, uint16_t src_port);
+
 #endif

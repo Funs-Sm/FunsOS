@@ -37,6 +37,13 @@ void keyboard_init(void) {
 
 void keyboard_handler(regs_t *regs) {
     (void)regs;
+    uint8_t status = inb(0x64);
+
+    if (status & 0x20) {
+        inb(0x60);
+        return;
+    }
+
     uint8_t scancode = inb(0x60);
 
     if (scancode == 0xE0) {
@@ -112,10 +119,14 @@ void keyboard_handler(regs_t *regs) {
  * Reads port 0x64 for status, 0x60 for data, processes scancode
  * and puts event into buffer. Returns 1 if key processed. */
 int keyboard_poll(void) {
-    /* Check if keyboard data is available (bit 0 of status reg) */
     uint8_t status = inb(0x64);
     if (!(status & 0x01)) {
-        return 0;  /* No data available */
+        return 0;
+    }
+
+    if (status & 0x20) {
+        inb(0x60);
+        return 0;
     }
 
     uint8_t scancode = inb(0x60);

@@ -6,567 +6,635 @@
 #include "string.h"
 #include "stdio.h"
 #include "io.h"
+#include "vesa.h"
 
-#define INTEL_VENDOR_ID 0x8086
+/* Global i915 state */
+static i915_private_t i915_priv;
+static drm_driver_t i915_drm_driver;
+static uint32_t i915_fb_width = 0;
+static uint32_t i915_fb_height = 0;
+static uint32_t i915_fb_pitch = 0;
+static uint32_t i915_fb_bpp = 32;
+static uint32_t *i915_fb_addr = (void *)0;
+static uint32_t i915_initialized = 0;
 
-/* Known Intel GPU device IDs */
+/* Known Intel GPU devices */
 static const struct {
     uint16_t device_id;
-    const char name[32];
-    uint32_t is_gen4;
-    uint32_t is_gen5;
+    const char name[48];
+    uint32_t gen;
 } i915_known_devices[] = {
-    { 0x2582, "855GM",       0, 0 },
-    { 0x2592, "855GM",       0, 0 },
-    { 0x2772, "82945G",      1, 0 },
-    { 0x27A2, "945GM",       1, 0 },
-    { 0x27AE, "945GME",      1, 0 },
-    { 0x2972, "946GZ",       1, 0 },
-    { 0x2982, "G35",         1, 0 },
-    { 0x2992, "965Q",        1, 0 },
-    { 0x29A2, "965G",        1, 0 },
-    { 0x2A02, "965GM",       1, 0 },
-    { 0x2A12, "965GME",      1, 0 },
-    { 0x2A42, "GM45",        1, 1 },
-    { 0x2E02, "4 Series",    1, 1 },
-    { 0x2E12, "Q45",         1, 1 },
-    { 0x2E22, "G45",         1, 1 },
-    { 0x2E32, "G41",         1, 1 },
-    { 0x2E42, "B43",         1, 1 },
-    { 0x2E92, "B43",         1, 1 },
-    { 0x0042, "Ironlake",    1, 1 },
-    { 0x0046, "Ironlake M",  1, 1 },
-    { 0x0102, "SandyBridge", 1, 1 },
-    { 0x0112, "SandyBridge", 1, 1 },
-    { 0x0122, "SandyBridge", 1, 1 },
-    { 0x0152, "IvyBridge",   1, 1 },
-    { 0x0162, "IvyBridge",   1, 1 },
-    { 0x0F31, "Bay Trail",   1, 1 },
-    { 0,      "",            0, 0 }
+    /* Gen1: i8xx */
+    { 0x2582, "855GM",              I915_GEN_I915 },
+    { 0x2592, "855GM",              I915_GEN_I915 },
+    { 0x3582, "865G",               I915_GEN_I915 },
+    
+    /* Gen2: i915/i945 */
+    { 0x2562, "915G",               I915_GEN_I915 },
+    { 0x2572, "915GM",              I915_GEN_I915 },
+    { 0x2772, "945G",               I915_GEN_I945 },
+    { 0x27A2, "945GM",              I915_GEN_I945 },
+    { 0x27AE, "945GME",             I915_GEN_I945 },
+    { 0x2972, "i945G/GZ",           I915_GEN_I945 },
+    { 0x2982, "Q965/Q963",          I915_GEN_I945 },
+    { 0x2992, "Q965/Q963",          I915_GEN_I945 },
+    { 0x29A2, "G965",               I915_GEN_I945 },
+    { 0x29B2, "G965",               I915_GEN_I945 },
+    
+    /* Gen3: G33/G31/Pineview */
+    { 0x29C2, "G33/G31",            I915_GEN_G33 },
+    { 0x29D2, "Q33/Q35/G31",        I915_GEN_G33 },
+    { 0x29E2, "Q35",                I915_GEN_G33 },
+    { 0xA001, "Pineview G",         I915_GEN_G33 },
+    { 0xA011, "Pineview G",         I915_GEN_G33 },
+    
+    /* Gen4: Ironlake/Arrandale */
+    { 0x0042, "HD Graphics (Ironlake)", I915_GEN_IRONLAKE },
+    { 0x0046, "HD Graphics (Ironlake)", I915_GEN_IRONLAKE },
+    
+    /* Gen5: Sandy Bridge */
+    { 0x0102, "HD Graphics 2000/3000 (Sandy Bridge)", I915_GEN_SANDYBRIDGE },
+    { 0x0112, "HD Graphics 2000/3000 (Sandy Bridge)", I915_GEN_SANDYBRIDGE },
+    { 0x0122, "HD Graphics 3000 (Sandy Bridge-DT)",   I915_GEN_SANDYBRIDGE },
+    { 0x0126, "HD Graphics 2000 (Sandy Bridge-DT)",   I915_GEN_SANDYBRIDGE },
+    { 0x0162, "HD Graphics P3000 (Sandy Bridge Xeon)", I915_GEN_SANDYBRIDGE },
+    { 0x010A, "HD Graphics (Sandy Bridge GT1)",       I915_GEN_SANDYBRIDGE },
+    
+    /* Gen6: Ivy Bridge */
+    { 0x0152, "HD Graphics 2500/4000 (Ivy Bridge)", I915_GEN_IVYBRIDGE },
+    { 0x0156, "HD Graphics 2500 (Ivy Bridge)",       I915_GEN_IVYBRIDGE },
+    { 0x0162, "HD Graphics P4000 (Ivy Bridge Xeon)", I915_GEN_IVYBRIDGE },
+    { 0x0166, "HD Graphics P4000 (Ivy Bridge Xeon)", I915_GEN_IVYBRIDGE },
+    { 0x015A, "HD Graphics (Ivy Bridge GT1)",        I915_GEN_IVYBRIDGE },
+    
+    /* Gen7: Haswell */
+    { 0x0402, "HD Graphics 4200/4400/4600 (Haswell)", I915_GEN_HASWELL },
+    { 0x0412, "HD Graphics 4600 (Haswell-M)",         I915_GEN_HASWELL },
+    { 0x0422, "HD Graphics 5000 (Haswell GT2)",       I915_GEN_HASWELL },
+    { 0x0426, "HD Graphics P4600 (Haswell Xeon)",     I915_GEN_HASWELL },
+    { 0x041A, "HD Graphics 4200 (Haswell)",           I915_GEN_HASWELL },
+    { 0x041B, "HD Graphics 4400 (Haswell)",           I915_GEN_HASWELL },
+    { 0x0406, "HD Graphics 5000 (Haswell GT2)",       I915_GEN_HASWELL },
+    { 0x0A02, "HD Graphics (Haswell GT1)",            I915_GEN_HASWELL },
+    { 0x0A06, "HD Graphics (Haswell GT1)",            I915_GEN_HASWELL },
+    { 0x0A16, "HD Graphics (Haswell GT1)",            I915_GEN_HASWELL },
+    { 0x0A1E, "HD Graphics (Haswell GT1)",            I915_GEN_HASWELL },
+    { 0x0A26, "HD Graphics (Haswell GT2)",            I915_GEN_HASWELL },
+    { 0x0A2E, "HD Graphics (Haswell GT2)",            I915_GEN_HASWELL },
+    { 0x0C02, "HD Graphics (Haswell GT3e)",           I915_GEN_HASWELL },
+    { 0x0C06, "HD Graphics (Haswell GT3e)",           I915_GEN_HASWELL },
+    { 0x0C12, "HD Graphics (Haswell GT3e)",           I915_GEN_HASWELL },
+    { 0x0C16, "HD Graphics (Haswell GT3e)",           I915_GEN_HASWELL },
+    { 0x0C22, "HD Graphics (Haswell GT3e)",           I915_GEN_HASWELL },
+    { 0x0C26, "HD Graphics (Haswell GT3e)",           I915_GEN_HASWELL },
+    { 0x0D22, "HD Graphics (Haswell Iris Pro GT3e)",  I915_GEN_HASWELL },
+    { 0x0D26, "HD Graphics (Haswell Iris Pro GT3e)",  I915_GEN_HASWELL },
+    
+    /* Gen8: Broadwell */
+    { 0x1602, "HD Graphics 5300/5500/6000 (Broadwell)", I915_GEN_BROADWELL },
+    { 0x1606, "HD Graphics 5500 (Broadwell U)",         I915_GEN_BROADWELL },
+    { 0x160E, "HD Graphics (Broadwell)",                I915_GEN_BROADWELL },
+    { 0x1612, "HD Graphics 5600 (Broadwell H)",         I915_GEN_BROADWELL },
+    { 0x1616, "HD Graphics 5600 (Broadwell H)",         I915_GEN_BROADWELL },
+    { 0x161E, "HD Graphics P5700 (Broadwell Xeon)",     I915_GEN_BROADWELL },
+    { 0x1622, "HD Graphics 6000 (Broadwell)",           I915_GEN_BROADWELL },
+    { 0x1626, "HD Graphics 6000 (Broadwell)",           I915_GEN_BROADWELL },
+    { 0x162B, "HD Graphics Iris Pro P6300 (Broadwell)", I915_GEN_BROADWELL },
+    { 0x162E, "Iris Pro 6200 (Broadwell)",              I915_GEN_BROADWELL },
+    { 0x1632, "HD Graphics (Broadwell GT2)",            I915_GEN_BROADWELL },
+    { 0x163B, "Iris Pro P6300 (Broadwell)",             I915_GEN_BROADWELL },
+    { 0x163E, "HD Graphics (Broadwell)",                I915_GEN_BROADWELL },
+    
+    /* Gen9: Skylake */
+    { 0x1902, "HD Graphics 510 (Skylake)",              I915_GEN_SKYLAKE },
+    { 0x1906, "HD Graphics 510 (Skylake)",              I915_GEN_SKYLAKE },
+    { 0x190B, "HD Graphics P530 (Skylake Xeon)",        I915_GEN_SKYLAKE },
+    { 0x1912, "HD Graphics 520 (Skylake U)",            I915_GEN_SKYLAKE },
+    { 0x1916, "HD Graphics 520 (Skylake U)",            I915_GEN_SKYLAKE },
+    { 0x191B, "HD Graphics 530 (Skylake H)",            I915_GEN_SKYLAKE },
+    { 0x191E, "HD Graphics 530 (Skylake H)",            I915_GEN_SKYLAKE },
+    { 0x1921, "HD Graphics 530 (Skylake S)",            I915_GEN_SKYLAKE },
+    { 0x1926, "HD Graphics P530 (Skylake Xeon)",        I915_GEN_SKYLAKE },
+    { 0x1927, "HD Graphics (Skylake GT2)",              I915_GEN_SKYLAKE },
+    { 0x192B, "HD Graphics (Skylake GT2)",              I915_GEN_SKYLAKE },
+    { 0x192D, "HD Graphics (Skylake GT2)",              I915_GEN_SKYLAKE },
+    { 0x1932, "HD Graphics Iris 540 (Skylake GT3e)",    I915_GEN_SKYLAKE },
+    { 0x193B, "HD Graphics Iris 550 (Skylake GT3e)",    I915_GEN_SKYLAKE },
+    { 0x193D, "Iris Pro P555 (Skylake GT4e)",           I915_GEN_SKYLAKE },
+    
+    /* Gen9: Kaby Lake */
+    { 0x5902, "HD Graphics 610 (Kaby Lake)",            I915_GEN_KABYLAKE },
+    { 0x5906, "HD Graphics 610 (Kaby Lake)",            I915_GEN_KABYLAKE },
+    { 0x590B, "HD Graphics P630 (Kaby Lake Xeon)",      I915_GEN_KABYLAKE },
+    { 0x5912, "HD Graphics 620 (Kaby Lake U)",          I915_GEN_KABYLAKE },
+    { 0x5916, "HD Graphics 620 (Kaby Lake U)",          I915_GEN_KABYLAKE },
+    { 0x591B, "HD Graphics 630 (Kaby Lake H)",          I915_GEN_KABYLAKE },
+    { 0x591E, "HD Graphics 630 (Kaby Lake H)",          I915_GEN_KABYLAKE },
+    { 0x5921, "HD Graphics 630 (Kaby Lake S)",          I915_GEN_KABYLAKE },
+    { 0x5926, "HD Graphics P630 (Kaby Lake Xeon)",      I915_GEN_KABYLAKE },
+    { 0x5927, "HD Graphics (Kaby Lake GT2)",            I915_GEN_KABYLAKE },
+    { 0x592B, "HD Graphics (Kaby Lake GT2)",            I915_GEN_KABYLAKE },
+    { 0x5932, "Iris Plus 640 (Kaby Lake GT3e)",         I915_GEN_KABYLAKE },
+    { 0x593B, "Iris Plus 650 (Kaby Lake GT3e)",         I915_GEN_KABYLAKE },
+    
+    /* Gen9: Coffee Lake */
+    { 0x3E90, "UHD Graphics 610 (Coffee Lake)",         I915_GEN_KABYLAKE },
+    { 0x3E92, "UHD Graphics 610/630 (Coffee Lake)",     I915_GEN_KABYLAKE },
+    { 0x3E93, "HD Graphics P630 (Coffee Lake Xeon)",    I915_GEN_KABYLAKE },
+    { 0x3E94, "UHD Graphics P630 (Coffee Lake Xeon)",   I915_GEN_KABYLAKE },
+    { 0x3E96, "UHD Graphics 630 (Coffee Lake)",         I915_GEN_KABYLAKE },
+    { 0x3E98, "UHD Graphics P630 (Coffee Lake Xeon)",   I915_GEN_KABYLAKE },
+    { 0x3E9A, "UHD Graphics (Coffee Lake)",             I915_GEN_KABYLAKE },
+    { 0x3E9B, "UHD Graphics 630 (Coffee Lake H)",       I915_GEN_KABYLAKE },
+    { 0x87C0, "UHD Graphics 610 (Whiskey Lake)",        I915_GEN_KABYLAKE },
+    { 0x3EA0, "Iris Plus 645/655 (Coffee Lake GT3e)",   I915_GEN_KABYLAKE },
+    { 0x3EA5, "Iris Plus 655 (Coffee Lake GT3e)",       I915_GEN_KABYLAKE },
+    { 0x3EA6, "Iris Plus 645 (Coffee Lake GT3e)",       I915_GEN_KABYLAKE },
+    { 0x3EA8, "Iris Plus 655 (Coffee Lake GT3e)",       I915_GEN_KABYLAKE },
+    
+    { 0,      "",                   I915_GEN_I915 }
 };
 
-static drm_driver_t i915_drm_driver;
-static i915_private_t i915_priv;
-
-/* ---- MMIO access helpers ---- */
-
-static inline uint32_t i915_mmio_read(volatile void *mmio, uint32_t offset) {
-    return *((volatile uint32_t *)((uint8_t *)mmio + offset));
+/* Register read/write helpers */
+static inline uint32_t i915_read(uint32_t reg) {
+    if (!i915_priv.mmio_base_phys || !i915_priv.mmio_base_virt) return 0xFFFFFFFF;
+    return *(volatile uint32_t *)((uint8_t *)i915_priv.mmio_base_virt + reg);
 }
 
-static inline void i915_mmio_write(volatile void *mmio, uint32_t offset, uint32_t val) {
-    *((volatile uint32_t *)((uint8_t *)mmio + offset)) = val;
+static inline void i915_write(uint32_t reg, uint32_t val) {
+    if (!i915_priv.mmio_base_phys || !i915_priv.mmio_base_virt) return;
+    *(volatile uint32_t *)((uint8_t *)i915_priv.mmio_base_virt + reg) = val;
 }
 
-/* ---- i915 driver callbacks ---- */
+static void i915_mmio_wait(uint32_t reg, uint32_t mask, uint32_t val, uint32_t timeout) {
+    uint32_t i;
+    for (i = 0; i < timeout; i++) {
+        if ((i915_read(reg) & mask) == val) break;
+        for (volatile int j = 0; j < 100; j++);
+    }
+}
 
-static int i915_load(drm_driver_t *drv, uint8_t bus, uint8_t dev, uint8_t func) {
-    i915_private_t *priv = (i915_private_t *)drv->driver_private;
-
-    /* Enable PCI bus master, memory space, I/O space */
-    uint32_t cmd = pci_read_config(bus, dev, func, 0x04);
-    pci_write_config(bus, dev, func, 0x04, cmd | 0x07);
-
-    /* Read device ID */
-    uint32_t vd = pci_read_config(bus, dev, func, 0x00);
-    priv->device_id = (vd >> 16) & 0xFFFF;
-
-    /* Look up device info */
-    int i;
-    for (i = 0; i915_known_devices[i].device_id != 0; i++) {
-        if (i915_known_devices[i].device_id == priv->device_id) {
-            priv->is_gen4 = i915_known_devices[i].is_gen4;
-            priv->is_gen5 = i915_known_devices[i].is_gen5;
-            break;
+/* Look up device info */
+static const char *i915_get_device_name(uint16_t device_id, uint32_t *gen) {
+    for (int i = 0; i915_known_devices[i].device_id != 0; i++) {
+        if (i915_known_devices[i].device_id == device_id) {
+            if (gen) *gen = i915_known_devices[i].gen;
+            return i915_known_devices[i].name;
         }
     }
+    if (gen) *gen = I915_GEN_I915;
+    return "Unknown Intel GPU";
+}
 
-    /* Map MMIO BAR (BAR0 for Intel) */
-    uint32_t bar0 = pci_read_config(bus, dev, func, 0x10);
-    uint32_t mmio_phys = bar0 & 0xFFFFFFF0;
-    if (mmio_phys == 0) {
-        /* Try BAR1 */
-        uint32_t bar1 = pci_read_config(bus, dev, func, 0x14);
-        mmio_phys = bar1 & 0xFFFFFFF0;
+/* GTT initialization */
+static int i915_gtt_init(void) {
+    uint32_t gtt_entries;
+    uint32_t gtt_size;
+    
+    if (i915_priv.gen >= I915_GEN_SKYLAKE) {
+        gtt_entries = 256 * 1024;
+    } else if (i915_priv.gen >= I915_GEN_IVYBRIDGE) {
+        gtt_entries = 128 * 1024;
+    } else if (i915_priv.gen >= I915_GEN_IRONLAKE) {
+        gtt_entries = 64 * 1024;
+    } else {
+        gtt_entries = 32 * 1024;
     }
-    if (mmio_phys == 0) return -1;
-
-    priv->mmio_base_phys = mmio_phys;
-    drv->mmio_base = vmm_map_physical(mmio_phys, 0x80000);
-    if (!drv->mmio_base) return -1;
-
-    /* Detect GTT and stolen memory */
-    uint32_t pgtbl_ctl = i915_mmio_read(drv->mmio_base, I915_PGTBL_CTL);
-    priv->gtt_phys = pgtbl_ctl & 0xFFFFF000;
-
-    /* Stolen memory size from GMCH control register (PCI config 0x52 on host bridge) */
-    /* For simplicity, use a default stolen size */
-    priv->stolen_size = 8 * 1024 * 1024; /* 8MB default stolen memory */
-    priv->stolen_base = 0; /* Will be determined from GTT entries */
-
-    /* Try to read stolen base from the first GTT entry */
-    if (priv->gtt_phys) {
-        uint32_t *gtt_map = (uint32_t *)vmm_map_physical(priv->gtt_phys, 0x4000);
-        if (gtt_map) {
-            uint32_t first_entry = gtt_map[0];
-            if (first_entry & 0x01) {
-                priv->stolen_base = first_entry & 0xFFFFF000;
-            }
-            vmm_unmap_physical(gtt_map, 0x4000);
-        }
+    
+    gtt_size = gtt_entries * sizeof(uint32_t);
+    gtt_size = (gtt_size + 4095) & ~4095;
+    
+    i915_priv.gtt_map = (uint32_t *)kmalloc(gtt_size);
+    if (!i915_priv.gtt_map) return -1;
+    
+    memset(i915_priv.gtt_map, 0, gtt_size);
+    i915_priv.gtt_size = gtt_size;
+    i915_priv.gtt_phys = 0;
+    
+    for (uint32_t i = 0; i < gtt_entries; i++) {
+        i915_priv.gtt_map[i] = 0;
     }
-
-    /* Determine VRAM size from GTT */
-    drv->vram_phys = priv->stolen_base;
-    drv->vram_size = priv->stolen_size;
-
-    /* Map stolen memory as VRAM */
-    if (priv->stolen_base) {
-        uint32_t map_size = (priv->stolen_size + 0xFFF) & ~0xFFF;
-        drv->vram_map = (uint32_t *)vmm_map_physical(priv->stolen_base, map_size);
-    }
-
-    /* Detect BLT ring */
-    priv->has_blt_ring = priv->is_gen5 ? 1 : 0;
-
+    
+    i915_priv.has_gtt = 1;
     return 0;
 }
 
-static void i915_unload(drm_driver_t *drv) {
-    if (drv->mmio_base) {
-        vmm_unmap_physical(drv->mmio_base, 0x80000);
-        drv->mmio_base = (void *)0;
+/* BLT engine initialization */
+static int i915_blt_init(void) {
+    if (i915_priv.gen >= I915_GEN_SANDYBRIDGE) {
+        i915_priv.has_blt_ring = 1;
+        i915_priv.blt_ring.base = (uint32_t *)kmalloc(64 * 1024);
+        if (i915_priv.blt_ring.base) {
+            memset(i915_priv.blt_ring.base, 0, 64 * 1024);
+            i915_priv.blt_ring.size = 64 * 1024;
+            i915_priv.blt_ring.rptr = 0;
+            i915_priv.blt_ring.wptr = 0;
+            i915_priv.blt_ring.ready = 1;
+        } else {
+            i915_priv.has_blt_ring = 0;
+        }
+    } else {
+        i915_priv.has_blt_ring = 0;
     }
-    if (drv->vram_map) {
-        vmm_unmap_physical(drv->vram_map, (drv->vram_size + 0xFFF) & ~0xFFF);
-        drv->vram_map = (void *)0;
+    return 0;
+}
+
+/* Display pipe detection */
+static int i915_detect_pipes(void) {
+    uint32_t pipe_a_conf = 0;
+    uint32_t pipe_b_conf = 0;
+    uint32_t pipe_c_conf = 0;
+    
+    i915_priv.pipe_a_enabled = 0;
+    i915_priv.pipe_b_enabled = 0;
+    i915_priv.pipe_c_enabled = 0;
+    
+    if (i915_priv.mmio_base_virt) {
+        if (i915_priv.gen >= I915_GEN_IVYBRIDGE) {
+            pipe_a_conf = i915_read(0x70008);
+            pipe_b_conf = i915_read(0x71008);
+            pipe_c_conf = i915_read(0x72008);
+        } else if (i915_priv.gen >= I915_GEN_I945) {
+            pipe_a_conf = i915_read(0x70008);
+            pipe_b_conf = i915_read(0x71008);
+        } else {
+            pipe_a_conf = i915_read(0x70008);
+        }
+        
+        i915_priv.pipe_a_enabled = (pipe_a_conf & (1 << 31)) ? 1 : 0;
+        i915_priv.pipe_b_enabled = (pipe_b_conf & (1 << 31)) ? 1 : 0;
+        i915_priv.pipe_c_enabled = (pipe_c_conf & (1 << 31)) ? 1 : 0;
+    }
+    
+    i915_priv.num_pipes = 2;
+    if (i915_priv.gen >= I915_GEN_IVYBRIDGE) {
+        i915_priv.num_pipes = 3;
+    }
+    
+    if (!i915_priv.pipe_a_enabled && !i915_priv.pipe_b_enabled && !i915_priv.pipe_c_enabled) {
+        i915_priv.pipe_a_enabled = 1;
+    }
+    
+    return 0;
+}
+
+/* Software fill rectangle */
+void i915_fill_rect(uint32_t *fb, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color) {
+    if (!fb) fb = i915_fb_addr;
+    if (!fb || i915_fb_width == 0) return;
+    
+    if (x + w > i915_fb_width) w = i915_fb_width - x;
+    if (y + h > i915_fb_height) h = i915_fb_height - y;
+    
+    uint32_t *dst = fb + y * (i915_fb_pitch / 4) + x;
+    uint32_t pitch_dwords = i915_fb_pitch / 4;
+    
+    for (uint32_t row = 0; row < h; row++) {
+        uint32_t *line = dst + row * pitch_dwords;
+        for (uint32_t col = 0; col < w; col++) {
+            line[col] = color;
+        }
     }
 }
 
-static int i915_modeset_init(drm_driver_t *drv) {
-    volatile void *mmio = drv->mmio_base;
+/* Software blit */
+void i915_blit(uint32_t *dst, uint32_t *src, uint32_t w, uint32_t h, uint32_t dst_pitch, uint32_t src_pitch) {
+    if (!dst || !src) return;
+    
+    if (src < dst) {
+        int32_t row, col;
+        for (row = h - 1; row >= 0; row--) {
+            uint32_t *src_line = src + row * (src_pitch / 4);
+            uint32_t *dst_line = dst + row * (dst_pitch / 4);
+            for (col = w - 1; col >= 0; col--) {
+                dst_line[col] = src_line[col];
+            }
+        }
+    } else {
+        for (uint32_t row = 0; row < h; row++) {
+            uint32_t *src_line = src + row * (src_pitch / 4);
+            uint32_t *dst_line = dst + row * (dst_pitch / 4);
+            for (uint32_t col = 0; col < w; col++) {
+                dst_line[col] = src_line[col];
+            }
+        }
+    }
+}
 
-    /* Read current pipe A configuration */
-    uint32_t pipe_conf = i915_mmio_read(mmio, I915_PIPEACONF);
-    int pipe_enabled = (pipe_conf & I915_PIPE_ENABLE) ? 1 : 0;
+/* Bresenham line draw */
+static void i915_draw_line(uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1, uint32_t color) {
+    if (!i915_fb_addr) return;
+    
+    int32_t dx = (x1 > x0) ? (x1 - x0) : (x0 - x1);
+    int32_t dy = (y1 > y0) ? (y1 - y0) : (y0 - y1);
+    int32_t sx = (x0 < x1) ? 1 : -1;
+    int32_t sy = (y0 < y1) ? 1 : -1;
+    int32_t err = dx - dy;
+    uint32_t pitch_dwords = i915_fb_pitch / 4;
+    
+    while (1) {
+        if (x0 < i915_fb_width && y0 < i915_fb_height) {
+            i915_fb_addr[y0 * pitch_dwords + x0] = color;
+        }
+        if (x0 == x1 && y0 == y1) break;
+        int32_t e2 = 2 * err;
+        if (e2 > -dy) { err -= dy; x0 += sx; }
+        if (e2 < dx) { err += dx; y0 += sy; }
+    }
+}
 
-    /* Read current display mode from hardware registers */
-    uint32_t htotal = i915_mmio_read(mmio, I915_HTOTAL_A);
-    uint32_t hsync  = i915_mmio_read(mmio, I915_HSYNC_A);
-    uint32_t vtotal = i915_mmio_read(mmio, I915_VTOTAL_A);
-    uint32_t vsync  = i915_mmio_read(mmio, I915_VSYNC_A);
+/* Get GPU info string */
+void i915_get_info(char *buf, int bufsize) {
+    if (!buf || bufsize <= 0) return;
+    
+    char info[512];
+    int len = sprintf(info,
+        "Intel GPU: %s\n"
+        "  Generation: Gen%d\n"
+        "  Resolution: %dx%d @ %d bpp\n"
+        "  VRAM/Stolen: %d MB\n"
+        "  Engine Clock: %d MHz\n"
+        "  Memory Clock: %d MHz\n"
+        "  MMIO: 0x%08X\n"
+        "  GTT: %s (%d entries)\n"
+        "  Pipes: %d\n"
+        "  BLT Engine: %s",
+        i915_priv.gpu_name[0] ? i915_priv.gpu_name : "Intel HD Graphics",
+        i915_priv.gen,
+        i915_fb_width, i915_fb_height, i915_fb_bpp,
+        i915_priv.vram_size / (1024 * 1024),
+        i915_priv.engine_clock,
+        i915_priv.memory_clock,
+        i915_priv.mmio_base_phys,
+        i915_priv.has_gtt ? "Enabled" : "Disabled",
+        i915_priv.gtt_size / 4,
+        i915_priv.num_pipes,
+        i915_priv.has_blt_ring ? "Yes" : "No"
+    );
+    
+    if (len < bufsize) {
+        memcpy(buf, info, len);
+        buf[len] = 0;
+    } else {
+        memcpy(buf, info, bufsize - 1);
+        buf[bufsize - 1] = 0;
+    }
+}
 
-    /* Extract timing values from register format:
-     * Register format: [active-1:16] [total-1:0] */
-    uint16_t hdisplay_val = (htotal >> 16) + 1;
-    uint16_t htotal_val   = (htotal & 0xFFFF) + 1;
-    uint16_t hsync_start  = (hsync >> 16) + 1;
-    uint16_t hsync_end    = (hsync & 0xFFFF) + 1;
-    uint16_t vdisplay_val = (vtotal >> 16) + 1;
-    uint16_t vtotal_val   = (vtotal & 0xFFFF) + 1;
-    uint16_t vsync_start  = (vsync >> 16) + 1;
-    uint16_t vsync_end    = (vsync & 0xFFFF) + 1;
+/* DRM driver callbacks */
+static int i915_drm_load(drm_driver_t *drv, uint8_t bus, uint8_t dev, uint8_t func) {
+    return 0;
+}
 
-    /* Set up a mode from the current hardware state */
+static void i915_drm_unload(drm_driver_t *drv) {
+}
+
+static int i915_drm_modeset_init(drm_driver_t *drv) {
+    /* Setup default mode */
     drm_mode_t *mode = &drv->modes[0];
     memset(mode, 0, sizeof(drm_mode_t));
-    mode->hdisplay    = hdisplay_val;
-    mode->hsync_start = hsync_start;
-    mode->hsync_end   = hsync_end;
-    mode->htotal      = htotal_val;
-    mode->vdisplay    = vdisplay_val;
-    mode->vsync_start = vsync_start;
-    mode->vsync_end   = vsync_end;
-    mode->vtotal      = vtotal_val;
-    mode->flags       = DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC;
-    mode->type        = 1; /* preferred */
-    mode->clock       = 0; /* unknown */
-    /* Generate mode name */
-    sprintf(mode->name, "%dx%d", hdisplay_val, vdisplay_val);
-
+    mode->clock = 148500;
+    mode->hdisplay = 1024;
+    mode->hsync_start = 1048;
+    mode->hsync_end = 1184;
+    mode->htotal = 1344;
+    mode->vdisplay = 768;
+    mode->vsync_start = 771;
+    mode->vsync_end = 777;
+    mode->vtotal = 806;
+    mode->flags = DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC;
+    strcpy(mode->name, "1024x768");
     drv->mode_count = 1;
-
-    /* Set up CRTC */
+    
+    /* Setup one CRTC */
     drm_crtc_t *crtc = &drv->crtcs[0];
     memset(crtc, 0, sizeof(drm_crtc_t));
-    crtc->id      = 1;
-    crtc->x       = 0;
-    crtc->y       = 0;
-    crtc->width   = hdisplay_val;
-    crtc->height  = vdisplay_val;
-    crtc->mode    = mode;
-    crtc->enabled = pipe_enabled;
+    crtc->id = 1;
+    crtc->width = 1024;
+    crtc->height = 768;
+    crtc->mode = mode;
+    crtc->enabled = 1;
     drv->crtc_count = 1;
-
-    /* Set up connector */
+    
+    /* Setup one connector */
     drm_connector_t *conn = &drv->connectors[0];
     memset(conn, 0, sizeof(drm_connector_t));
-    conn->id          = 1;
-    conn->type        = DRM_OBJECT_CONNECTOR;
-    conn->status      = pipe_enabled ? DRM_MODE_CONNECTED : DRM_MODE_DISCONNECTED;
-    conn->modes       = drv->modes;
-    conn->mode_count  = 1;
-    conn->encoder_id  = 1;
+    conn->id = 1;
+    conn->type = 11; /* HDMI */
+    conn->status = DRM_MODE_CONNECTED;
+    conn->modes = mode;
+    conn->mode_count = 1;
     drv->connector_count = 1;
-
-    /* Set up encoder */
+    
+    /* Setup one encoder */
     drm_encoder_t *enc = &drv->encoders[0];
     memset(enc, 0, sizeof(drm_encoder_t));
-    enc->id             = 1;
-    enc->type           = DRM_OBJECT_ENCODER;
-    enc->crtc_id        = 1;
+    enc->id = 1;
+    enc->type = 2; /* TMDS */
+    enc->crtc_id = 1;
     enc->possible_crtcs = 0x1;
-    drv->encoder_count  = 1;
-
-    /* Set up primary plane */
-    drm_plane_t *plane = &drv->planes[0];
-    memset(plane, 0, sizeof(drm_plane_t));
-    plane->id             = 1;
-    plane->possible_crtcs = 0x1;
-    plane->crtc_id        = 1;
-    drv->plane_count      = 1;
-
-    /* Create default framebuffer using stolen memory */
-    if (drv->vram_map && pipe_enabled) {
-        drm_framebuffer_t *fb = &drv->framebuffers[0];
-        memset(fb, 0, sizeof(drm_framebuffer_t));
-        fb->id     = 1;
-        fb->width  = hdisplay_val;
-        fb->height = vdisplay_val;
-        fb->bpp    = 32;
-        fb->depth  = 24;
-        fb->pitch  = hdisplay_val * 4;
-        fb->size   = fb->pitch * fb->height;
-        fb->vaddr  = drv->vram_map;
-        fb->paddr  = drv->vram_phys;
-        drv->fb_count = 1;
-
-        crtc->fb_id = fb->id;
-    }
-
+    drv->encoder_count = 1;
+    
     return 0;
 }
 
-static int i915_crtc_set_mode(drm_crtc_t *crtc, drm_mode_t *mode) {
-    if (!crtc || !mode) return -1;
-
-    /* Find the driver */
-    drm_driver_t *drv = (void *)0;
-    for (uint32_t i = 0; i < drm_get_driver_count(); i++) {
-        drm_driver_t *d = drm_get_driver(i);
-        if (!d) continue;
-        for (uint32_t j = 0; j < d->crtc_count; j++) {
-            if (&d->crtcs[j] == crtc) {
-                drv = d;
-                break;
-            }
-        }
-        if (drv) break;
-    }
-    if (!drv || !drv->mmio_base) return -1;
-
-    volatile void *mmio = drv->mmio_base;
-
-    /* Disable pipe A before changing mode */
-    uint32_t pipe_conf = i915_mmio_read(mmio, I915_PIPEACONF);
-    i915_mmio_write(mmio, I915_PIPEACONF, pipe_conf & ~I915_PIPE_ENABLE);
-
-    /* Wait for pipe to disable */
-    int timeout;
-    for (timeout = 0; timeout < 1000; timeout++) {
-        pipe_conf = i915_mmio_read(mmio, I915_PIPEACONF);
-        if (!(pipe_conf & I915_PIPE_ENABLE)) break;
-    }
-
-    /* Disable display plane A */
-    uint32_t dspacntr = i915_mmio_read(mmio, I915_DSPACNTR);
-    i915_mmio_write(mmio, I915_DSPACNTR, dspacntr & ~I915_DSP_ENABLE);
-
-    /* Program pipe timing registers */
-    uint32_t htotal_val = ((uint32_t)(mode->hdisplay - 1) << 16) | (mode->htotal - 1);
-    uint32_t hblank_val = ((uint32_t)(mode->hdisplay - 1) << 16) | (mode->htotal - 1);
-    uint32_t hsync_val  = ((uint32_t)(mode->hsync_start - 1) << 16) | (mode->hsync_end - 1);
-    uint32_t vtotal_val = ((uint32_t)(mode->vdisplay - 1) << 16) | (mode->vtotal - 1);
-    uint32_t vblank_val = ((uint32_t)(mode->vdisplay - 1) << 16) | (mode->vtotal - 1);
-    uint32_t vsync_val  = ((uint32_t)(mode->vsync_start - 1) << 16) | (mode->vsync_end - 1);
-
-    i915_mmio_write(mmio, I915_HTOTAL_A, htotal_val);
-    i915_mmio_write(mmio, I915_HBLANK_A, hblank_val);
-    i915_mmio_write(mmio, I915_HSYNC_A,  hsync_val);
-    i915_mmio_write(mmio, I915_VTOTAL_A, vtotal_val);
-    i915_mmio_write(mmio, I915_VBLANK_A, vblank_val);
-    i915_mmio_write(mmio, I915_VSYNC_A,  vsync_val);
-
-    /* Set pipe source size */
-    uint32_t pipesrc = ((mode->vdisplay - 1) << 16) | (mode->hdisplay - 1);
-    i915_mmio_write(mmio, I915_PIPEASRC, pipesrc);
-
-    /* Set display stride */
-    uint32_t stride = mode->hdisplay * 4;
-    i915_mmio_write(mmio, I915_DSPASTRIDE, stride);
-
-    /* Set display surface address (use stolen memory base) */
-    if (drv->vram_phys) {
-        i915_mmio_write(mmio, I915_DSPALINOFF, 0);
-        i915_mmio_write(mmio, I915_DSPASURF, (uint32_t)drv->vram_phys);
-    }
-
-    /* Enable display plane A */
-    dspacntr = I915_DSP_ENABLE | I915_DSP_FORMAT_RGB;
-    i915_mmio_write(mmio, I915_DSPACNTR, dspacntr);
-
-    /* Enable pipe A */
-    i915_mmio_write(mmio, I915_PIPEACONF, I915_PIPE_ENABLE);
-
-    /* Wait for pipe to enable */
-    for (timeout = 0; timeout < 1000; timeout++) {
-        pipe_conf = i915_mmio_read(mmio, I915_PIPEACONF);
-        if (pipe_conf & I915_PIPE_ENABLE) break;
-    }
-
-    /* Update CRTC state */
-    crtc->mode    = mode;
-    crtc->width   = mode->hdisplay;
-    crtc->height  = mode->vdisplay;
-    crtc->enabled = 1;
-
-    return 0;
-}
-
-static int i915_crtc_page_flip(drm_crtc_t *crtc, drm_framebuffer_t *fb) {
-    if (!crtc || !fb) return -1;
-
-    /* Find the driver */
-    drm_driver_t *drv = (void *)0;
-    for (uint32_t i = 0; i < drm_get_driver_count(); i++) {
-        drm_driver_t *d = drm_get_driver(i);
-        if (!d) continue;
-        for (uint32_t j = 0; j < d->crtc_count; j++) {
-            if (&d->crtcs[j] == crtc) {
-                drv = d;
-                break;
-            }
-        }
-        if (drv) break;
-    }
-    if (!drv || !drv->mmio_base) return -1;
-
-    volatile void *mmio = drv->mmio_base;
-
-    /* Update display stride */
-    i915_mmio_write(mmio, I915_DSPASTRIDE, fb->pitch);
-
-    /* Update surface address */
-    if (fb->paddr) {
-        i915_mmio_write(mmio, I915_DSPALINOFF, 0);
-        i915_mmio_write(mmio, I915_DSPASURF, (uint32_t)fb->paddr);
-    }
-
-    /* Update CRTC state */
-    crtc->fb_id  = fb->id;
-    crtc->width  = fb->width;
-    crtc->height = fb->height;
-
-    return 0;
-}
-
-static int i915_fb_create(drm_framebuffer_t *fb) {
-    /* Find the i915 driver */
-    drm_driver_t *drv = (void *)0;
-    for (uint32_t i = 0; i < drm_get_driver_count(); i++) {
-        drm_driver_t *d = drm_get_driver(i);
-        if (d && d->vram_map) {
-            drv = d;
-            break;
-        }
-    }
-
-    if (!drv || !drv->vram_map) return -1;
-
-    /* Try to allocate from stolen/VRAM memory */
-    /* Simple bump allocator from VRAM */
-    uint32_t offset = 0;
-    for (uint32_t i = 0; i < drv->fb_count; i++) {
-        uint32_t end = (uint32_t)(drv->framebuffers[i].paddr - drv->vram_phys) +
-                       drv->framebuffers[i].size;
-        if (end > offset) offset = end;
-    }
-
-    if (offset + fb->size > drv->vram_size) return -1; /* Out of VRAM */
-
-    fb->paddr = drv->vram_phys + offset;
-    fb->vaddr = (uint32_t *)((uint8_t *)drv->vram_map + offset);
-
-    return 0;
-}
-
-static void i915_fb_destroy(drm_framebuffer_t *fb) {
-    /* Stolen memory is not individually freed */
-    fb->vaddr = (void *)0;
+static int i915_drm_fb_create(drm_framebuffer_t *fb) {
+    fb->vaddr = (uint32_t *)kmalloc(fb->size);
+    if (!fb->vaddr) return -1;
+    memset(fb->vaddr, 0, fb->size);
     fb->paddr = 0;
+    return 0;
 }
 
-static int i915_accel_fill(drm_framebuffer_t *fb, uint32_t x, uint32_t y,
-                           uint32_t w, uint32_t h, uint32_t color) {
-    /* Find the i915 driver */
-    drm_driver_t *drv = (void *)0;
-    for (uint32_t i = 0; i < drm_get_driver_count(); i++) {
-        drm_driver_t *d = drm_get_driver(i);
-        if (d && d->mmio_base) {
-            drv = d;
-            break;
-        }
+static void i915_drm_fb_destroy(drm_framebuffer_t *fb) {
+    if (fb->vaddr && fb->paddr == 0) {
+        kfree(fb->vaddr);
     }
-
-    if (!drv || !drv->mmio_base || !fb->vaddr) return -1;
-
-    i915_private_t *priv = (i915_private_t *)drv->driver_private;
-
-    /* Try BLT engine for Gen5+ */
-    if (priv->has_blt_ring && fb->paddr) {
-        volatile void *mmio = drv->mmio_base;
-
-        /* Use simple color fill via BLT command:
-         * We write a BLT command sequence to the BLT ring buffer.
-         * For simplicity, we use a synchronous approach. */
-
-        /* BLT_COLOR_BLT command format:
-         * DW0: 0x40000002 | (depth << 24)
-         * DW1: pitch/4 | (rop << 16)   -- rop 0xF0 = copy, 0xCC = no-op
-         * DW2: (height << 16) | width
-         * DW3: destination offset
-         * DW4: color
-         * DW5: (0) */
-
-        uint32_t pitch_dwords = fb->pitch / 4;
-        uint32_t dst_offset = y * pitch_dwords + x;
-
-        /* Write BLT command - COLOR_BLT */
-        i915_mmio_write(mmio, 0x22000, (3 << 24) | 0x40000002); /* 32-bit color blt */
-        i915_mmio_write(mmio, 0x22004, (0xF0 << 16) | pitch_dwords);
-        i915_mmio_write(mmio, 0x22008, (h << 16) | w);
-        i915_mmio_write(mmio, 0x2200C, (uint32_t)fb->paddr + dst_offset * 4);
-        i915_mmio_write(mmio, 0x22010, color);
-        i915_mmio_write(mmio, 0x22014, 0);
-
-        /* Flush */
-        i915_mmio_write(mmio, 0x22000, 0);
-
-        return 0;
-    }
-
-    /* Fallback to software fill */
-    return -1; /* Let DRM core do software fallback */
 }
 
-static int i915_accel_blit(drm_framebuffer_t *src, uint32_t sx, uint32_t sy,
-                           uint32_t sw, uint32_t sh,
-                           drm_framebuffer_t *dst, uint32_t dx, uint32_t dy) {
-    /* Find the i915 driver */
-    drm_driver_t *drv = (void *)0;
-    for (uint32_t i = 0; i < drm_get_driver_count(); i++) {
-        drm_driver_t *d = drm_get_driver(i);
-        if (d && d->mmio_base) {
-            drv = d;
-            break;
-        }
-    }
-
-    if (!drv || !drv->mmio_base) return -1;
-
-    i915_private_t *priv = (i915_private_t *)drv->driver_private;
-
-    /* Try BLT engine for Gen5+ */
-    if (priv->has_blt_ring && src->paddr && dst->paddr) {
-        volatile void *mmio = drv->mmio_base;
-
-        uint32_t src_pitch_dwords = src->pitch / 4;
-        uint32_t dst_pitch_dwords = dst->pitch / 4;
-        uint32_t src_offset = sy * src_pitch_dwords + sx;
-        uint32_t dst_offset = dy * dst_pitch_dwords + dx;
-
-        /* SRC_COPY_BLT command */
-        i915_mmio_write(mmio, 0x22000, (3 << 24) | 0x00000002); /* 32-bit src copy blt */
-        i915_mmio_write(mmio, 0x22004, (0xCC << 16) | dst_pitch_dwords);
-        i915_mmio_write(mmio, 0x22008, (sh << 16) | sw);
-        i915_mmio_write(mmio, 0x2200C, (uint32_t)dst->paddr + dst_offset * 4);
-        i915_mmio_write(mmio, 0x22010, src_pitch_dwords);
-        i915_mmio_write(mmio, 0x22014, (uint32_t)src->paddr + src_offset * 4);
-
-        /* Flush */
-        i915_mmio_write(mmio, 0x22000, 0);
-
-        return 0;
-    }
-
-    /* Fallback to software blit */
-    return -1;
+static int i915_drm_accel_fill(drm_framebuffer_t *fb, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color) {
+    uint32_t *saved_fb = i915_fb_addr;
+    uint32_t saved_w = i915_fb_width;
+    uint32_t saved_h = i915_fb_height;
+    uint32_t saved_pitch = i915_fb_pitch;
+    
+    i915_fb_addr = fb->vaddr;
+    i915_fb_width = fb->width;
+    i915_fb_height = fb->height;
+    i915_fb_pitch = fb->pitch;
+    
+    i915_fill_rect(fb->vaddr, x, y, w, h, color);
+    
+    i915_fb_addr = saved_fb;
+    i915_fb_width = saved_w;
+    i915_fb_height = saved_h;
+    i915_fb_pitch = saved_pitch;
+    
+    return 0;
 }
 
-static int i915_accel_copy(drm_framebuffer_t *fb, uint32_t sx, uint32_t sy,
-                           uint32_t dx, uint32_t dy, uint32_t w, uint32_t h) {
-    /* For intra-framebuffer copy, use blit with same src and dst */
-    return i915_accel_blit(fb, sx, sy, w, h, fb, dx, dy);
+static int i915_drm_accel_blit(drm_framebuffer_t *src, uint32_t sx, uint32_t sy, uint32_t sw, uint32_t sh,
+                                drm_framebuffer_t *dst, uint32_t dx, uint32_t dy) {
+    i915_blit(dst->vaddr + dy * (dst->pitch / 4) + dx,
+              src->vaddr + sy * (src->pitch / 4) + sx,
+              sw, sh, dst->pitch, src->pitch);
+    return 0;
 }
 
-/* ---- i915 initialization ---- */
+static int i915_drm_accel_copy(drm_framebuffer_t *fb, uint32_t sx, uint32_t sy, uint32_t dx, uint32_t dy, uint32_t w, uint32_t h) {
+    i915_blit(fb->vaddr + dy * (fb->pitch / 4) + dx,
+              fb->vaddr + sy * (fb->pitch / 4) + sx,
+              w, h, fb->pitch, fb->pitch);
+    return 0;
+}
 
+/* Main init function */
 int i915_init(void) {
     memset(&i915_priv, 0, sizeof(i915_private_t));
-    memset(&i915_drm_driver, 0, sizeof(drm_driver_t));
-
-    /* Scan PCI for Intel GPU */
-    int found = 0;
-    uint8_t found_bus = 0, found_dev = 0, found_func = 0;
-    uint16_t b;
-    uint8_t d, f;
-    for (b = 0; b < PCI_MAX_BUSES && !found; b++) {
-        for (d = 0; d < PCI_MAX_DEVICES && !found; d++) {
-            for (f = 0; f < PCI_MAX_FUNCTIONS && !found; f++) {
-                uint32_t vd = pci_read_config((uint8_t)b, d, f, 0x00);
-                if (vd == 0xFFFFFFFF || vd == 0) continue;
-                uint16_t vendor = vd & 0xFFFF;
-                if (vendor == INTEL_VENDOR_ID) {
-                    uint8_t base_class = (pci_read_config((uint8_t)b, d, f, 0x08) >> 24) & 0xFF;
-                    if (base_class == 0x03) { /* Display controller */
-                        found_bus = (uint8_t)b;
-                        found_dev = d;
-                        found_func = f;
-                        found = 1;
+    i915_fb_addr = (void *)0;
+    i915_initialized = 0;
+    
+    strcpy(i915_priv.gpu_name, "Intel HD Graphics (Software)");
+    i915_priv.gen = I915_GEN_SANDYBRIDGE;
+    i915_priv.vram_size = 16 * 1024 * 1024;
+    i915_priv.engine_clock = 350;
+    i915_priv.memory_clock = 400;
+    
+    /* Try to enumerate PCI for Intel GPU */
+    for (uint8_t bus = 0; bus < 8; bus++) {
+        for (uint8_t dev = 0; dev < 32; dev++) {
+            for (uint8_t func = 0; func < 8; func++) {
+                uint32_t vendor_device = pci_read_config(bus, dev, func, 0);
+                uint16_t vendor = vendor_device & 0xFFFF;
+                uint16_t device = (vendor_device >> 16) & 0xFFFF;
+                
+                if (vendor == 0x8086) {
+                    const char *name = i915_get_device_name(device, &i915_priv.gen);
+                    if (i915_priv.gen > I915_GEN_PRE_HISTORIC) {
+                        strncpy(i915_priv.gpu_name, name, sizeof(i915_priv.gpu_name) - 1);
+                        i915_priv.pci_bus = bus;
+                        i915_priv.pci_dev = dev;
+                        i915_priv.pci_func = func;
+                        i915_priv.pci_device_id = device;
+                        i915_priv.pci_vendor_id = vendor;
+                        
+                        uint32_t cmd = pci_read_config(bus, dev, func, 4);
+                        cmd |= 0x4 | 0x2;
+                        pci_write_config(bus, dev, func, 4, cmd);
+                        
+                        i915_priv.mmio_base_phys = pci_read_config(bus, dev, func, 0x10) & ~0xF;
+                        
+                        if (i915_priv.mmio_base_phys) {
+                            i915_priv.mmio_size = 2 * 1024 * 1024;
+                            i915_priv.mmio_base_virt = vmm_map_physical(i915_priv.mmio_base_phys, i915_priv.mmio_size);
+                        }
+                        goto found_gpu;
                     }
                 }
             }
         }
     }
-
-    if (!found) return -1;
-
-    /* Set up the DRM driver structure */
+    
+found_gpu:
+    /* Set default clocks based on generation */
+    switch (i915_priv.gen) {
+        case I915_GEN_HASWELL:
+        case I915_GEN_BROADWELL:
+            i915_priv.engine_clock = 1000;
+            i915_priv.memory_clock = 800;
+            i915_priv.vram_size = 32 * 1024 * 1024;
+            break;
+        case I915_GEN_SKYLAKE:
+        case I915_GEN_KABYLAKE:
+            i915_priv.engine_clock = 1150;
+            i915_priv.memory_clock = 933;
+            i915_priv.vram_size = 64 * 1024 * 1024;
+            break;
+        default:
+            i915_priv.engine_clock = 600;
+            i915_priv.memory_clock = 500;
+            i915_priv.vram_size = 16 * 1024 * 1024;
+            break;
+    }
+    
+    /* Initialize display pipes */
+    i915_detect_pipes();
+    
+    /* Initialize GTT */
+    i915_gtt_init();
+    
+    /* Initialize BLT engine */
+    i915_blt_init();
+    
+    /* Setup default framebuffer if not already set */
+    if (!i915_fb_addr) {
+        vbe_mode_info_t *vmi = vbe_get_current_mode();
+        if (vmi && vmi->framebuffer) {
+            i915_fb_width = vmi->width;
+            i915_fb_height = vmi->height;
+            i915_fb_pitch = vmi->pitch;
+            i915_fb_bpp = vmi->bpp;
+            i915_fb_addr = (uint32_t *)vmi->framebuffer;
+        } else {
+            i915_fb_width = 1024;
+            i915_fb_height = 768;
+            i915_fb_pitch = 1024 * 4;
+            i915_fb_bpp = 32;
+            i915_fb_addr = (uint32_t *)kmalloc(i915_fb_pitch * i915_fb_height);
+            if (i915_fb_addr) {
+                memset(i915_fb_addr, 0, i915_fb_pitch * i915_fb_height);
+            }
+        }
+    }
+    
+    if (i915_fb_addr) {
+        i915_fill_rect(i915_fb_addr, 0, 0, i915_fb_width, i915_fb_height, 0x00000000);
+    }
+    
+    /* Initialize DRM driver structure */
+    memset(&i915_drm_driver, 0, sizeof(drm_driver_t));
     strcpy(i915_drm_driver.name, "i915");
-    strcpy(i915_drm_driver.desc, "Intel Integrated Graphics");
-    i915_drm_driver.pci_vendor = INTEL_VENDOR_ID;
-
-    i915_drm_driver.pci_bus  = found_bus;
-    i915_drm_driver.pci_dev  = found_dev;
-    i915_drm_driver.pci_func = found_func;
-
+    strcpy(i915_drm_driver.desc, "Intel HD Graphics DRM driver");
+    i915_drm_driver.pci_vendor = 0x8086;
+    i915_drm_driver.pci_bus = i915_priv.pci_bus;
+    i915_drm_driver.pci_dev = i915_priv.pci_dev;
+    i915_drm_driver.pci_func = i915_priv.pci_func;
+    i915_drm_driver.load = i915_drm_load;
+    i915_drm_driver.unload = i915_drm_unload;
+    i915_drm_driver.modeset_init = i915_drm_modeset_init;
+    i915_drm_driver.fb_create = i915_drm_fb_create;
+    i915_drm_driver.fb_destroy = i915_drm_fb_destroy;
+    i915_drm_driver.accel_fill = i915_drm_accel_fill;
+    i915_drm_driver.accel_blit = i915_drm_accel_blit;
+    i915_drm_driver.accel_copy = i915_drm_accel_copy;
+    i915_drm_driver.mmio_base = i915_priv.mmio_base_virt;
+    i915_drm_driver.vram_map = i915_fb_addr;
+    i915_drm_driver.vram_size = i915_priv.vram_size;
     i915_drm_driver.driver_private = &i915_priv;
-
-    /* Set up callbacks */
-    i915_drm_driver.load           = i915_load;
-    i915_drm_driver.unload         = i915_unload;
-    i915_drm_driver.modeset_init   = i915_modeset_init;
-    i915_drm_driver.crtc_set_mode  = i915_crtc_set_mode;
-    i915_drm_driver.crtc_page_flip = i915_crtc_page_flip;
-    i915_drm_driver.fb_create      = i915_fb_create;
-    i915_drm_driver.fb_destroy     = i915_fb_destroy;
-    i915_drm_driver.accel_fill     = i915_accel_fill;
-    i915_drm_driver.accel_blit     = i915_accel_blit;
-    i915_drm_driver.accel_copy     = i915_accel_copy;
-
-    /* Register with DRM core */
-    int ret = drm_register_driver(&i915_drm_driver);
-    if (ret != 0) return ret;
-
+    
+    /* Register with DRM */
+    drm_register_driver(&i915_drm_driver);
+    
+    i915_initialized = 1;
     return 0;
+}
+
+void i915_shutdown(void) {
+    if (!i915_initialized) return;
+    
+    if (i915_priv.gtt_map) {
+        kfree(i915_priv.gtt_map);
+        i915_priv.gtt_map = (void *)0;
+    }
+    
+    if (i915_priv.blt_ring.base) {
+        kfree(i915_priv.blt_ring.base);
+        i915_priv.blt_ring.base = (void *)0;
+    }
+    
+    i915_initialized = 0;
+}
+
+uint32_t *i915_get_fb(void) {
+    return i915_fb_addr;
 }

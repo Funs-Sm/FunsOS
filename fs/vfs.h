@@ -33,6 +33,22 @@
 #define SEEK_CUR 1
 #define SEEK_END 2
 
+#define ENOSYS  38
+#define EINVAL  22
+#define EBADF   9
+#define ENOENT  2
+#define EEXIST  17
+#define ENOTDIR 20
+#define EISDIR  21
+#define ENOTEMPTY 39
+#define EPERM   1
+#define EIO     5
+#define ENOMEM  12
+
+/* ioctl commands */
+#define FIONREAD  0x541B
+#define FIONBIO   0x5421
+
 /* Directory entry returned by vfs_readdir() */
 typedef struct vfs_dirent {
     uint32_t ino;
@@ -138,6 +154,7 @@ int32_t vfs_close(file_t *file);
 int32_t vfs_read(file_t *file, void *buf, uint32_t count);
 int32_t vfs_write(file_t *file, const void *buf, uint32_t count);
 int32_t vfs_seek(file_t *file, int32_t offset, int32_t whence);
+int32_t vfs_ioctl(file_t *file, uint32_t cmd, void *arg);
 int32_t vfs_mkdir(const char *path, uint32_t mode);
 int32_t vfs_rmdir(const char *path);
 int32_t vfs_unlink(const char *path);

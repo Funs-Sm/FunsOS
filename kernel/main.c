@@ -276,19 +276,21 @@ void kernel_main(void) {
     pkgmgr_init();
     klog_info("HTTP client and package manager initialized");
 
-    /* Read VBE info passed by bootloader from physical address 0x700 */
-    uint32_t vbe_magic = *(volatile uint32_t *)0x700;
+    /* Read VBE info passed by bootloader from physical address 0x800.
+     * Address 0x700 is inside the kernel info block (0x600-0x7FF) which
+     * gets overwritten by the disk read, so bootloader stores at 0x800. */
+    uint32_t vbe_magic = *(volatile uint32_t *)0x800;
     uint32_t vbe_mode_val = 0, vbe_fb_addr = 0, vbe_fb_width = 0;
     uint32_t vbe_fb_height = 0, vbe_fb_bpp = 0, vbe_fb_pitch = 0;
     int vbe_valid = 0;
 
     if (vbe_magic == 0xB007F1E0) {
-        vbe_mode_val  = *(volatile uint32_t *)0x704;
-        vbe_fb_addr   = *(volatile uint32_t *)0x708;
-        vbe_fb_width  = *(volatile uint32_t *)0x70C;
-        vbe_fb_height = *(volatile uint32_t *)0x710;
-        vbe_fb_bpp    = *(volatile uint32_t *)0x714;
-        vbe_fb_pitch  = *(volatile uint32_t *)0x718;
+        vbe_mode_val  = *(volatile uint32_t *)0x804;
+        vbe_fb_addr   = *(volatile uint32_t *)0x808;
+        vbe_fb_width  = *(volatile uint32_t *)0x80C;
+        vbe_fb_height = *(volatile uint32_t *)0x810;
+        vbe_fb_bpp    = *(volatile uint32_t *)0x814;
+        vbe_fb_pitch  = *(volatile uint32_t *)0x818;
         klog_info("VBE raw: mode=0x%X fb=0x%X %ux%u %ubpp pitch=%u",
                   vbe_mode_val, vbe_fb_addr, vbe_fb_width, vbe_fb_height,
                   vbe_fb_bpp, vbe_fb_pitch);
@@ -304,9 +306,11 @@ void kernel_main(void) {
             klog_info("VBE: bootloader address validated");
         } else {
             /* Bootloader address is bad - try reading from raw VBE mode info
-             * block at 0x0900 (where BIOS INT 10h AH=4F01h stored it) */
+             * block at 0x0900 (where BIOS INT 10h AH=4F01h stored it).
+             * Fixed: offset 0x28 is added to the ADDRESS (0x0900+0x28=0x0928),
+             * not to the value read. */
             klog_info("VBE: bootloader addr invalid, trying raw VBE info at 0x0900");
-            uint32_t raw_fb = *(volatile uint32_t *)0x0900 + 0x28;
+            uint32_t raw_fb = *(volatile uint32_t *)(0x0900 + 0x28);
             /* Also read other fields from raw block per VBE_MODE_INFO struct */
             uint16_t raw_w = *((volatile uint16_t *)(0x0900 + 0x12));
             uint16_t raw_h = *((volatile uint16_t *)(0x0900 + 0x14));
@@ -371,76 +375,35 @@ void kernel_main(void) {
                                 vbe_fb_bpp, vbe_fb_pitch);
     }
 
-    /* Init console: prefer framebuffer (VBE), fallback to VGA text mode */
-    int console_initialized = 0;
+    /* ================================================================
+     * Console initialization: FORCE VGA text mode for pure CLI shell.
+     * GPU drivers (drm/i915/amdgpu) may have reprogrammed the display
+     * controller and broken the bootloader's VBE framebuffer setup,
+     * so we explicitly switch back to VGA text mode 3 which works
+     * reliably on all VGA-compatible hardware without framebuffer.
+     * ================================================================ */
     {
-        vbe_mode_info_t *vm = vbe_get_current_mode();
-        if (is_vbe_mode() && vm && vm->framebuffer &&
-            (vm->bpp == 32 || vm->bpp == 24 || vm->bpp == 16 || vm->bpp == 15)) {
-            fb_console_init((uint32_t *)(uintptr_t)vm->framebuffer,
-                            vm->width, vm->height, vm->pitch, vm->bpp);
-            /* Print mode info as first output so we can verify parameters */
-            /* Simple itoa for width */
-            int w = (int)vm->width, h = (int)vm->height, b = (int)vm->bpp, p = (int)vm->pitch;
-            fb_console_write("[VBE] ");
-            /* width */
-            { char tmp[12]; int ti=0; if(w==0)tmp[ti++]='0'; else{char rev[12];int ri=0;while(w>0){rev[ri++]='0'+(w%10);w/=10;}while(ri>0)tmp[ti++]=rev[--ri];tmp[ti]=0;} fb_console_write(tmp); }
-            fb_console_write("x");
-            /* height */
-            { w=(int)vm->width; h=(int)vm->height; char tmp[12]; int ti=0; if(h==0)tmp[ti++]='0'; else{char rev[12];int ri=0;while(h>0){rev[ri++]='0'+(h%10);h/=10;}while(ri>0)tmp[ti++]=rev[--ri];tmp[ti]=0;} fb_console_write(tmp); }
-            fb_console_write(" ");
-            /* bpp */
-            { char tmp[12]; int ti=0; if(b==0)tmp[ti++]='0'; else{char rev[12];int ri=0;while(b>0){rev[ri++]='0'+(b%10);b/=10;}while(ri>0)tmp[ti++]=rev[--ri];tmp[ti]=0;} fb_console_write(tmp); }
-            fb_console_write("bpp pitch=");
-            /* pitch */
-            { char tmp[12]; int ti=0; if(p==0)tmp[ti++]='0'; else{char rev[12];int ri=0;while(p>0){rev[ri++]='0'+(p%10);p/=10;}while(ri>0)tmp[ti++]=rev[--ri];tmp[ti]=0;} fb_console_write(tmp); }
-            fb_console_write("\n");
-            console_initialized = 1;
-            klog_info("Framebuffer console initialized");
-        } else {
-            /* Fallback to VGA text mode.
-             * The bootloader set a VBE graphics mode via INT 10h.
-             * We must switch the VGA hardware back to text mode 3
-             * using register writes, because the text buffer at
-             * 0xB8000 is not visible while the CRTC is in graphics
-             * mode. */
-            vga_text_mode3_switch();
-            vga_text_init();
+        int console_initialized = 0;
 
-            /* Print test patterns */
-            vga_print("VGA font test: ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789\n");
-            vga_print("Special chars: !@#$%^&*()_+-=[]{}|;':\",./<>?\n");
-            vga_print(OS_STRING " initialized\n");
+        /* Always switch to VGA text mode 3 for CLI shell */
+        klog_info("Switching to VGA text mode for command-line shell...");
+        vga_text_mode3_switch();
+        vga_text_init();
+        vga_text_clear();
 
-            serial_print(COM1, "[VGA-TEXT] Font test output done\n");
+        /* Print banner */
+        vga_print("  ========================================\n");
+        vga_print("   FunsCore v" KERNEL_VERSION " - FunsOS CLI\n");
+        vga_print("  ========================================\n\n");
 
-            /* Dump VGA buffer to serial before diagnostic */
-            vga_text_dump_screen();
+        console_initialized = 1;
+        serial_print(COM1, "[VGA-TEXT] Command-line shell mode ready\n");
+        klog_info("Using VGA text mode console (CLI mode)");
 
-            /* Run comprehensive font diagnostic: prints full ASCII table
-             * on screen and reads back CGRAM font data via serial */
-            serial_print(COM1, "[VGA-TEXT] Running font diagnostic...\n");
-            vga_text_font_diagnostic();
-
-            /* Final screen dump after diagnostic */
-            vga_text_dump_screen();
-
-            klog_info("Using VGA text mode console (VBE unavailable)");
-            console_initialized = 1;
-        }
+        /* Set shell to use VGA text output */
+        shell_set_vbe_mode(0);
+        (void)console_initialized;
     }
-
-    /* Boot splash (only in framebuffer mode) */
-    if (is_vbe_mode()) {
-        fb_console_write("\n");
-        fb_console_write("  ========================================\n");
-        fb_console_write("   FunsCore v" KERNEL_VERSION " - FunsOS\n");
-        fb_console_write("  ========================================\n\n");
-    }
-
-    /* Set shell console mode to match actual initialized mode */
-    shell_set_vbe_mode(is_vbe_mode());
-    klog_info("Console mode set: %s", is_vbe_mode() ? "framebuffer" : "VGA text");
     shell_init();
     klog_info("Shell initialized (available via Terminal app)");
 
@@ -470,30 +433,11 @@ void kernel_main(void) {
     }
 
     /* ================================================================
-     * 启动 GUI 桌面环境
-     * 启动流程: 加载动画 (~3秒) -> 桌面环境
-     * Shell 功能通过 Terminal 应用访问
+     * 启动纯命令行 Shell 模式
+     * 使用 framebuffer console (如果VBE可用) 或 VGA text mode
      * ================================================================ */
-    klog_info("Starting FunsOS GUI desktop...");
-
-    if (is_vbe_mode()) {
-        vbe_mode_info_t *vm = vbe_get_current_mode();
-        uint32_t *fb = (uint32_t *)(uintptr_t)vm->framebuffer;
-        uint32_t pitch = vm->pitch;
-        uint32_t width = vm->width;
-        uint32_t height = vm->height;
-
-        klog_info("GUI: initializing with %ux%u fb=0x%X pitch=%u",
-                  width, height, (uint32_t)(uintptr_t)fb, pitch);
-
-        gui_core_init((int)width, (int)height, fb, pitch);
-        klog_info("GUI core initialized, entering main loop");
-        gui_core_run();
-    } else {
-        /* VGA 文本模式回退 - 运行传统 Shell */
-        klog_info("GUI: VBE not available, falling back to shell");
-        shell_run();
-    }
+    klog_info("Starting FunsOS command-line shell...");
+    shell_run();
 
     print_service_status();
 

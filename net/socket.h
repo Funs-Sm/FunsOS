@@ -163,4 +163,10 @@ int32_t sys_poll(void *fds, uint32_t nfds, int32_t timeout_ms);
  * bytes sent, -1 on error.  Only available on STREAM sockets. */
 int32_t sys_sendfile(int out_fd, int in_fd, uint64_t *offset, uint32_t count);
 
+/* Socket helper functions */
+void sock_set_nonblock(socket_t *sock, int on);
+int32_t sock_get_remote_addr(socket_t *sock, sockaddr_in_t *addr);
+void sock_set_timeout(socket_t *sock, uint32_t recv_timeout, uint32_t send_timeout);
+int sys_socket_get_error(socket_t *sock);
+
 #endif

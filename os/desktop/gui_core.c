@@ -509,6 +509,12 @@ void gui_core_init(int screen_w, int screen_h, uint32_t *framebuffer, uint32_t p
     /* 初始化 display_server 作为窗口后端 */
     display_server_init(framebuffer, (uint32_t)screen_w, (uint32_t)screen_h, pitch);
 
+    /* 初始化任务栏 */
+    taskbar_init(screen_w, screen_h, framebuffer, pitch);
+
+    /* 初始化开始菜单 */
+    start_menu_init(screen_w, screen_h, framebuffer, pitch);
+
     /* 创建桌面根窗口 (全屏) */
     g_desktop_win_id = ds_create_window(0, 0, (uint32_t)screen_w,
                                         (uint32_t)screen_h, "FunsOS Desktop");

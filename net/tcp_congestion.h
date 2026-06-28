@@ -25,8 +25,11 @@ typedef struct {
 
     /* Reno/Cubic 状态 */
     int     slow_start;      /* 是否在慢启动阶段 */
+    int     in_fast_recovery;/* 是否处于快恢复阶段 */
     uint32_t dup_ack_count;  /* 重复ACK计数 */
     uint32_t recovery_end;   /* 快恢复结束序列号 */
+    uint32_t high_seq;       /* 进入快恢复时的最高发送序列号 */
+    uint32_t flight_size;    /* 在途数据大小 (用于ssthresh计算) */
 
     /* Cubic 参数 */
     double  w_max;           /* 上次丢包时的最大窗口 */
@@ -63,6 +66,12 @@ void tcp_cong_init(tcp_cong_t *c, cong_algo_t algo, uint32_t mss);
 /* 收到 ACK 时更新 (调用一次每ACK) */
 void tcp_cong_on_ack(tcp_cong_t *c, uint32_t acked_bytes);
 
+/* 处理NewReno部分ACK (返回1表示需要重传下一个段) */
+int tcp_newreno_process_ack(tcp_cong_t *c, uint32_t acked_bytes, uint32_t ack_seq);
+
+/* Reno快重传: 收到3个重复ACK时触发 */
+int tcp_reno_fast_retransmit(tcp_cong_t *c);
+
 /* 发生超时时处理 */
 void tcp_cong_on_timeout(tcp_cong_t *c);
 
@@ -74,6 +83,12 @@ uint32_t tcp_cong_get_window(const tcp_cong_t *c);
 
 /* 更新RTT测量 */
 void tcp_cong_update_rtt(tcp_cong_t *c, uint32_t rtt_us);
+
+/* 更新在途数据大小(FlightSize) - 用于ssthresh计算 */
+void tcp_cong_update_flight_size(tcp_cong_t *c, uint32_t flight_size);
+
+/* 设置进入快恢复时的最高发送序列号 */
+void tcp_cong_set_high_seq(tcp_cong_t *c, uint32_t seq);
 
 /* 切换拥塞控制算法 */
 void tcp_cong_set_algo(tcp_cong_t *c, cong_algo_t algo);

@@ -63,3 +63,19 @@ void init_timer(void) {
     timer_set_frequency(100);
     irq_register_handler(0, timer_handler);
 }
+
+static uint32_t next_timer_id = 1;
+
+uint32_t sys_timer_create(uint32_t interval_ms, void (*callback)(void), void *arg) {
+    (void)interval_ms; (void)callback; (void)arg;
+    return next_timer_id++;
+}
+
+void sys_timer_stop(uint32_t timer_id) {
+    (void)timer_id;
+}
+
+int sys_timer_destroy(uint32_t timer_id) {
+    (void)timer_id;
+    return 0;
+}

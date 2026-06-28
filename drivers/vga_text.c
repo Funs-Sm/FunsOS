@@ -3,121 +3,208 @@
 #include "serial.h"
 #include "../gui/font.h"
 
+#define VGA_HISTORY_SIZE 400
+
 static int cursor_row = 0;
 static int cursor_col = 0;
 static uint8_t current_color = 0;
 
-static void update_hardware_cursor(void);
+static uint16_t history[VGA_HISTORY_SIZE][VGA_WIDTH];
+static int history_count = 0;
 
-/*
- * vga_text_mode3_switch - Switch VGA hardware from graphics mode to
- * text mode 3 (80x25, 16 colors) using VGA register writes.
- *
- * This is needed because the bootloader sets a VBE graphics mode via
- * INT 10h.  If the kernel cannot find the VBE framebuffer, the legacy
- * VGA text buffer at 0xB8000 is NOT visible because the CRTC is still
- * programmed for graphics mode.  We must reprogram the VGA registers
- * to text mode 3 without calling BIOS (which is unavailable in
- * protected mode).
- *
- * IMPORTANT: The bootloader already called INT 10h AH=00h AL=03
- * (set video mode 3) before entering protected mode, which:
- *   - Programmed all CRTC/sequencer/GFX registers correctly
- *   - Loaded the standard 8x16 ROM font into CGRAM
- *   - Cleared the text buffer at 0xB8000
- *
- * This function only needs to clear the screen and reset cursor,
- * since BIOS did the heavy lifting.
- */
-void vga_text_mode3_switch(void) {
-    /* Clear text buffer with spaces on light-grey-on-black */
-    volatile uint16_t *buf = (volatile uint16_t *)VGA_BUFFER;
-    for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT; i++) {
-        buf[i] = (uint16_t)(' ' | 0x0700);
-    }
+static uint16_t current_line[VGA_WIDTH];
 
-    /* Reset cursor to top-left */
-    cursor_row = 0;
-    cursor_col = 0;
-    update_hardware_cursor();
+static int sb_view = 0;
+static int sb_active = 0;
+
+static void update_hw_cursor(void);
+static void redraw_screen(void);
+
+static inline uint16_t make_cell(char c) {
+    return (uint16_t)((uint16_t)c | ((uint16_t)current_color << 8));
 }
 
-static void update_hardware_cursor(void) {
-    uint16_t pos = cursor_row * VGA_WIDTH + cursor_col;
+static void clear_line_buf(uint16_t *line) {
+    for (int i = 0; i < VGA_WIDTH; i++) line[i] = make_cell(' ');
+}
+
+void vga_text_mode3_switch(void) {
+    volatile uint16_t *buf = (volatile uint16_t *)VGA_BUFFER;
+    for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT; i++) {
+        buf[i] = make_cell(' ');
+    }
+    cursor_row = 0;
+    cursor_col = 0;
+    history_count = 0;
+    sb_view = 0;
+    sb_active = 0;
+    clear_line_buf(current_line);
+    update_hw_cursor();
+}
+
+static void update_hw_cursor(void) {
+    int disp_row = cursor_row;
+    int disp_col = cursor_col;
+    if (sb_active) {
+        disp_row = VGA_HEIGHT - 1;
+        disp_col = VGA_WIDTH - 1;
+    }
+    uint16_t pos = (uint16_t)(disp_row * VGA_WIDTH + disp_col);
     outb(0x3D4, 14);
     outb(0x3D5, (uint8_t)(pos >> 8));
     outb(0x3D4, 15);
     outb(0x3D5, (uint8_t)(pos & 0xFF));
 }
 
+static void commit_current_line(void) {
+    if (history_count < VGA_HISTORY_SIZE) {
+        for (int i = 0; i < VGA_WIDTH; i++) {
+            history[history_count][i] = current_line[i];
+        }
+        history_count++;
+    } else {
+        for (int s = 0; s < VGA_HISTORY_SIZE - 1; s++) {
+            for (int i = 0; i < VGA_WIDTH; i++) {
+                history[s][i] = history[s + 1][i];
+            }
+        }
+        for (int i = 0; i < VGA_WIDTH; i++) {
+            history[VGA_HISTORY_SIZE - 1][i] = current_line[i];
+        }
+    }
+    clear_line_buf(current_line);
+}
+
+static void redraw_screen(void) {
+    volatile uint16_t *vga = (volatile uint16_t *)VGA_BUFFER;
+
+    if (sb_active) {
+        int start = sb_view;
+        for (int row = 0; row < VGA_HEIGHT - 1; row++) {
+            int hidx = start + row;
+            for (int col = 0; col < VGA_WIDTH; col++) {
+                if (hidx >= 0 && hidx < history_count) {
+                    vga[row * VGA_WIDTH + col] = history[hidx][col];
+                } else {
+                    vga[row * VGA_WIDTH + col] = make_cell(' ');
+                }
+            }
+        }
+        for (int col = 0; col < VGA_WIDTH; col++) {
+            vga[(VGA_HEIGHT - 1) * VGA_WIDTH + col] = make_cell(' ');
+        }
+        {
+            int col = 0;
+            const char *msg = "-- SCROLLBACK";
+            uint8_t yellow = (VGA_COLOR_BLACK << 4) | VGA_COLOR_YELLOW;
+            for (int i = 0; msg[i] && col < VGA_WIDTH; i++, col++) {
+                vga[(VGA_HEIGHT - 1) * VGA_WIDTH + col] =
+                    (uint16_t)(msg[i] | ((uint16_t)yellow << 8));
+            }
+        }
+    } else {
+        int visible_history = VGA_HEIGHT - 1;
+        int start = history_count - visible_history;
+        if (start < 0) start = 0;
+
+        for (int row = 0; row < VGA_HEIGHT - 1; row++) {
+            int hidx = start + row;
+            for (int col = 0; col < VGA_WIDTH; col++) {
+                if (hidx < history_count) {
+                    vga[row * VGA_WIDTH + col] = history[hidx][col];
+                } else {
+                    vga[row * VGA_WIDTH + col] = make_cell(' ');
+                }
+            }
+        }
+
+        for (int col = 0; col < VGA_WIDTH; col++) {
+            vga[(VGA_HEIGHT - 1) * VGA_WIDTH + col] = current_line[col];
+        }
+    }
+    update_hw_cursor();
+}
+
 void vga_text_init(void) {
-    current_color = (VGA_COLOR_BLACK << 4) | VGA_COLOR_LIGHT_GREY;
-    vga_text_clear();
+    current_color = (uint8_t)((VGA_COLOR_BLACK << 4) | VGA_COLOR_LIGHT_GREY);
+    history_count = 0;
+    sb_view = 0;
+    sb_active = 0;
     cursor_row = 0;
     cursor_col = 0;
-    update_hardware_cursor();
+    clear_line_buf(current_line);
+    vga_text_clear();
 }
 
 void vga_text_set_color(uint8_t fg, uint8_t bg) {
-    current_color = (bg << 4) | fg;
+    current_color = (uint8_t)((bg << 4) | fg);
 }
 
 void vga_text_clear(void) {
     volatile uint16_t *buf = (volatile uint16_t *)VGA_BUFFER;
-    uint16_t blank = (uint16_t)(' ' | (current_color << 8));
+    uint16_t blank = make_cell(' ');
     for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT; i++) {
         buf[i] = blank;
     }
+    history_count = 0;
+    sb_active = 0;
+    sb_view = 0;
     cursor_row = 0;
     cursor_col = 0;
-    update_hardware_cursor();
+    clear_line_buf(current_line);
+    update_hw_cursor();
 }
 
 void vga_text_scroll(void) {
-    volatile uint16_t *buf = (volatile uint16_t *)VGA_BUFFER;
-    for (int row = 0; row < VGA_HEIGHT - 1; row++) {
-        for (int col = 0; col < VGA_WIDTH; col++) {
-            int src = (row + 1) * VGA_WIDTH + col;
-            int dst = row * VGA_WIDTH + col;
-            buf[dst] = buf[src];
-        }
-    }
-    uint16_t blank = (uint16_t)(' ' | (current_color << 8));
-    for (int col = 0; col < VGA_WIDTH; col++) {
-        buf[(VGA_HEIGHT - 1) * VGA_WIDTH + col] = blank;
-    }
     cursor_row = VGA_HEIGHT - 1;
     cursor_col = 0;
-    update_hardware_cursor();
+    sb_active = 0;
+    sb_view = history_count - (VGA_HEIGHT - 1);
+    if (sb_view < 0) sb_view = 0;
+    redraw_screen();
 }
 
 void vga_text_putchar(char c) {
-    volatile uint16_t *buf = (volatile uint16_t *)VGA_BUFFER;
+    if (sb_active) {
+        sb_active = 0;
+        sb_view = history_count - (VGA_HEIGHT - 1);
+        if (sb_view < 0) sb_view = 0;
+        cursor_row = (history_count < VGA_HEIGHT - 1) ? history_count : VGA_HEIGHT - 1;
+        cursor_col = 0;
+        clear_line_buf(current_line);
+    }
 
     if (c == '\n') {
+        commit_current_line();
         cursor_col = 0;
         cursor_row++;
     } else if (c == '\r') {
         cursor_col = 0;
+        for (int i = 0; i < VGA_WIDTH; i++) current_line[i] = make_cell(' ');
     } else if (c == '\t') {
-        cursor_col = (cursor_col + 8) & ~7;
+        int next_col = (cursor_col + 8) & ~7;
+        while (cursor_col < next_col && cursor_col < VGA_WIDTH) {
+            current_line[cursor_col++] = make_cell(' ');
+        }
         if (cursor_col >= VGA_WIDTH) {
+            commit_current_line();
             cursor_col = 0;
             cursor_row++;
         }
     } else if (c == '\b') {
         if (cursor_col > 0) {
             cursor_col--;
+            current_line[cursor_col] = make_cell(' ');
         }
-        int offset = cursor_row * VGA_WIDTH + cursor_col;
-        buf[offset] = (uint16_t)(' ' | (current_color << 8));
     } else {
-        int offset = cursor_row * VGA_WIDTH + cursor_col;
-        buf[offset] = (uint16_t)(c | (current_color << 8));
-        cursor_col++;
+        if (cursor_col < VGA_WIDTH) {
+            current_line[cursor_col] = make_cell(c);
+            cursor_col++;
+        }
     }
 
     if (cursor_col >= VGA_WIDTH) {
+        commit_current_line();
         cursor_col = 0;
         cursor_row++;
     }
@@ -126,7 +213,7 @@ void vga_text_putchar(char c) {
         vga_text_scroll();
     }
 
-    update_hardware_cursor();
+    redraw_screen();
 }
 
 void vga_text_print(const char *str) {
@@ -139,7 +226,7 @@ void vga_text_print(const char *str) {
 void vga_text_set_cursor(int row, int col) {
     cursor_row = row;
     cursor_col = col;
-    update_hardware_cursor();
+    update_hw_cursor();
 }
 
 void vga_text_get_cursor(int *row, int *col) {
@@ -147,8 +234,54 @@ void vga_text_get_cursor(int *row, int *col) {
     *col = cursor_col;
 }
 
-/* Dump the visible VGA text buffer to the serial port for debugging
- * garbled output.  Each cell is a (char, attr) pair at 0xB8000. */
+void vga_text_scroll_up(int lines) {
+    if (history_count == 0) return;
+    if (!sb_active) {
+        sb_active = 1;
+        sb_view = history_count - (VGA_HEIGHT - 1);
+        if (sb_view < 0) sb_view = 0;
+    }
+    sb_view -= lines;
+    if (sb_view < 0) sb_view = 0;
+    redraw_screen();
+}
+
+void vga_text_scroll_down(int lines) {
+    if (!sb_active) return;
+    sb_view += lines;
+    int max_view = history_count - (VGA_HEIGHT - 1);
+    if (max_view < 0) max_view = 0;
+    if (sb_view >= max_view) {
+        sb_active = 0;
+        sb_view = max_view;
+        cursor_row = (history_count < VGA_HEIGHT - 1) ? history_count : VGA_HEIGHT - 1;
+        redraw_screen();
+        return;
+    }
+    redraw_screen();
+}
+
+void vga_text_scroll_home(void) {
+    if (history_count == 0) return;
+    sb_active = 1;
+    sb_view = 0;
+    redraw_screen();
+}
+
+void vga_text_scroll_end(void) {
+    sb_active = 0;
+    sb_view = history_count - (VGA_HEIGHT - 1);
+    if (sb_view < 0) sb_view = 0;
+    cursor_row = (history_count < VGA_HEIGHT - 1) ? history_count : VGA_HEIGHT - 1;
+    cursor_col = 0;
+    clear_line_buf(current_line);
+    redraw_screen();
+}
+
+int vga_text_in_scrollback(void) {
+    return sb_active;
+}
+
 void vga_text_dump_screen(void) {
     volatile uint16_t *buf = (volatile uint16_t *)VGA_BUFFER;
     serial_print(COM1, "--- VGA screen dump ---\n");
@@ -156,8 +289,8 @@ void vga_text_dump_screen(void) {
         char line[VGA_WIDTH + 1];
         for (int col = 0; col < VGA_WIDTH; col++) {
             uint16_t cell = buf[row * VGA_WIDTH + col];
-            char c = (char)(cell & 0xFF);
-            line[col] = (c >= 32 && c < 127) ? c : ' ';
+            char ch = (char)(cell & 0xFF);
+            line[col] = (ch >= 32 && ch < 127) ? ch : ' ';
         }
         line[VGA_WIDTH] = '\0';
         serial_print(COM1, line);
@@ -196,12 +329,7 @@ void vga_text_print_dec(uint32_t val) {
     }
 }
 
-/* Diagnostic: print the full ASCII table via VGA and verify font RAM.
- * Outputs every printable character (32-126) in rows of 16,
- * then reads back the first few bytes of CGRAM for 'A' (char 65)
- * and dumps them to serial so we can confirm the font was loaded. */
 void vga_text_font_diagnostic(void) {
-    /* Print ASCII grid on screen */
     vga_text_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLUE);
     vga_text_print("=== VGA FONT DIAGNOSTIC ===\n");
 
@@ -231,7 +359,6 @@ void vga_text_font_diagnostic(void) {
     }
     vga_text_putchar('\n');
 
-    /* Read back font data from plane 2 and dump to serial */
     {
         uint8_t saved_seq2, saved_seq4, saved_gfx5, saved_gfx6;
 
@@ -240,10 +367,9 @@ void vga_text_font_diagnostic(void) {
         outb(0x3CE, 0x05); saved_gfx5 = inb(0x3CF);
         outb(0x3CE, 0x06); saved_gfx6 = inb(0x3CF);
 
-        /* Select plane 2 for reading, read mode 0 */
         outb(0x3C4, 0x02); outb(0x3C5, 0x04);
         outb(0x3C4, 0x04); outb(0x3C5, 0x07);
-        outb(0x3CE, 0x05); outb(0x3CF, 0x00);  /* read mode 0 */
+        outb(0x3CE, 0x05); outb(0x3CF, 0x00);
         outb(0x3CE, 0x06); outb(0x3CF, 0x04);
 
         volatile uint8_t *font_ram = (volatile uint8_t *)0xA0000;
@@ -265,17 +391,15 @@ void vga_text_font_diagnostic(void) {
                 while (ri > 0) hdr[hi++] = rev[--ri];
             }
             hdr[hi++] = ':';
-            hdr[hi++] = '\0';
+            hdr[hi] = '\0';
             serial_print(COM1, hdr);
             for (int line = 0; line < 16; line++) {
                 uint8_t val = font_ram[ch * 32 + line];
-                /* print as binary */
                 for (int b = 7; b >= 0; b--) {
                     char bitc = (val & (1 << b)) ? '#' : '.';
                     serial_putchar(COM1, bitc);
                 }
                 serial_print(COM1, "  ");
-                /* also hex */
                 static const char hx[] = "0123456789ABCDEF";
                 serial_putchar(COM1, '0');
                 serial_putchar(COM1, 'x');
@@ -285,7 +409,6 @@ void vga_text_font_diagnostic(void) {
             }
         }
 
-        /* Also read back what we expect for 'A' from font_data array */
         serial_print(COM1, "[FONT-DIAG] Expected 'A' from font_data array:\n");
         extern const uint8_t font_data[][16];
         for (int line = 0; line < 16; line++) {
@@ -297,7 +420,6 @@ void vga_text_font_diagnostic(void) {
             serial_print(COM1, "\n");
         }
 
-        /* Restore registers */
         outb(0x3CE, 0x05); outb(0x3CF, saved_gfx5);
         outb(0x3CE, 0x06); outb(0x3CF, saved_gfx6);
         outb(0x3C4, 0x02); outb(0x3C5, saved_seq2);

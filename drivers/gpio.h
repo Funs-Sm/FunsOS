@@ -16,7 +16,7 @@
  *   val = gpio_read(pin)      -- 读取引脚状态
  */
 
-#include <stdint.h>
+#include "stdint.h"
 
 /* ---- GPIO 引脚定义 (x86 平台) ---- */
 #define GPIO_INVALID    0xFFFFFFFF

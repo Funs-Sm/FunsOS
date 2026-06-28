@@ -893,20 +893,59 @@ void shell_err_unknown(const char *cmd) {
     shell_print("funs: '");
     if (cmd) shell_print(cmd);
     shell_print("': command not found\n");
-    shell_print("\n  Did you mean one of these?\n");
-    /* 简单模糊匹配提示 */
-    shell_print("    - Check your spelling (commands are lowercase)\n");
-    shell_print("    - Type 'help' to see all available commands\n");
-    shell_print("    - Use 'which <cmd>' to check if a program exists\n");
-    shell_print("\n  Common similar commands:\n");
-    shell_print("    list dir  -> ls, pt\n");
-    shell_print("    display   -> cat, show, type\n");
-    shell_print("    change cd -> cd, go\n");
-    shell_print("    remove    -> del, rm\n");
-    shell_print("    rename    -> ren, mv\n");
-    shell_print("    copy      -> copy, cp\n");
-    shell_print("    make dir  -> mkdir\n");
-    shell_print("    print     -> echo\n");
+
+    if (cmd && cmd[0]) {
+        const char *suggestions[] = {
+            "ls", "pt", "cat", "show", "type", "cd", "go", "pwd", "where",
+            "echo", "help", "clear", "clr", "logout", "login", "whoami", "id", "umask",
+            "mkdir", "rm", "del", "cp", "copy", "mv", "ren", "touch",
+            "ps", "kill", "reboot", "halt", "shutdown", "dmesg", "uname",
+            "date", "time", "ifconfig", "ping", "history", "export", "set",
+            "chmod", "chown", "free", "df", "mount", "umount", "vi", "edit",
+            NULL
+        };
+        int best_dist = 999;
+        const char *best_match = NULL;
+        int best2_dist = 999;
+        const char *best2_match = NULL;
+
+        int cmdlen = 0;
+        while (cmd[cmdlen]) cmdlen++;
+
+        for (int i = 0; suggestions[i]; i++) {
+            const char *s = suggestions[i];
+            int slen = 0;
+            while (s[slen]) slen++;
+            int dist = 0;
+            int maxlen = cmdlen > slen ? cmdlen : slen;
+            int minlen = cmdlen < slen ? cmdlen : slen;
+            dist = maxlen - minlen;
+            for (int j = 0; j < minlen; j++) {
+                if (cmd[j] != s[j]) dist++;
+            }
+            if (dist < best_dist) {
+                best2_dist = best_dist;
+                best2_match = best_match;
+                best_dist = dist;
+                best_match = s;
+            } else if (dist < best2_dist) {
+                best2_dist = dist;
+                best2_match = s;
+            }
+        }
+
+        if (best_match && best_dist <= 3) {
+            shell_print("\n  Did you mean: ");
+            shell_print(best_match);
+            if (best2_match && best2_dist <= 4) {
+                shell_print(", ");
+                shell_print(best2_match);
+            }
+            shell_print("?\n");
+        }
+    }
+
+    shell_print("  Type 'help' for available commands.\n");
 }
 
 void shell_err_wget(const char *url) {

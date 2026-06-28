@@ -16,7 +16,7 @@
 
 dentry_t *root_dentry;
 mount_t *mount_list;
-static dentry_t *cwd_dentry;
+dentry_t *cwd_dentry;
 static char cwd_buf[PATH_MAX];
 static spinlock_t vfs_lock;
 
@@ -207,7 +207,6 @@ int32_t vfs_open(const char *path, uint32_t flags, file_t **file) {
             return -1;
         }
 
-        /* Create the file and then resolve it again. */
         char parent_path[PATH_MAX];
         char name[256];
         if (path_parent(path, parent_path, PATH_MAX) != 0 ||
@@ -242,29 +241,39 @@ int32_t vfs_open(const char *path, uint32_t flags, file_t **file) {
         return -1;
     }
 
-    /* 权限检查: 打开文件需要读取权限 */
+    /* Permission check: determine required permissions from flags.
+     * READ requires read permission; WRITE requires write permission;
+     * RDWR requires both.  Sover (uid 0) bypasses all permission checks. */
     {
         uint32_t proc_uid = user_get_current_uid();
         uint32_t proc_gid = 0;
         user_t *cur = user_get_current();
         if (cur) proc_gid = cur->gid;
 
-        if (perm_check_path(path, PERM_READ) != 0) {
-            spinlock_unlock(&vfs_lock);
-            return -1;
-        }
-        if (perm_check_extended(dentry->inode->uid, dentry->inode->gid,
-                                (uint16_t)dentry->inode->mode,
-                                dentry->inode->acl, proc_uid, proc_gid,
-                                PERM_READ) != 0) {
-            spinlock_unlock(&vfs_lock);
-            return -1;
+        uint32_t need_perm = 0;
+        if (flags & FILE_MODE_READ)  need_perm |= PERM_READ;
+        if (flags & FILE_MODE_WRITE) need_perm |= PERM_WRITE;
+        if (need_perm == 0) need_perm = PERM_READ; /* default read */
+
+        if (proc_uid != 0) {
+            if (perm_check_path(path, need_perm) != 0) {
+                spinlock_unlock(&vfs_lock);
+                return -1;
+            }
+            if (perm_check_extended(dentry->inode->uid, dentry->inode->gid,
+                                    (uint16_t)dentry->inode->mode,
+                                    dentry->inode->acl, proc_uid, proc_gid,
+                                    need_perm) != 0) {
+                spinlock_unlock(&vfs_lock);
+                return -1;
+            }
         }
     }
 
+    spinlock_unlock(&vfs_lock);
+
     file_t *f = (file_t *)kmalloc(sizeof(file_t));
     if (!f) {
-        spinlock_unlock(&vfs_lock);
         return -1;
     }
     memset(f, 0, sizeof(file_t));
@@ -307,13 +316,11 @@ int32_t vfs_open(const char *path, uint32_t flags, file_t **file) {
         int32_t ret = f->ops->open(dentry->inode, f);
         if (ret != 0) {
             kfree(f);
-            spinlock_unlock(&vfs_lock);
             return ret;
         }
     }
 
     *file = f;
-    spinlock_unlock(&vfs_lock);
     return 0;
 }
 
@@ -364,7 +371,11 @@ int32_t vfs_write(file_t *file, const void *buf, uint32_t count) {
 }
 
 int32_t vfs_seek(file_t *file, int32_t offset, int32_t whence) {
-    if (!file || !file->inode) return -1;
+    if (!file || !file->inode) return -EBADF;
+
+    if (file->ops && file->ops->seek) {
+        return file->ops->seek(file, offset, whence);
+    }
 
     int32_t new_offset;
 
@@ -379,13 +390,39 @@ int32_t vfs_seek(file_t *file, int32_t offset, int32_t whence) {
             new_offset = (int32_t)file->inode->size + offset;
             break;
         default:
-            return -1;
+            return -EINVAL;
     }
 
-    if (new_offset < 0) return -1;
+    if (new_offset < 0) return -EINVAL;
 
     file->offset = (uint32_t)new_offset;
     return (int32_t)file->offset;
+}
+
+int32_t vfs_ioctl(file_t *file, uint32_t cmd, void *arg) {
+    if (!file) return -EBADF;
+
+    if (file->ops && file->ops->ioctl) {
+        return file->ops->ioctl(file, cmd, arg);
+    }
+
+    /* Default handling for common ioctls */
+    switch (cmd) {
+        case FIONREAD:
+            if (arg && file->inode) {
+                int32_t avail = (int32_t)file->inode->size - (int32_t)file->offset;
+                if (avail < 0) avail = 0;
+                *(int32_t *)arg = avail;
+                return 0;
+            }
+            return -EINVAL;
+        case FIONBIO:
+            return 0;
+        default:
+            break;
+    }
+
+    return -ENOSYS;
 }
 
 int32_t vfs_mkdir(const char *path, uint32_t mode) {
@@ -726,23 +763,28 @@ int32_t vfs_symlink(const char *target, const char *linkpath) {
     if (path_parent(linkpath, parent_path, PATH_MAX) != 0 ||
         path_basename(linkpath, name, 256) != 0) {
         spinlock_unlock(&vfs_lock);
-        return -1;
+        return -EINVAL;
     }
 
     dentry_t *parent = NULL;
     if (path_resolve(parent_path, &parent) != 0) {
         spinlock_unlock(&vfs_lock);
-        return -1;
+        return -ENOENT;
     }
 
-    if (!parent->inode || !parent->inode->ops || !parent->inode->ops->symlink) {
+    if (!parent->inode || !parent->inode->ops) {
         spinlock_unlock(&vfs_lock);
-        return -1;
+        return -ENOSYS;
+    }
+
+    if (!parent->inode->ops->symlink) {
+        spinlock_unlock(&vfs_lock);
+        return -ENOSYS;
     }
 
     int32_t ret = parent->inode->ops->symlink(parent, name, target);
     spinlock_unlock(&vfs_lock);
-    return ret;
+    return ret < 0 ? -ENOSYS : ret;
 }
 
 int32_t vfs_readlink(const char *path, char *buf, uint32_t size) {
@@ -751,17 +793,17 @@ int32_t vfs_readlink(const char *path, char *buf, uint32_t size) {
     spinlock_lock(&vfs_lock);
     if (path_resolve_nofollow(path, &dentry) != 0 || !dentry->inode) {
         spinlock_unlock(&vfs_lock);
-        return -1;
+        return -ENOENT;
     }
 
     if (!dentry->inode->ops || !dentry->inode->ops->readlink) {
         spinlock_unlock(&vfs_lock);
-        return -1;
+        return -ENOSYS;
     }
 
     int32_t ret = dentry->inode->ops->readlink(dentry, buf, size);
     spinlock_unlock(&vfs_lock);
-    return ret;
+    return ret < 0 ? -ENOSYS : ret;
 }
 
 int32_t vfs_chmod(const char *path, uint32_t mode) {
@@ -777,13 +819,10 @@ int32_t vfs_chmod(const char *path, uint32_t mode) {
     {
         uint32_t proc_uid = user_get_current_uid();
         int is_admin = perm_is_admin();
+        uint32_t file_uid = dentry->inode->uid;
 
-        if (proc_uid != dentry->inode->uid && !is_admin) {
-            spinlock_unlock(&vfs_lock);
-            return -1;
-        }
         uint16_t cur_mode = (uint16_t)dentry->inode->mode;
-        if (perm_set_mode(&cur_mode, (uint16_t)mode, proc_uid, is_admin) != 0) {
+        if (perm_set_mode(&cur_mode, (uint16_t)mode, file_uid, proc_uid, is_admin) != 0) {
             spinlock_unlock(&vfs_lock);
             return -1;
         }
@@ -843,32 +882,37 @@ int32_t vfs_link(const char *oldpath, const char *newpath) {
     dentry_t *old_dentry = NULL;
     if (path_resolve(oldpath, &old_dentry) != 0 || !old_dentry->inode) {
         spinlock_unlock(&vfs_lock);
-        return -1;
+        return -ENOENT;
     }
 
     if (path_parent(newpath, new_parent, PATH_MAX) != 0 ||
         path_basename(newpath, new_name, 256) != 0) {
         spinlock_unlock(&vfs_lock);
-        return -1;
+        return -EINVAL;
     }
 
     dentry_t *new_dir = NULL;
     if (path_resolve(new_parent, &new_dir) != 0) {
         spinlock_unlock(&vfs_lock);
-        return -1;
+        return -ENOENT;
+    }
+
+    if (!new_dir->inode || !new_dir->inode->ops) {
+        spinlock_unlock(&vfs_lock);
+        return -ENOSYS;
     }
 
     /* Try filesystem-specific link operation */
-    if (new_dir->inode->ops && new_dir->inode->ops->link) {
+    if (new_dir->inode->ops->link) {
         dentry_t *old_dir = old_dentry->parent;
         if (!old_dir) old_dir = root_dentry;
         int32_t ret = new_dir->inode->ops->link(old_dir, old_dentry->name, new_dir, new_name);
         spinlock_unlock(&vfs_lock);
-        return ret;
+        return ret < 0 ? -ENOSYS : ret;
     }
 
     spinlock_unlock(&vfs_lock);
-    return -1;
+    return -ENOSYS;
 }
 
 int32_t vfs_utimes(const char *path, uint32_t atime, uint32_t mtime) {
@@ -912,14 +956,14 @@ int32_t vfs_closedir(file_t *dir) {
 
 /* Sequential readdir: file->private_data carries the iterator state. */
 int32_t vfs_readdir(file_t *dir, vfs_dirent_t *entry) {
-    if (!dir || !dir->inode || !entry) return -1;
-    if (!(dir->inode->mode & FILE_MODE_DIR)) return -1;
+    if (!dir || !dir->inode || !entry) return -EBADF;
+    if (!(dir->inode->mode & FILE_MODE_DIR)) return -ENOTDIR;
 
     if (dir->inode->sb && dir->inode->sb->fs_type == FS_TYPE_RAMFS) {
         /* ramfs fast path */
         ramfs_node_t *parent = (ramfs_node_t *)dir->inode->private_data;
         ramfs_node_t *cur   = (ramfs_node_t *)dir->private_data;
-        if (!parent) return -1;
+        if (!parent) return -ENOENT;
         if (!cur) {
             cur = parent->child;
         } else {
@@ -945,7 +989,7 @@ int32_t vfs_readdir(file_t *dir, vfs_dirent_t *entry) {
         /* tarfs path - walk tarfs_node children */
         tarfs_node_t *parent = (tarfs_node_t *)dir->inode->private_data;
         tarfs_node_t *cur    = (tarfs_node_t *)dir->private_data;
-        if (!parent) return -1;
+        if (!parent) return -ENOENT;
         if (!cur) {
             cur = parent->child;
         } else {
@@ -966,12 +1010,39 @@ int32_t vfs_readdir(file_t *dir, vfs_dirent_t *entry) {
         return 1;
     }
 
+    if (dir->inode->sb && dir->inode->sb->fs_type == FS_TYPE_DEVFS) {
+        /* devfs path - walk dentry children (devfs creates dentries at registration) */
+        extern dentry_t *devfs_root_dentry;
+        dentry_t *parent_d = dir->inode->dentries;
+        if (!parent_d) parent_d = devfs_root_dentry;
+        dentry_t *cur = (dentry_t *)dir->private_data;
+        if (!parent_d) return -ENOENT;
+        if (!cur) {
+            cur = parent_d->child;
+        } else {
+            cur = cur->next_sibling;
+        }
+        if (!cur) {
+            dir->private_data = NULL;
+            return 0;
+        }
+        dir->private_data = cur;
+        entry->ino  = cur->inode ? cur->inode->ino : 0;
+        entry->off  = 0;
+        entry->reclen = sizeof(vfs_dirent_t);
+        entry->type = (cur->inode && (cur->inode->mode & FILE_MODE_DIR)) ? DT_DIR :
+                      (cur->inode && (cur->inode->mode & FILE_MODE_LNK)) ? DT_LNK : DT_REG;
+        strncpy(entry->name, cur->name, 255);
+        entry->name[255] = '\0';
+        return 1;
+    }
+
     /* Generic fallback: walk the dentry children list using
      * private_data as the iterator (same pattern as ramfs/tarfs). */
     {
         dentry_t *parent_d = dir->inode->dentries;
         dentry_t *cur = (dentry_t *)dir->private_data;
-        if (!parent_d) return -1;
+        if (!parent_d) return -ENOENT;
         if (!cur) {
             cur = parent_d->child;
         } else {

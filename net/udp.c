@@ -20,18 +20,32 @@ void udp_init(void) {
 uint16_t udp_checksum(ipv4_addr_t src, ipv4_addr_t dst, const void *data, uint32_t len) {
     const uint8_t *p = (const uint8_t *)data;
     uint32_t sum = 0;
-    sum += (src.addr >> 16) & 0xFFFF;
-    sum += src.addr & 0xFFFF;
-    sum += (dst.addr >> 16) & 0xFFFF;
-    sum += dst.addr & 0xFFFF;
+
+    /* IPv4伪头部 (RFC 768):
+     * - src ip (4 bytes)
+     * - dst ip (4 bytes)
+     * - zero (1 byte)
+     * - protocol (1 byte)
+     * - udp length (2 bytes)
+     */
+    sum += ((src.addr >> 16) & 0xFFFF);
+    sum += (src.addr & 0xFFFF);
+    sum += ((dst.addr >> 16) & 0xFFFF);
+    sum += (dst.addr & 0xFFFF);
     sum += IP_PROTO_UDP;
-    sum += len;
+    sum += (len & 0xFFFF);
+
     while (len > 1) {
         sum += ((uint16_t)p[0] << 8) | p[1];
         p += 2; len -= 2;
     }
-    if (len == 1) sum += (uint16_t)(*p) << 8;
-    while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
+    if (len == 1) {
+        sum += ((uint16_t)p[0] << 8);
+    }
+
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
     return (uint16_t)(~sum);
 }
 
@@ -96,9 +110,9 @@ void udp_receive(net_buffer_t *buf) {
         ip_header_t *ip_hdr = (ip_header_t *)(buf->data + buf->offset - 20);
         uint16_t save = hdr->checksum;
         hdr->checksum = 0;
-        uint16_t calc = udp_checksum(ip_hdr->dst_ip, ip_hdr->src_ip, hdr, hdr->length);
+        uint16_t calc = udp_checksum(ip_hdr->src_ip, ip_hdr->dst_ip, hdr, hdr->length);
         hdr->checksum = save;
-        if (calc != save) {
+        if (calc != save && calc != 0xFFFF) {
             stats.checksum_errors++;
             return;
         }

@@ -33,6 +33,8 @@ static int pipe_read;
 static int pipe_write;
 static int pipe_stdin[2];
 
+static int sys_dup2(int oldfd, int newfd);
+
 static void scroll_up(void)
 {
     int y;

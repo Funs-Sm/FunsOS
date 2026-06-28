@@ -313,33 +313,105 @@ void dns_tick(uint32_t now) {
 /*  Response parser                                                    */
 /* ------------------------------------------------------------------ */
 
-void dns_handle_response(const uint8_t *msg, uint32_t len,
-                         ipv4_addr_t from, uint16_t from_port) {
-    (void)from; (void)from_port;
-    if (len < 12) return;
+#define DNS_FLAG_QR      0x8000  /* Response flag */
+#define DNS_FLAG_AA      0x0400  /* Authoritative answer */
+#define DNS_FLAG_TC      0x0200  /* Truncated */
+#define DNS_FLAG_RD      0x0100  /* Recursion desired */
+#define DNS_FLAG_RA      0x0080  /* Recursion available */
+#define DNS_RCODE_MASK   0x000F
+
+#define DNS_TYPE_A       1
+#define DNS_TYPE_CNAME   5
+#define DNS_TYPE_PTR     12
+#define DNS_CLASS_IN     1
+
+int dns_parse_response(const uint8_t *msg, uint32_t len,
+                       uint16_t expected_id, dns_result_t *result) {
+    if (!msg || !result || len < 12) {
+        stats.parse_errors++;
+        return -1;
+    }
+
+    memset(result, 0, sizeof(*result));
+
     uint16_t id     = be16(msg + 0);
     uint16_t flags  = be16(msg + 2);
     uint16_t qd     = be16(msg + 4);
     uint16_t an     = be16(msg + 6);
-    (void)flags;
-    if (qd != 1) return;
+    /* uint16_t ns  = be16(msg + 8);  authority section count */
+    /* uint16_t ar  = be16(msg + 10); additional section count */
+
+    /* 验证事务ID匹配 */
+    if (expected_id != 0 && id != expected_id) {
+        stats.parse_errors++;
+        return -1;
+    }
+
+    /* 验证是响应报文 (QR=1) */
+    if (!(flags & DNS_FLAG_QR)) {
+        stats.parse_errors++;
+        return -1;
+    }
+
+    /* 检查响应码 (RCODE) */
+    uint8_t rcode = (uint8_t)(flags & DNS_RCODE_MASK);
+    if (rcode != 0) {
+        return -1;
+    }
+
+    /* 必须有且只有1个question */
+    if (qd != 1) {
+        stats.parse_errors++;
+        return -1;
+    }
 
     uint32_t pos = 12;
     char qname[DNS_MAX_NAME];
     uint32_t consumed = 0;
     int rc = decode_name(msg, len, pos, qname, sizeof(qname), &consumed);
-    if (rc < 0) return;
-    pos += (uint32_t)rc;
-    pos += 4; /* QTYPE + QCLASS */
+    if (rc < 0) {
+        stats.parse_errors++;
+        return -1;
+    }
+
+    if (rc <= (int)pos) {
+        stats.parse_errors++;
+        return -1;
+    }
+    pos = (uint32_t)rc;
+
+    /* 跳过QTYPE (2字节) 和 QCLASS (2字节) */
+    if (pos + 4 > len) {
+        stats.parse_errors++;
+        return -1;
+    }
+    pos += 4;
+
+    /* 解析answer section */
+    char current_cname[DNS_MAX_NAME] = {0};
+    int found_cname = 0;
 
     for (uint16_t i = 0; i < an; i++) {
-        if (pos >= len) return;
+        if (pos >= len) break;
+
         char name[DNS_MAX_NAME];
         uint32_t c2 = 0;
         int r2 = decode_name(msg, len, pos, name, sizeof(name), &c2);
-        if (r2 < 0) return;
-        pos += (uint32_t)r2;
-        if (pos + 10 > len) return;
+        if (r2 < 0) {
+            stats.parse_errors++;
+            return -1;
+        }
+        if (r2 <= (int)pos) {
+            stats.parse_errors++;
+            return -1;
+        }
+        pos = (uint32_t)r2;
+
+        if (pos + 10 > len) {
+            stats.parse_errors++;
+            return -1;
+        }
+
         uint16_t rtype  = be16(msg + pos);
         uint16_t rclass = be16(msg + pos + 2);
         uint32_t ttl    = ((uint32_t)msg[pos + 4] << 24) |
@@ -348,23 +420,148 @@ void dns_handle_response(const uint8_t *msg, uint32_t len,
                            (uint32_t)msg[pos + 7];
         uint16_t rdlen  = be16(msg + pos + 8);
         pos += 10;
-        if (pos + rdlen > len) return;
-        if (rtype == 1 && rclass == 1 && rdlen == 4) {
-            ipv4_addr_t ip;
-            ip.addr = ((uint32_t)msg[pos] << 24) |
-                      ((uint32_t)msg[pos + 1] << 16) |
-                      ((uint32_t)msg[pos + 2] <<  8) |
-                       (uint32_t)msg[pos + 3];
-            cache_insert(name, ip, ttl * 1000U);
-            mutex_lock(&dns_lock);
-            dns_pending_t *p = pending_find(id);
-            if (p) {
-                p->resolved = 1;
-                p->answer = ip;
-            }
-            mutex_unlock(&dns_lock);
+
+        if (pos + rdlen > len) {
+            stats.parse_errors++;
+            return -1;
         }
+
+        if (rclass != DNS_CLASS_IN) {
+            pos += rdlen;
+            continue;
+        }
+
+        if (rtype == DNS_TYPE_A && rdlen == 4) {
+            /* A记录 - IPv4地址 */
+            result->ip.addr = ((uint32_t)msg[pos] << 24) |
+                              ((uint32_t)msg[pos + 1] << 16) |
+                              ((uint32_t)msg[pos + 2] <<  8) |
+                               (uint32_t)msg[pos + 3];
+            result->have_ip = 1;
+            result->ttl = ttl;
+        } else if (rtype == DNS_TYPE_CNAME && rdlen > 0) {
+            /* CNAME记录 - 规范名称 */
+            char cname_buf[DNS_MAX_NAME];
+            uint32_t cname_consumed = 0;
+            int cname_rc = decode_name(msg, len, pos, cname_buf,
+                                       sizeof(cname_buf), &cname_consumed);
+            if (cname_rc >= 0) {
+                strncpy(result->cname, cname_buf, DNS_MAX_NAME - 1);
+                result->cname[DNS_MAX_NAME - 1] = 0;
+                result->have_cname = 1;
+                result->ttl = ttl;
+                found_cname = 1;
+                strncpy(current_cname, cname_buf, DNS_MAX_NAME - 1);
+                current_cname[DNS_MAX_NAME - 1] = 0;
+                stats.cname_follows++;
+            }
+        }
+
         pos += rdlen;
+    }
+
+    return 0;
+}
+
+void dns_handle_response(const uint8_t *msg, uint32_t len,
+                         ipv4_addr_t from, uint16_t from_port) {
+    (void)from; (void)from_port;
+    if (len < 12) return;
+    uint16_t id     = be16(msg + 0);
+    uint16_t flags  = be16(msg + 2);
+    uint16_t qd     = be16(msg + 4);
+    uint16_t an     = be16(msg + 6);
+
+    /* 验证是响应 (QR=1) */
+    if (!(flags & DNS_FLAG_QR)) return;
+
+    /* 检查RCODE */
+    if ((flags & DNS_RCODE_MASK) != 0) {
+        stats.parse_errors++;
+        return;
+    }
+
+    if (qd < 1) return;
+
+    dns_result_t result;
+    int pr = dns_parse_response(msg, len, id, &result);
+    if (pr != 0) {
+        /* 解析失败时使用原有兼容逻辑 */
+        uint32_t pos = 12;
+        char qname[DNS_MAX_NAME];
+        uint32_t consumed = 0;
+        int rc = decode_name(msg, len, pos, qname, sizeof(qname), &consumed);
+        if (rc < 0) return;
+        pos += (uint32_t)rc;
+        pos += 4;
+
+        for (uint16_t i = 0; i < an; i++) {
+            if (pos >= len) return;
+            char name[DNS_MAX_NAME];
+            uint32_t c2 = 0;
+            int r2 = decode_name(msg, len, pos, name, sizeof(name), &c2);
+            if (r2 < 0) return;
+            pos += (uint32_t)r2;
+            if (pos + 10 > len) return;
+            uint16_t rtype  = be16(msg + pos);
+            uint16_t rclass = be16(msg + pos + 2);
+            uint32_t ttl    = ((uint32_t)msg[pos + 4] << 24) |
+                              ((uint32_t)msg[pos + 5] << 16) |
+                              ((uint32_t)msg[pos + 6] <<  8) |
+                               (uint32_t)msg[pos + 7];
+            uint16_t rdlen  = be16(msg + pos + 8);
+            pos += 10;
+            if (pos + rdlen > len) return;
+            if (rtype == DNS_TYPE_A && rclass == DNS_CLASS_IN && rdlen == 4) {
+                ipv4_addr_t ip;
+                ip.addr = ((uint32_t)msg[pos] << 24) |
+                          ((uint32_t)msg[pos + 1] << 16) |
+                          ((uint32_t)msg[pos + 2] <<  8) |
+                           (uint32_t)msg[pos + 3];
+                cache_insert(name, ip, ttl * 1000U);
+                mutex_lock(&dns_lock);
+                dns_pending_t *p = pending_find(id);
+                if (p) {
+                    p->resolved = 1;
+                    p->answer = ip;
+                }
+                mutex_unlock(&dns_lock);
+            }
+            pos += rdlen;
+        }
+        return;
+    }
+
+    /* 使用dns_parse_response的结果 */
+    if (result.have_ip) {
+        char qname[DNS_MAX_NAME] = {0};
+        uint32_t pos = 12;
+        uint32_t consumed = 0;
+        int rc = decode_name(msg, len, pos, qname, sizeof(qname), &consumed);
+        if (rc >= 0) {
+            cache_insert(qname, result.ip, result.ttl * 1000U);
+        }
+
+        if (result.have_cname) {
+            cache_insert(result.cname, result.ip, result.ttl * 1000U);
+        }
+
+        mutex_lock(&dns_lock);
+        dns_pending_t *p = pending_find(id);
+        if (p) {
+            p->resolved = 1;
+            p->answer = result.ip;
+        }
+        mutex_unlock(&dns_lock);
+    } else if (result.have_cname) {
+        /* 只有CNAME没有A记录时，可以启动新查询（简化处理: 不自动追踪） */
+        mutex_lock(&dns_lock);
+        dns_pending_t *p = pending_find(id);
+        if (p) {
+            /* 标记需要追踪CNAME，这里简化为失败 */
+            pending_release(p);
+        }
+        mutex_unlock(&dns_lock);
     }
 }
 

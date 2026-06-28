@@ -7,7 +7,7 @@
 
 #include "funsos_audio.h"
 #include "funsos_libc.h"
-#include <stddef.h>
+#include "stddef.h"
 
 /* ================================================================
  *  全局状态

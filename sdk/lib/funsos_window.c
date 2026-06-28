@@ -8,7 +8,7 @@
 #include "funsos_window.h"
 #include "funsos_libc.h"
 #include "funsos_graphics.h"
-#include <stddef.h>
+#include "stddef.h"
 
 /* ---- 全局状态 ---- */
 #define MAX_WINDOWS 32

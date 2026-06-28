@@ -5,8 +5,6 @@
 #include "process.h"
 #include "stddef.h"
 
-#define PIPE_BUFFER_SIZE 4096
-
 int pipe_create(pipe_t **pipe) {
     *pipe = (pipe_t *)kmalloc(sizeof(pipe_t));
     if (*pipe == NULL) {
@@ -37,6 +35,10 @@ int pipe_read(pipe_t *pipe, void *buf, uint32_t count) {
     mutex_lock(&pipe->mutex);
 
     while (pipe->count == 0) {
+        if (pipe->writers == 0) {
+            mutex_unlock(&pipe->mutex);
+            return 0;
+        }
         mutex_unlock(&pipe->mutex);
         sem_wait(&pipe->read_wait);
         mutex_lock(&pipe->mutex);

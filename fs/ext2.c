@@ -1223,13 +1223,31 @@ int32_t ext2_fsync(uint32_t ino) {
     return 0;
 }
 
+static int32_t ext2_file_ioctl(file_t *file, uint32_t cmd, void *arg) {
+    if (!file || !file->inode) return -EBADF;
+    switch (cmd) {
+        case FIONREAD:
+            if (arg) {
+                int32_t avail = (int32_t)file->inode->size - (int32_t)file->offset;
+                if (avail < 0) avail = 0;
+                *(int32_t *)arg = avail;
+                return 0;
+            }
+            return -EINVAL;
+        case FIONBIO:
+            return 0;
+        default:
+            return -ENOSYS;
+    }
+}
+
 file_ops_t ext2_file_ops = {
     .open = ext2_file_open,
     .read = ext2_file_read,
     .write = ext2_file_write,
     .close = ext2_file_close,
     .seek = ext2_file_seek,
-    .ioctl = NULL
+    .ioctl = ext2_file_ioctl
 };
 
 int32_t ext2_mount(superblock_t *sb_vfs, void *data) {

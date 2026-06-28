@@ -1,8 +1,8 @@
 #ifndef USER_SYSCALL_H
 #define USER_SYSCALL_H
 
-#include <stdint.h>
-#include <stddef.h>
+#include "stdint.h"
+#include "stddef.h"
 
 #define SYS_EXIT      1
 #define SYS_FORK      2
