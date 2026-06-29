@@ -6,6 +6,7 @@
 #include "keyboard.h"
 #include "io.h"
 #include "rtc.h"
+#include "klog.h"
 
 static devfs_device_t *device_list = NULL;
 
@@ -52,17 +53,24 @@ int32_t devfs_mount_internal(superblock_t *sb, void *data) {
 
     sb->root = devfs_root_inode;
     sb->fs_type = FS_TYPE_DEVFS;
+    klog_info("devfs: mounted successfully");
     return 0;
 }
 
 int32_t devfs_init(void) {
     int32_t ret = vfs_mount("/dev", FS_TYPE_DEVFS, NULL);
-    if (ret != 0) return ret;
+    if (ret != 0) {
+        klog_err("devfs: failed to mount, ret=%d", ret);
+        return ret;
+    }
+    klog_info("devfs: initializing standard devices");
     devfs_create_std_devices();
+    klog_info("devfs: initialization complete");
     return 0;
 }
 
-int32_t devfs_register(const char *name, uint32_t type, uint32_t major, uint32_t minor, file_ops_t *ops, void *data) {
+int32_t devfs_register_with_perm(const char *name, uint32_t type, uint32_t major, uint32_t minor,
+                                 file_ops_t *ops, void *data, uint32_t mode, uint32_t uid, uint32_t gid) {
     devfs_device_t *dev = (devfs_device_t *)kmalloc(sizeof(devfs_device_t));
     if (!dev) return -1;
     memset(dev, 0, sizeof(devfs_device_t));
@@ -72,6 +80,9 @@ int32_t devfs_register(const char *name, uint32_t type, uint32_t major, uint32_t
     dev->type = type;
     dev->major = major;
     dev->minor = minor;
+    dev->mode = mode;
+    dev->uid = uid;
+    dev->gid = gid;
     dev->ops = ops;
     dev->private_data = data;
 
@@ -96,10 +107,15 @@ int32_t devfs_register(const char *name, uint32_t type, uint32_t major, uint32_t
         memset(inode, 0, sizeof(inode_t));
         inode->ino = (major << 8) | minor;
         if (type == DEVICE_BLOCK) {
-            inode->mode = FILE_MODE_REG | FILE_MODE_READ | FILE_MODE_WRITE;
+            inode->mode = FILE_MODE_REG;
         } else {
-            inode->mode = FILE_MODE_REG | FILE_MODE_READ | FILE_MODE_WRITE;
+            inode->mode = FILE_MODE_REG;
         }
+        if (mode & 0444) inode->mode |= FILE_MODE_READ;
+        if (mode & 0222) inode->mode |= FILE_MODE_WRITE;
+        if (mode & 0111) inode->mode |= FILE_MODE_EXEC;
+        inode->uid = uid;
+        inode->gid = gid;
         inode->sb = devfs_root_inode->sb;
         inode->private_data = dev;
         inode->dentries = dentry;
@@ -110,7 +126,12 @@ int32_t devfs_register(const char *name, uint32_t type, uint32_t major, uint32_t
         devfs_root_dentry->child = dentry;
     }
 
+    klog_info("devfs: registered device %s (%u,%u)", name, major, minor);
     return 0;
+}
+
+int32_t devfs_register(const char *name, uint32_t type, uint32_t major, uint32_t minor, file_ops_t *ops, void *data) {
+    return devfs_register_with_perm(name, type, major, minor, ops, data, DEV_PERM_RW, 0, 0);
 }
 
 int32_t devfs_unregister(const char *name) {
@@ -144,6 +165,7 @@ int32_t devfs_unregister(const char *name) {
                 }
             }
 
+            klog_info("devfs: unregistered device %s", name);
             kfree(curr);
             return 0;
         }
@@ -198,7 +220,6 @@ static int32_t devfs_seek(file_t *file, int32_t offset, int32_t whence) {
     if (dev && dev->ops && dev->ops->seek) {
         return dev->ops->seek(file, offset, whence);
     }
-    /* For most character devices, seeking is not supported (return 0 for no-op) */
     if (!file->inode || (file->inode->mode & FILE_MODE_DIR)) return -ENOTDIR;
     switch (whence) {
         case SEEK_SET: file->offset = (uint32_t)offset; break;
@@ -266,6 +287,27 @@ static file_ops_t zero_ops = {
     .ioctl = NULL
 };
 
+/* /dev/full - Read returns zeros, write returns ENOSPC */
+static int32_t full_read(file_t *file, void *buf, uint32_t count) {
+    return zero_read(file, buf, count);
+}
+
+static int32_t full_write(file_t *file, const void *buf, uint32_t count) {
+    (void)file;
+    (void)buf;
+    (void)count;
+    return -ENOSPC;
+}
+
+static file_ops_t full_ops = {
+    .open = NULL,
+    .read = full_read,
+    .write = full_write,
+    .close = NULL,
+    .seek = NULL,
+    .ioctl = NULL
+};
+
 /* /dev/console and /dev/tty - Write to VGA text mode */
 static int32_t console_read(file_t *file, void *buf, uint32_t count) {
     (void)file;
@@ -328,14 +370,14 @@ static file_ops_t kbd_ops = {
 
 /* /dev/mem - Physical memory access */
 static int32_t mem_read(file_t *file, void *buf, uint32_t count) {
-    uint8_t *src = (uint8_t *)file->offset;
+    uint8_t *src = (uint8_t *)(uintptr_t)file->offset;
     memcpy(buf, src, count);
     file->offset += count;
     return (int32_t)count;
 }
 
 static int32_t mem_write(file_t *file, const void *buf, uint32_t count) {
-    uint8_t *dst = (uint8_t *)file->offset;
+    uint8_t *dst = (uint8_t *)(uintptr_t)file->offset;
     memcpy(dst, buf, count);
     file->offset += count;
     return (int32_t)count;
@@ -345,6 +387,24 @@ static file_ops_t mem_ops = {
     .open = NULL,
     .read = mem_read,
     .write = mem_write,
+    .close = NULL,
+    .seek = NULL,
+    .ioctl = NULL
+};
+
+/* /dev/kmem - Kernel virtual memory access (same as mem for now) */
+static int32_t kmem_read(file_t *file, void *buf, uint32_t count) {
+    return mem_read(file, buf, count);
+}
+
+static int32_t kmem_write(file_t *file, const void *buf, uint32_t count) {
+    return mem_write(file, buf, count);
+}
+
+static file_ops_t kmem_ops = {
+    .open = NULL,
+    .read = kmem_read,
+    .write = kmem_write,
     .close = NULL,
     .seek = NULL,
     .ioctl = NULL
@@ -412,7 +472,6 @@ static int32_t random_read(file_t *file, void *buf, uint32_t count) {
 static int32_t random_write(file_t *file, const void *buf, uint32_t count) {
     (void)file;
     (void)buf;
-    /* Allow writing to seed the random pool */
     if (count > 0) {
         const uint8_t *p = (const uint8_t *)buf;
         random_seed ^= p[0];
@@ -474,22 +533,28 @@ static file_ops_t disk_ops = {
 };
 
 void devfs_create_std_devices(void) {
-    devfs_register("null",    DEVICE_CHAR, 1, 3, &null_ops,    NULL);
-    devfs_register("zero",    DEVICE_CHAR, 1, 5, &zero_ops,    NULL);
-    devfs_register("console", DEVICE_CHAR, 5, 1, &console_ops, NULL);
-    devfs_register("tty",     DEVICE_CHAR, 5, 0, &console_ops, NULL);
-    devfs_register("kbd",     DEVICE_CHAR, 4, 0, &kbd_ops,     NULL);
-    devfs_register("mem",     DEVICE_CHAR, 1, 1, &mem_ops,     NULL);
-    devfs_register("port",    DEVICE_CHAR, 1, 4, &port_ops,    NULL);
-    devfs_register("random",  DEVICE_CHAR, 1, 8, &random_ops,  NULL);
-    devfs_register("urandom", DEVICE_CHAR, 1, 9, &urandom_ops, NULL);
+    klog_info("devfs: creating standard character devices");
 
-    /* Disk devices (stubs) */
-    devfs_register("sda",     DEVICE_BLOCK, 8, 0, &disk_ops,   NULL);
-    devfs_register("sda1",    DEVICE_BLOCK, 8, 1, &disk_ops,   NULL);
-    devfs_register("sda2",    DEVICE_BLOCK, 8, 2, &disk_ops,   NULL);
-    devfs_register("sda3",    DEVICE_BLOCK, 8, 3, &disk_ops,   NULL);
-    devfs_register("sda4",    DEVICE_BLOCK, 8, 4, &disk_ops,   NULL);
-    devfs_register("sdb",     DEVICE_BLOCK, 8, 16, &disk_ops,  NULL);
-    devfs_register("sdb1",    DEVICE_BLOCK, 8, 17, &disk_ops,  NULL);
+    devfs_register_with_perm("null",    DEVICE_CHAR, 1, 3, &null_ops,    NULL, DEV_PERM_RW, 0, 0);
+    devfs_register_with_perm("zero",    DEVICE_CHAR, 1, 5, &zero_ops,    NULL, DEV_PERM_RW, 0, 0);
+    devfs_register_with_perm("full",    DEVICE_CHAR, 1, 7, &full_ops,    NULL, DEV_PERM_RW, 0, 0);
+    devfs_register_with_perm("console", DEVICE_CHAR, 5, 1, &console_ops, NULL, DEV_PERM_RW, 0, 0);
+    devfs_register_with_perm("tty",     DEVICE_CHAR, 5, 0, &console_ops, NULL, DEV_PERM_RW, 0, 0);
+    devfs_register_with_perm("kbd",     DEVICE_CHAR, 4, 0, &kbd_ops,     NULL, DEV_PERM_RW, 0, 0);
+    devfs_register_with_perm("mem",     DEVICE_CHAR, 1, 1, &mem_ops,     NULL, DEV_PERM_ROOT_RW, 0, 0);
+    devfs_register_with_perm("kmem",    DEVICE_CHAR, 1, 2, &kmem_ops,    NULL, DEV_PERM_ROOT_RW, 0, 0);
+    devfs_register_with_perm("port",    DEVICE_CHAR, 1, 4, &port_ops,    NULL, DEV_PERM_ROOT_RW, 0, 0);
+    devfs_register_with_perm("random",  DEVICE_CHAR, 1, 8, &random_ops,  NULL, DEV_PERM_RW, 0, 0);
+    devfs_register_with_perm("urandom", DEVICE_CHAR, 1, 9, &urandom_ops, NULL, DEV_PERM_RW, 0, 0);
+
+    klog_info("devfs: creating standard block devices");
+    devfs_register_with_perm("sda",     DEVICE_BLOCK, 8, 0, &disk_ops,   NULL, DEV_PERM_RW, 0, 0);
+    devfs_register_with_perm("sda1",    DEVICE_BLOCK, 8, 1, &disk_ops,   NULL, DEV_PERM_RW, 0, 0);
+    devfs_register_with_perm("sda2",    DEVICE_BLOCK, 8, 2, &disk_ops,   NULL, DEV_PERM_RW, 0, 0);
+    devfs_register_with_perm("sda3",    DEVICE_BLOCK, 8, 3, &disk_ops,   NULL, DEV_PERM_RW, 0, 0);
+    devfs_register_with_perm("sda4",    DEVICE_BLOCK, 8, 4, &disk_ops,   NULL, DEV_PERM_RW, 0, 0);
+    devfs_register_with_perm("sdb",     DEVICE_BLOCK, 8, 16, &disk_ops,  NULL, DEV_PERM_RW, 0, 0);
+    devfs_register_with_perm("sdb1",    DEVICE_BLOCK, 8, 17, &disk_ops,  NULL, DEV_PERM_RW, 0, 0);
+
+    klog_info("devfs: standard devices created");
 }

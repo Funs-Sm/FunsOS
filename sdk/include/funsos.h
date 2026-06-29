@@ -55,6 +55,8 @@
 #define FUNSOS_HAS_TIMER_EXT  1   /* 扩展定时器 API */
 #define FUNSOS_HAS_VFS        1   /* 虚拟文件系统 */
 #define FUNSOS_HAS_IPC        1   /* 进程间通信扩展 */
+#define FUNSOS_HAS_NOTIFY     1   /* 系统通知 */
+#define FUNSOS_HAS_SCHED      1   /* 调度器控制 */
 
 /* ---- 错误码枚举 ----
  * 所有 FUNSOS API 函数的统一错误码定义。
@@ -156,6 +158,7 @@ int funs_app_cleanup(void);
 #include "funsos_time.h"
 #include "funsos_ipc.h"
 #include "funsos_libc.h"
+#include "funsos_package.h"
 
 int funs_get_system_info(funsos_sysinfo_t *info);
 

@@ -71,6 +71,7 @@
 #include "vga_text.h"
 #include "serial.h"
 #include "service_registry.h"
+#include "splash.h"
 
 static inline void sti(void) {
     asm volatile("sti");
@@ -431,6 +432,12 @@ void kernel_main(void) {
         register_core_services();
         klog_info("System services framework initialized");
     }
+
+    /* ================================================================
+     * 显示开屏动画
+     * ================================================================ */
+    klog_info("Showing splash screen...");
+    splash_show();
 
     /* ================================================================
      * 启动纯命令行 Shell 模式

@@ -44,6 +44,10 @@
 #define EPERM   1
 #define EIO     5
 #define ENOMEM  12
+#define ENOSPC  28
+#define EROFS   30
+#define ENODEV  19
+#define EBUSY   16
 
 /* ioctl commands */
 #define FIONREAD  0x541B

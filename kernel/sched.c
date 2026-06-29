@@ -957,10 +957,436 @@ int sched_get_debug_level(void) {
     return sched_debug_level;
 }
 
+/* ============================================================
+ * Deadline 调度器 (SCHED_DEADLINE) - 最早截止时间优先 (EDF)
+ * ============================================================ */
+
+static dl_node_t dl_nodes[SCHED_DL_MAX_PROCS];
+static dl_rq_t   dl_rq;
+
+void sched_dl_init(void) {
+    for (int i = 0; i < SCHED_DL_MAX_PROCS; i++) {
+        dl_nodes[i].proc = NULL;
+        dl_nodes[i].next = NULL;
+        dl_nodes[i].prev = NULL;
+        memset(&dl_nodes[i].params, 0, sizeof(deadline_params_t));
+    }
+    dl_rq.head = NULL;
+    dl_rq.tail = NULL;
+    dl_rq.nr_running = 0;
+    dl_rq.running_bw = 0;
+}
+
+static dl_node_t *dl_alloc_node(void) {
+    for (int i = 0; i < SCHED_DL_MAX_PROCS; i++) {
+        if (dl_nodes[i].proc == NULL) {
+            return &dl_nodes[i];
+        }
+    }
+    return NULL;
+}
+
+static void dl_free_node(dl_node_t *node) {
+    if (node) {
+        node->proc = NULL;
+        node->next = NULL;
+        node->prev = NULL;
+    }
+}
+
+static dl_node_t *dl_find_node(pcb_t *proc) {
+    dl_node_t *node = dl_rq.head;
+    while (node) {
+        if (node->proc == proc) return node;
+        node = node->next;
+    }
+    return NULL;
+}
+
+int sched_set_policy_deadline(pcb_t *proc, uint64_t runtime,
+                             uint64_t deadline, uint64_t period) {
+    if (!proc || runtime == 0 || deadline == 0 || period == 0) return -1;
+    if (deadline > period) return -1;
+    if (runtime > deadline) return -1;
+
+    uint32_t flags = spinlock_irq_save(&sched.lock);
+
+    if (proc->state == PROCESS_READY) {
+        if (proc->sched_policy & PROCESS_REAL_TIME) {
+            int rt_level = proc->priority / 50;
+            if (rt_level >= SCHED_RT_QUEUE_COUNT) rt_level = SCHED_RT_QUEUE_COUNT - 1;
+            queue_remove(&sched.rt_queues[rt_level], proc);
+        } else if (proc->sched_policy & PROCESS_CFS) {
+            (void)sched_cfs_dequeue();
+        } else {
+            queue_remove(&sched.mlfq_queues[proc->queue_level], proc);
+        }
+    }
+
+    proc->sched_policy = PROCESS_DEADLINE;
+
+    dl_node_t *node = dl_alloc_node();
+    if (!node) {
+        spinlock_irq_restore(&sched.lock, flags);
+        return -1;
+    }
+    node->proc = proc;
+    node->params.runtime = runtime;
+    node->params.deadline = deadline;
+    node->params.period = period;
+    node->params.remaining_runtime = runtime;
+    node->params.current_deadline = sched.tick_count + deadline;
+    node->params.active = 1;
+
+    dl_rq.running_bw += (runtime * 1000) / period;
+
+    if (proc->state == PROCESS_READY) {
+        sched_dl_enqueue(proc);
+    }
+
+    spinlock_irq_restore(&sched.lock, flags);
+    return 0;
+}
+
+static void dl_insert_sorted(dl_node_t *node) {
+    dl_node_t *curr = dl_rq.head;
+    dl_node_t *prev = NULL;
+
+    while (curr && curr->params.current_deadline <= node->params.current_deadline) {
+        prev = curr;
+        curr = curr->next;
+    }
+
+    node->prev = prev;
+    node->next = curr;
+
+    if (prev) {
+        prev->next = node;
+    } else {
+        dl_rq.head = node;
+    }
+    if (curr) {
+        curr->prev = node;
+    } else {
+        dl_rq.tail = node;
+    }
+}
+
+void sched_dl_enqueue(pcb_t *proc) {
+    if (!proc) return;
+    dl_node_t *node = dl_find_node(proc);
+    if (!node) return;
+
+    if (node->params.remaining_runtime == 0) {
+        node->params.remaining_runtime = node->params.runtime;
+        node->params.current_deadline = sched.tick_count + node->params.deadline;
+    }
+    node->params.active = 1;
+
+    dl_insert_sorted(node);
+    dl_rq.nr_running++;
+}
+
+pcb_t *sched_dl_dequeue(void) {
+    if (!dl_rq.head) return NULL;
+
+    dl_node_t *node = dl_rq.head;
+    dl_rq.head = node->next;
+    if (dl_rq.head) {
+        dl_rq.head->prev = NULL;
+    } else {
+        dl_rq.tail = NULL;
+    }
+    node->next = NULL;
+    node->prev = NULL;
+    dl_rq.nr_running--;
+
+    return node->proc;
+}
+
+void sched_dl_tick(pcb_t *proc) {
+    if (!proc) return;
+    dl_node_t *node = dl_find_node(proc);
+    if (!node) return;
+
+    node->params.remaining_runtime--;
+
+    if (node->params.remaining_runtime == 0) {
+        node->params.active = 0;
+        proc->need_resched = 1;
+    }
+}
+
+int sched_dl_check_preempt(pcb_t *curr, pcb_t *new_proc) {
+    if (!curr || !new_proc) return 0;
+    if (!(curr->sched_policy & PROCESS_DEADLINE)) return 1;
+    if (!(new_proc->sched_policy & PROCESS_DEADLINE)) return 0;
+
+    dl_node_t *curr_node = dl_find_node(curr);
+    dl_node_t *new_node = dl_find_node(new_proc);
+    if (!curr_node || !new_node) return 0;
+
+    return (new_node->params.current_deadline < curr_node->params.current_deadline);
+}
+
+/* ============================================================
+ * CPU 亲和性 (CPU Affinity)
+ * ============================================================ */
+
+static cpu_affinity_t proc_affinity[MAX_PROCESSES];
+
+int sched_set_affinity(pcb_t *proc, uint32_t cpumask) {
+    if (!proc || cpumask == 0) return -1;
+    if (proc->pid >= MAX_PROCESSES) return -1;
+    proc_affinity[proc->pid].cpumask = cpumask;
+    proc_affinity[proc->pid].cpu_count = 0;
+    for (int i = 0; i < 32; i++) {
+        if (cpumask & (1 << i)) {
+            proc_affinity[proc->pid].cpu_count++;
+        }
+    }
+    return 0;
+}
+
+uint32_t sched_get_affinity(pcb_t *proc) {
+    if (!proc || proc->pid >= MAX_PROCESSES) return 0;
+    return proc_affinity[proc->pid].cpumask;
+}
+
+int sched_set_affinity_pid(pid_t pid, uint32_t cpumask) {
+    pcb_t *proc = sched_find_process(pid);
+    if (!proc) return -1;
+    return sched_set_affinity(proc, cpumask);
+}
+
+uint32_t sched_get_affinity_pid(pid_t pid) {
+    pcb_t *proc = sched_find_process(pid);
+    if (!proc) return 0;
+    return sched_get_affinity(proc);
+}
+
+/* ============================================================
+ * 优先级继承 (Priority Inheritance)
+ * ============================================================ */
+
+static pi_info_t pi_table[MAX_PROCESSES];
+
+void sched_pi_init(void) {
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        pi_table[i].owner = NULL;
+        pi_table[i].original_priority = 0;
+        pi_table[i].boosted_priority = 0;
+        pi_table[i].boosted = 0;
+    }
+}
+
+int sched_pi_boost(pcb_t *proc, uint32_t new_priority) {
+    if (!proc) return -1;
+    if (proc->pid >= MAX_PROCESSES) return -1;
+    if (new_priority > SCHED_PRIORITY_MAX) new_priority = SCHED_PRIORITY_MAX;
+
+    pi_info_t *pi = &pi_table[proc->pid];
+
+    if (!pi->boosted) {
+        pi->original_priority = proc->effective_priority;
+        pi->boosted = 1;
+    }
+
+    if (new_priority > pi->boosted_priority) {
+        pi->boosted_priority = new_priority;
+        sched_set_priority(proc, new_priority);
+    }
+
+    return 0;
+}
+
+int sched_pi_unboost(pcb_t *proc) {
+    if (!proc) return -1;
+    if (proc->pid >= MAX_PROCESSES) return -1;
+
+    pi_info_t *pi = &pi_table[proc->pid];
+    if (!pi->boosted) return 0;
+
+    sched_set_priority(proc, pi->original_priority);
+    pi->boosted = 0;
+    pi->boosted_priority = 0;
+    pi->original_priority = 0;
+
+    return 0;
+}
+
+int sched_pi_mutex_lock(pcb_t *holder, pcb_t *waiter) {
+    if (!holder || !waiter) return -1;
+    if (holder->pid >= MAX_PROCESSES || waiter->pid >= MAX_PROCESSES) return -1;
+
+    if (waiter->effective_priority > holder->effective_priority) {
+        sched_pi_boost(holder, waiter->effective_priority);
+    }
+    return 0;
+}
+
+int sched_pi_mutex_unlock(pcb_t *holder) {
+    if (!holder) return -1;
+    return sched_pi_unboost(holder);
+}
+
+/* ============================================================
+ * 调度统计 (Scheduler Statistics)
+ * ============================================================ */
+
+static sched_stat_t proc_stats[MAX_PROCESSES];
+static sched_global_stats_t global_stats;
+
+void sched_stats_init(void) {
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        memset(&proc_stats[i], 0, sizeof(sched_stat_t));
+        proc_stats[i].min_runtime = (uint64_t)-1;
+    }
+    memset(&global_stats, 0, sizeof(sched_global_stats_t));
+}
+
+void sched_stats_account(pcb_t *proc, int ticks_used, int voluntary) {
+    if (!proc || proc->pid >= MAX_PROCESSES) return;
+
+    sched_stat_t *st = &proc_stats[proc->pid];
+    uint64_t ticks = (uint64_t)ticks_used;
+
+    st->sched_count++;
+    st->total_runtime += ticks;
+    st->context_switches++;
+    global_stats.total_context_switches++;
+
+    if (ticks > st->max_runtime) st->max_runtime = ticks;
+    if (ticks < st->min_runtime) st->min_runtime = ticks;
+
+    if (st->sched_count > 0) {
+        st->avg_runtime = st->total_runtime / st->sched_count;
+    }
+
+    if (voluntary) {
+        st->voluntary_ctx++;
+        global_stats.yield_count++;
+    } else {
+        st->involuntary_ctx++;
+        global_stats.preempt_count++;
+    }
+
+    global_stats.total_ticks += ticks_used;
+    if (proc->type == PROCESS_USER) {
+        global_stats.user_ticks += ticks_used;
+    } else {
+        global_stats.kernel_ticks += ticks_used;
+    }
+    st->last_sched_time = sched.tick_count;
+}
+
+sched_stat_t *sched_get_proc_stats(pid_t pid) {
+    if (pid >= MAX_PROCESSES) return NULL;
+    return &proc_stats[pid];
+}
+
+const sched_global_stats_t *sched_get_global_stats(void) {
+    return &global_stats;
+}
+
+void sched_stats_print(void) {
+    printf("=== Global Scheduler Statistics ===\n");
+    printf("Total context switches: %llu\n", global_stats.total_context_switches);
+    printf("Total ticks: %llu\n", global_stats.total_ticks);
+    printf("User ticks: %llu\n", global_stats.user_ticks);
+    printf("Kernel ticks: %llu\n", global_stats.kernel_ticks);
+    printf("Preempt count: %llu\n", global_stats.preempt_count);
+    printf("Yield count: %llu\n", global_stats.yield_count);
+    printf("\nPer-process stats:\n");
+    pcb_t *proc = process_list;
+    while (proc) {
+        sched_stat_t *st = &proc_stats[proc->pid];
+        printf("  PID %d (%s): sched=%llu runtime=%llu cs=%llu\n",
+               proc->pid, proc->name, st->sched_count,
+               st->total_runtime, st->context_switches);
+        proc = proc->next;
+    }
+    printf("==================================\n");
+}
+
+void sched_stats_reset(void) {
+    memset(&global_stats, 0, sizeof(sched_global_stats_t));
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        memset(&proc_stats[i], 0, sizeof(sched_stat_t));
+        proc_stats[i].min_runtime = (uint64_t)-1;
+    }
+}
+
+/* ============================================================
+ * 批处理调度 (Batch Scheduling)
+ * ============================================================ */
+
+static batch_job_t batch_jobs[BATCH_MAX_JOBS];
+static uint32_t batch_job_count = 0;
+
+void sched_batch_init(void) {
+    for (int i = 0; i < BATCH_MAX_JOBS; i++) {
+        batch_jobs[i].pid = 0;
+        batch_jobs[i].priority = 0;
+        batch_jobs[i].est_runtime = 0;
+        batch_jobs[i].used = 0;
+    }
+    batch_job_count = 0;
+}
+
+int sched_batch_add(pid_t pid, uint32_t prio, uint64_t est_runtime) {
+    for (int i = 0; i < BATCH_MAX_JOBS; i++) {
+        if (!batch_jobs[i].used) {
+            batch_jobs[i].pid = pid;
+            batch_jobs[i].priority = prio;
+            batch_jobs[i].est_runtime = est_runtime;
+            batch_jobs[i].used = 1;
+            batch_job_count++;
+
+            pcb_t *proc = sched_find_process(pid);
+            if (proc) {
+                proc->sched_policy |= PROCESS_BATCH;
+                if (prio < SCHED_PRIORITY_MAX) {
+                    sched_set_priority(proc, prio);
+                }
+            }
+            return 0;
+        }
+    }
+    return -1;
+}
+
+int sched_batch_remove(pid_t pid) {
+    for (int i = 0; i < BATCH_MAX_JOBS; i++) {
+        if (batch_jobs[i].used && batch_jobs[i].pid == pid) {
+            batch_jobs[i].used = 0;
+            batch_jobs[i].pid = 0;
+            batch_job_count--;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+void sched_batch_tick(void) {
+    /* 批处理调度：低系统负载时运行批处理作业 */
+    uint32_t load = sched_get_avg_load();
+    if (load > 50) return; /* 负载超过50%时不调度批处理作业 */
+    /* 负载低时，批处理作业可以正常参与调度 */
+}
+
 /* 在sched_init中初始化新增模块 */
 __attribute__((constructor))
 static void sched_extended_init(void) {
     sched_cfs_init();
     sched_load_init();
     sched_pg_init();
+    sched_dl_init();
+    sched_pi_init();
+    sched_stats_init();
+    sched_batch_init();
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        proc_affinity[i].cpumask = 0x1;
+        proc_affinity[i].cpu_count = 1;
+    }
 }

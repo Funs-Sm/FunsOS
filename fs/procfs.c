@@ -10,6 +10,11 @@
 #include "net.h"
 #include "arp.h"
 #include "dhcp.h"
+#include "tcp.h"
+#include "udp.h"
+#include "vmm.h"
+#include "klog.h"
+#include "user.h"
 
 static procfs_entry_t entries[64];
 static uint32_t entry_count;
@@ -169,6 +174,268 @@ static int32_t partitions_read(char *buf, uint32_t offset, uint32_t count) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  /proc/stat                                                          */
+/* ------------------------------------------------------------------ */
+
+static int32_t stat_read(char *buf, uint32_t offset, uint32_t count) {
+    char tmp[1024];
+    int32_t len = 0;
+    const sched_global_stats_t *gs = sched_get_global_stats();
+
+    len += sprintf(tmp + len, "cpu  %llu 0 %llu %llu 0 0 0 0 0 0\n",
+        gs->user_ticks, gs->kernel_ticks, gs->idle_ticks);
+
+    uint32_t cpu_cnt = smp_get_cpu_count();
+    for (uint32_t i = 0; i < cpu_cnt; i++) {
+        len += sprintf(tmp + len, "cpu%u %llu 0 %llu %llu 0 0 0 0 0 0\n",
+            i, gs->user_ticks / cpu_cnt, gs->kernel_ticks / cpu_cnt, gs->idle_ticks / cpu_cnt);
+    }
+
+    len += sprintf(tmp + len, "intr %llu\n", gs->total_context_switches);
+    len += sprintf(tmp + len, "ctxt %llu\n", gs->total_context_switches);
+    len += sprintf(tmp + len, "processes %llu\n", (uint64_t)gs->preempt_count + gs->yield_count);
+    len += sprintf(tmp + len, "procs_running 1\n");
+    len += sprintf(tmp + len, "procs_blocked 0\n");
+
+    if (offset >= (uint32_t)len) return 0;
+    uint32_t avail = (uint32_t)len - offset;
+    if (avail > count) avail = count;
+    memcpy(buf, tmp + offset, avail);
+    return (int32_t)avail;
+}
+
+/* ------------------------------------------------------------------ */
+/*  /proc/interrupts                                                    */
+/* ------------------------------------------------------------------ */
+
+static int32_t interrupts_read(char *buf, uint32_t offset, uint32_t count) {
+    char tmp[512];
+    int32_t len = 0;
+
+    len += sprintf(tmp + len, "         CPU0\n");
+    for (int i = 0; i < 16; i++) {
+        const char *name = "?";
+        switch (i) {
+            case 0: name = "timer"; break;
+            case 1: name = "keyboard"; break;
+            case 2: name = "cascade"; break;
+            case 3: name = "serial2"; break;
+            case 4: name = "serial1"; break;
+            case 5: name = "parallel2"; break;
+            case 6: name = "floppy"; break;
+            case 7: name = "parallel1"; break;
+            case 8: name = "rtc"; break;
+            case 9: name = "acpi"; break;
+            case 12: name = "mouse"; break;
+            case 14: name = "ide0"; break;
+            case 15: name = "ide1"; break;
+            default: name = "reserved"; break;
+        }
+        len += sprintf(tmp + len, "  %3d: %8u    IO-APIC   %s\n",
+            i, 0, name);
+    }
+
+    if (offset >= (uint32_t)len) return 0;
+    uint32_t avail = (uint32_t)len - offset;
+    if (avail > count) avail = count;
+    memcpy(buf, tmp + offset, avail);
+    return (int32_t)avail;
+}
+
+/* ------------------------------------------------------------------ */
+/*  /proc/cmdline                                                       */
+/* ------------------------------------------------------------------ */
+
+static int32_t cmdline_read(char *buf, uint32_t offset, uint32_t count) {
+    char tmp[128];
+    int32_t len = sprintf(tmp, "root=/dev/ram0 init=/bin/shell ro quiet\n");
+
+    if (offset >= (uint32_t)len) return 0;
+    uint32_t avail = (uint32_t)len - offset;
+    if (avail > count) avail = count;
+    memcpy(buf, tmp + offset, avail);
+    return (int32_t)avail;
+}
+
+/* ------------------------------------------------------------------ */
+/*  /proc/modules                                                        */
+/* ------------------------------------------------------------------ */
+
+static int32_t modules_read(char *buf, uint32_t offset, uint32_t count) {
+    char tmp[256];
+    int32_t len = sprintf(tmp,
+        "vfat 16384 0 - Live 0x00000000\n"
+        "ext4 64000 0 - Live 0x00000000\n"
+        "tcp_ipv4 32768 0 - Live 0x00000000\n");
+
+    if (offset >= (uint32_t)len) return 0;
+    uint32_t avail = (uint32_t)len - offset;
+    if (avail > count) avail = count;
+    memcpy(buf, tmp + offset, avail);
+    return (int32_t)avail;
+}
+
+/* ------------------------------------------------------------------ */
+/*  /proc/net/tcp                                                       */
+/* ------------------------------------------------------------------ */
+
+static int32_t nettcp_read(char *buf, uint32_t offset, uint32_t count) {
+    char tmp[1024];
+    int32_t len = 0;
+
+    len += sprintf(tmp + len,
+        "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n");
+    len += sprintf(tmp + len,
+        "   0: 00000000:0050 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 0 1 0\n");
+
+    if (offset >= (uint32_t)len) return 0;
+    uint32_t avail = (uint32_t)len - offset;
+    if (avail > count) avail = count;
+    memcpy(buf, tmp + offset, avail);
+    return (int32_t)avail;
+}
+
+/* ------------------------------------------------------------------ */
+/*  /proc/net/udp                                                       */
+/* ------------------------------------------------------------------ */
+
+static int32_t netudp_read(char *buf, uint32_t offset, uint32_t count) {
+    char tmp[512];
+    int32_t len = 0;
+
+    len += sprintf(tmp + len,
+        "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n");
+    len += sprintf(tmp + len,
+        "   0: 00000000:0035 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 0 1 0\n");
+
+    if (offset >= (uint32_t)len) return 0;
+    uint32_t avail = (uint32_t)len - offset;
+    if (avail > count) avail = count;
+    memcpy(buf, tmp + offset, avail);
+    return (int32_t)avail;
+}
+
+/* ------------------------------------------------------------------ */
+/*  /proc/mounts                                                        */
+/* ------------------------------------------------------------------ */
+
+static int32_t mounts_read(char *buf, uint32_t offset, uint32_t count) {
+    char tmp[512];
+    int32_t len = 0;
+
+    len += sprintf(tmp + len,
+        "rootfs / rootfs rw 0 0\n"
+        "/dev/ram0 / ext4 rw,relatime 0 0\n"
+        "proc /proc proc rw,relatime 0 0\n"
+        "sysfs /sys sysfs rw,relatime 0 0\n"
+        "devtmpfs /dev devtmpfs rw,relatime 0 0\n"
+        "tmpfs /tmp tmpfs rw,relatime 0 0\n");
+
+    if (offset >= (uint32_t)len) return 0;
+    uint32_t avail = (uint32_t)len - offset;
+    if (avail > count) avail = count;
+    memcpy(buf, tmp + offset, avail);
+    return (int32_t)avail;
+}
+
+/* ------------------------------------------------------------------ */
+/*  /proc/filesystems                                                   */
+/* ------------------------------------------------------------------ */
+
+static int32_t filesystems_read(char *buf, uint32_t offset, uint32_t count) {
+    char tmp[512];
+    int32_t len = 0;
+
+    len += sprintf(tmp + len,
+        "nodev   sysfs\n"
+        "nodev   rootfs\n"
+        "nodev   ramfs\n"
+        "nodev   tmpfs\n"
+        "nodev   proc\n"
+        "nodev   devtmpfs\n"
+        "nodev   devpts\n"
+        "        ext2\n"
+        "        ext3\n"
+        "        ext4\n"
+        "        vfat\n"
+        "        fat32\n"
+        "        xfs\n"
+        "        btrfs\n");
+
+    if (offset >= (uint32_t)len) return 0;
+    uint32_t avail = (uint32_t)len - offset;
+    if (avail > count) avail = count;
+    memcpy(buf, tmp + offset, avail);
+    return (int32_t)avail;
+}
+
+/* ------------------------------------------------------------------ */
+/*  /proc/swaps                                                         */
+/* ------------------------------------------------------------------ */
+
+static int32_t swaps_read(char *buf, uint32_t offset, uint32_t count) {
+    char tmp[256];
+    int32_t len = sprintf(tmp,
+        "Filename\t\t\t\tType\t\tSize\t\tUsed\tPriority\n");
+
+    if (offset >= (uint32_t)len) return 0;
+    uint32_t avail = (uint32_t)len - offset;
+    if (avail > count) avail = count;
+    memcpy(buf, tmp + offset, avail);
+    return (int32_t)avail;
+}
+
+/* ------------------------------------------------------------------ */
+/*  /proc/vmstat                                                        */
+/* ------------------------------------------------------------------ */
+
+static int32_t vmstat_read(char *buf, uint32_t offset, uint32_t count) {
+    char tmp[512];
+    int32_t len = 0;
+
+    uint32_t total_pages = pmm_get_total_pages();
+    uint32_t free_pages = pmm_get_free_pages();
+
+    len += sprintf(tmp + len, "nr_free_pages %u\n", free_pages);
+    len += sprintf(tmp + len, "nr_alloc_batch %u\n", 0);
+    len += sprintf(tmp + len, "pgpgin %u\n", total_pages - free_pages);
+    len += sprintf(tmp + len, "pgpgout %u\n", 0);
+    len += sprintf(tmp + len, "pswpin %u\n", 0);
+    len += sprintf(tmp + len, "pswpout %u\n", 0);
+    len += sprintf(tmp + len, "pgfault %u\n", 0);
+    len += sprintf(tmp + len, "pgmajfault %u\n", 0);
+
+    if (offset >= (uint32_t)len) return 0;
+    uint32_t avail = (uint32_t)len - offset;
+    if (avail > count) avail = count;
+    memcpy(buf, tmp + offset, avail);
+    return (int32_t)avail;
+}
+
+/* ------------------------------------------------------------------ */
+/*  /proc/schedstat                                                     */
+/* ------------------------------------------------------------------ */
+
+static int32_t schedstat_read(char *buf, uint32_t offset, uint32_t count) {
+    char tmp[1024];
+    int32_t len = 0;
+    const sched_global_stats_t *gs = sched_get_global_stats();
+
+    len += sprintf(tmp + len, "version 15\n");
+    len += sprintf(tmp + len, "timestamp %llu\n", sched_get_tick_count());
+    len += sprintf(tmp + len, "cpu0 %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu\n",
+        gs->total_ticks, gs->idle_ticks, gs->user_ticks, gs->kernel_ticks,
+        (uint64_t)0, (uint64_t)0, (uint64_t)0, (uint64_t)0,
+        gs->total_context_switches, gs->preempt_count);
+
+    if (offset >= (uint32_t)len) return 0;
+    uint32_t avail = (uint32_t)len - offset;
+    if (avail > count) avail = count;
+    memcpy(buf, tmp + offset, avail);
+    return (int32_t)avail;
+}
+
+/* ------------------------------------------------------------------ */
 /*  /proc/[pid]/status                                                 */
 /* ------------------------------------------------------------------ */
 
@@ -219,6 +486,17 @@ int32_t procfs_init(void) {
     procfs_add_entry("loadavg", FILE_MODE_READ, loadavg_read);
     procfs_add_entry("net/dev", FILE_MODE_READ, netdev_read);
     procfs_add_entry("partitions", FILE_MODE_READ, partitions_read);
+    procfs_add_entry("stat", FILE_MODE_READ, stat_read);
+    procfs_add_entry("interrupts", FILE_MODE_READ, interrupts_read);
+    procfs_add_entry("cmdline", FILE_MODE_READ, cmdline_read);
+    procfs_add_entry("modules", FILE_MODE_READ, modules_read);
+    procfs_add_entry("net/tcp", FILE_MODE_READ, nettcp_read);
+    procfs_add_entry("net/udp", FILE_MODE_READ, netudp_read);
+    procfs_add_entry("mounts", FILE_MODE_READ, mounts_read);
+    procfs_add_entry("filesystems", FILE_MODE_READ, filesystems_read);
+    procfs_add_entry("swaps", FILE_MODE_READ, swaps_read);
+    procfs_add_entry("vmstat", FILE_MODE_READ, vmstat_read);
+    procfs_add_entry("schedstat", FILE_MODE_READ, schedstat_read);
 
     uint32_t pid;
     for (pid = 0; pid < PROCFS_MAX_PROCS; pid++) {

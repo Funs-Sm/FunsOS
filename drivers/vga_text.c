@@ -43,11 +43,13 @@ void vga_text_mode3_switch(void) {
 }
 
 static void update_hw_cursor(void) {
-    int disp_row = cursor_row;
-    int disp_col = cursor_col;
+    int disp_row, disp_col;
     if (sb_active) {
         disp_row = VGA_HEIGHT - 1;
         disp_col = VGA_WIDTH - 1;
+    } else {
+        disp_row = VGA_HEIGHT - 1;
+        disp_col = cursor_col;
     }
     uint16_t pos = (uint16_t)(disp_row * VGA_WIDTH + disp_col);
     outb(0x3D4, 14);
@@ -224,9 +226,15 @@ void vga_text_print(const char *str) {
 }
 
 void vga_text_set_cursor(int row, int col) {
-    cursor_row = row;
-    cursor_col = col;
-    update_hw_cursor();
+    if (row < 0) row = 0;
+    if (row >= VGA_HEIGHT) row = VGA_HEIGHT - 1;
+    if (col < 0) col = 0;
+    if (col >= VGA_WIDTH) col = VGA_WIDTH - 1;
+    uint16_t pos = (uint16_t)(row * VGA_WIDTH + col);
+    outb(0x3D4, 14);
+    outb(0x3D5, (uint8_t)(pos >> 8));
+    outb(0x3D4, 15);
+    outb(0x3D5, (uint8_t)(pos & 0xFF));
 }
 
 void vga_text_get_cursor(int *row, int *col) {

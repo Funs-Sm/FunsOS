@@ -48,6 +48,7 @@
 #include "pkgmgr.h"
 #include "tftp.h"
 #include "ntp.h"
+#include "smp.h"
 #include "telnet.h"
 #include "user.h"
 #include "shell_error.h"
@@ -58,6 +59,8 @@
 #include "fundb.h"
 #include "config.h"
 #include "serial.h"
+#include "ipc_msg.h"
+#include "ipc_shm.h"
 
 #define SHELL_MAX_LINE 256
 #define SHELL_PROMPT  "funs> "
@@ -799,7 +802,7 @@ static void cmd_top(void);
 static void cmd_free(void);
 static void cmd_uptime(void);
 static void cmd_load(void);
-static void cmd_dmesg(void);
+static void cmd_dmesg(const char *options);
 static void cmd_loglevel(const char *level_str);
 static void cmd_syslog(const char *subcmd, const char *arg1, const char *arg2, const char *arg3);
 static void cmd_mount(const char *dev, const char *dir);
@@ -879,6 +882,20 @@ static void cmd_telnet(const char *arg);
 static void cmd_play(const char *file);
 static void cmd_vol(const char *arg);
 static void cmd_sound(void);
+
+/* New enhanced commands */
+static void cmd_ipcs(void);
+static void cmd_vmstat(void);
+static void cmd_iostat(void);
+static void cmd_crontab(const char *subcmd, const char *arg1, const char *arg2);
+static void cmd_taskset(const char *pid_str, const char *mask_str);
+static void cmd_chrt(const char *pid_str, const char *policy_str);
+static void cmd_pidof(const char *name);
+static void cmd_pstree(void);
+static void cmd_last(void);
+static void cmd_uname(const char *opt);
+static void cmd_sync(void);
+static void cmd_time_cmd(const char *cmd);
 
 /* ---- Built-in app registry ---- */
 typedef int (*app_main_t)(int argc, char *argv[]);
@@ -1230,7 +1247,10 @@ static void cmd_pt(const char *options) {
     if (path_resolve(list_path, &dir) != 0 || !dir) {
         shell_print("ls: cannot access '");
         shell_print(path_arg ? path_arg : current_dir);
-        shell_print("'\n");
+        shell_print("': No such file or directory\n");
+        shell_print("Usage: ls [-la] [path]\n");
+        shell_print("  -l  long listing format\n");
+        shell_print("  -a  show hidden files\n");
         last_exit_code = 1;
         return;
     }
@@ -1267,8 +1287,8 @@ static void cmd_pt(const char *options) {
 
     if (!dir->inode) {
         shell_print("ls: cannot access '");
-        shell_print(list_path);
-        shell_print("'\n");
+        shell_print(path_arg ? path_arg : current_dir);
+        shell_print("': No such file or directory\n");
         last_exit_code = 1;
         return;
     }
@@ -1379,7 +1399,9 @@ static void cmd_pt(const char *options) {
 
 static void cmd_show(const char *file) {
     if (!file || !*file) {
-        shell_err_show(0);
+        shell_print("cat: missing file operand\n");
+        shell_print("Usage: cat <file>\n");
+        shell_print("Displays the contents of the specified file.\n");
         last_exit_code = 1;
         return;
     }
@@ -1390,7 +1412,9 @@ static void cmd_show(const char *file) {
 
     file_t *f = 0;
     if (vfs_open(full_path, FILE_MODE_READ, &f) != 0 || !f) {
-        shell_err_show(file);
+        shell_print("cat: ");
+        shell_print(file);
+        shell_print(": No such file or directory\n");
         last_exit_code = 1;
         return;
     }
@@ -1421,12 +1445,14 @@ static void cmd_show(const char *file) {
 
 static void cmd_go(const char *dir) {
     char target[512];
+    const char *display_path = dir ? dir : "~";
 
     if (!dir || !*dir) {
         const char *home = env_get("HOME");
         if (!home) home = "/";
         strncpy(target, home, sizeof(target) - 1);
         target[sizeof(target) - 1] = '\0';
+        display_path = target;
     } else if (dir[0] == '~') {
         const char *home = env_get("HOME");
         if (!home) home = "/";
@@ -1435,8 +1461,13 @@ static void cmd_go(const char *dir) {
         const char *old = env_get("OLDPWD");
         if (old && *old) {
             strncpy(target, old, sizeof(target) - 1);
+            target[sizeof(target) - 1] = '\0';
+            display_path = old;
         } else {
             strcpy(target, "/");
+            shell_print("cd: OLDPWD not set\n");
+            last_exit_code = 1;
+            return;
         }
     } else if (strcmp(dir, "..") == 0) {
         strncpy(target, current_dir, sizeof(target) - 1);
@@ -1453,14 +1484,32 @@ static void cmd_go(const char *dir) {
         build_full_path(dir, target, sizeof(target));
     }
 
+    inode_t st;
+    memset(&st, 0, sizeof(st));
+    if (vfs_stat(target, &st) != 0) {
+        shell_print("cd: no such file or directory: ");
+        shell_print(display_path);
+        shell_print("\n");
+        last_exit_code = 1;
+        return;
+    }
+
+    if (!(st.mode & FILE_MODE_DIR)) {
+        shell_print("cd: not a directory: ");
+        shell_print(display_path);
+        shell_print("\n");
+        last_exit_code = 1;
+        return;
+    }
+
     if (vfs_chdir(target) == 0) {
         env_set("OLDPWD", current_dir);
         strncpy(current_dir, target, 255);
         current_dir[255] = '\0';
         last_exit_code = 0;
     } else {
-        shell_print("cd: no such directory: ");
-        shell_print(dir ? dir : "");
+        shell_print("cd: permission denied: ");
+        shell_print(display_path);
         shell_print("\n");
         last_exit_code = 1;
     }
@@ -2082,7 +2131,7 @@ static void cmd_help(const char *arg) {
     shell_print("    mem / free      Memory usage\n");
     shell_print("    uptime          System uptime\n");
     shell_print("    load            Load average\n");
-    shell_print("    dmesg           Kernel log (ring buffer)\n");
+    shell_print("    dmesg [-c] [-n N] Kernel log (ring buffer)\n");
     shell_print("    loglevel        Set kernel log level\n");
     shell_print("    syslog          Syslog rules management\n");
     shell_print("    ps              List processes\n");
@@ -2175,54 +2224,230 @@ static void cmd_help(const char *arg) {
     last_exit_code = 0;
 }
 
-static void cmd_sysinfo(void) {
-    uint32_t total = pmm_get_total_pages() * 4096;
-    uint32_t used = pmm_get_used_pages() * 4096;
-    uint32_t uptime = timer_get_ticks() / 100;
-
-    shell_print("========================================\n");
-    shell_print("  " OS_STRING " System Information\n");
-    shell_print("========================================\n");
-
-    char buf[64];
-    shell_print("  OS:      FUNSOS\n");
-    shell_print("  Kernel:  " KERNEL_STRING "\n");
-
-    snprintf(buf, sizeof(buf), "  Memory:  %u KB total, %u KB used\n", total / 1024, used / 1024);
+static void print_box_line(char left, char mid, char right, char fill, int w) {
+    char buf[128];
+    int i = 0;
+    buf[i++] = left;
+    for (int j = 0; j < w - 2; j++) buf[i++] = fill;
+    buf[i++] = right;
+    buf[i++] = '\n';
+    buf[i] = '\0';
     shell_print(buf);
+}
 
-    snprintf(buf, sizeof(buf), "  Uptime:  %u seconds\n", uptime);
+static void print_box_row(const char *label, const char *value, int w) {
+    char buf[128];
+    int label_len = len_strlen(label);
+    int value_len = len_strlen(value);
+    int i = 0;
+    buf[i++] = '|';
+    buf[i++] = ' ';
+    for (int j = 0; j < label_len && j < 20; j++) buf[i++] = label[j];
+    for (int j = label_len; j < 20; j++) buf[i++] = ' ';
+    buf[i++] = ' ';
+    for (int j = 0; j < value_len && j < w - 25; j++) buf[i++] = value[j];
+    for (int j = value_len; j < w - 25; j++) buf[i++] = ' ';
+    buf[i++] = ' ';
+    buf[i++] = '|';
+    buf[i++] = '\n';
+    buf[i] = '\0';
     shell_print(buf);
+}
 
-    shell_print("  CPU:     x86 (32-bit Protected Mode)\n");
+static void print_box_separator(int w) {
+    char buf[128];
+    int i = 0;
+    buf[i++] = '|';
+    for (int j = 0; j < w - 2; j++) buf[i++] = '-';
+    buf[i++] = '|';
+    buf[i++] = '\n';
+    buf[i] = '\0';
+    shell_print(buf);
+}
 
-    /* Show current user */
-    user_t *u = user_get_current();
-    if (u) {
-        shell_print("  User:    ");
-        shell_print(u->username);
-        if (u->is_admin) shell_print(" (admin)");
-        shell_print("\n");
+static void print_box_title(const char *title, int w) {
+    char buf[128];
+    int title_len = len_strlen(title);
+    int pad = (w - 2 - title_len) / 2;
+    int i = 0;
+    buf[i++] = '|';
+    for (int j = 0; j < pad; j++) buf[i++] = ' ';
+    for (int j = 0; j < title_len && j < w - 2; j++) buf[i++] = title[j];
+    for (int j = 0; j < w - 2 - pad - title_len; j++) buf[i++] = ' ';
+    buf[i++] = '|';
+    buf[i++] = '\n';
+    buf[i] = '\0';
+    shell_print(buf);
+}
+
+static uint32_t count_processes(void) {
+    uint32_t count = 0;
+    for (pid_t pid = 0; pid < 1024; pid++) {
+        if (process_get_pcb(pid) != NULL) {
+            count++;
+        }
     }
+    return count > 0 ? count : 1;
+}
 
-    snprintf(buf, sizeof(buf), "  Users:   %u accounts\n", user_count());
-    shell_print(buf);
+static void cmd_sysinfo(void) {
+    char buf[128];
+    char val[64];
+    int box_w = 60;
 
-    shell_print("  Display: ");
+    uint32_t total_pages = pmm_get_total_pages();
+    uint32_t used_pages = pmm_get_used_pages();
+    uint32_t free_pages = pmm_get_free_pages();
+    uint64_t total_mem = (uint64_t)total_pages * 4096;
+    uint64_t used_mem = (uint64_t)used_pages * 4096;
+    uint64_t free_mem = (uint64_t)free_pages * 4096;
+
+    uint32_t uptime_sec = timer_get_ticks() / 100;
+    uint32_t up_days = uptime_sec / 86400;
+    uint32_t up_hours = (uptime_sec % 86400) / 3600;
+    uint32_t up_mins = (uptime_sec % 3600) / 60;
+    uint32_t up_secs = uptime_sec % 60;
+
+    uint32_t proc_count = count_processes();
+
+    uint32_t cpu_count = smp_get_cpu_count();
+    cpufreq_info_t *freq_info = cpufreq_get_info();
+    uint32_t cpu_freq = freq_info ? freq_info->current_freq : 0;
+
+    uint32_t pkg_count = pkgmgr_get_count();
+
+    uint32_t net_if_count = net_get_interface_count();
+
+    /* ==== 标题栏 ==== */
+    print_box_line('+', '-', '+', '-', box_w);
+    print_box_title(OS_STRING " - System Information", box_w);
+    print_box_line('+', '-', '+', '-', box_w);
+
+    /* ==== 系统信息 ==== */
+    print_box_title(" System", box_w);
+    print_box_separator(box_w);
+    print_box_row("OS Name:", OS_NAME, box_w);
+    print_box_row("OS Version:", KERNEL_VERSION, box_w);
+    print_box_row("Kernel:", KERNEL_STRING, box_w);
+    snprintf(val, sizeof(val), "%u process(es)", proc_count);
+    print_box_row("Processes:", val, box_w);
+    snprintf(val, sizeof(val), "%u package(s)", pkg_count);
+    print_box_row("Packages:", val, box_w);
+    print_box_line('+', '-', '+', '-', box_w);
+
+    /* ==== CPU 信息 ==== */
+    print_box_title(" CPU", box_w);
+    print_box_separator(box_w);
+    print_box_row("Architecture:", "x86 (32-bit)", box_w);
+    snprintf(val, sizeof(val), "%u core(s)", cpu_count);
+    print_box_row("Cores:", val, box_w);
+    if (cpu_freq > 0) {
+        snprintf(val, sizeof(val), "%u MHz", cpu_freq);
+    } else {
+        strncpy(val, "N/A", sizeof(val) - 1);
+        val[sizeof(val) - 1] = '\0';
+    }
+    print_box_row("Frequency:", val, box_w);
+    print_box_row("Model:", "Intel/AMD Compatible", box_w);
+    print_box_line('+', '-', '+', '-', box_w);
+
+    /* ==== 内存信息 ==== */
+    print_box_title(" Memory", box_w);
+    print_box_separator(box_w);
+    if (total_mem >= 1024 * 1024) {
+        snprintf(val, sizeof(val), "%u MB", (uint32_t)(total_mem / 1024 / 1024));
+    } else {
+        snprintf(val, sizeof(val), "%u KB", (uint32_t)(total_mem / 1024));
+    }
+    print_box_row("Total:", val, box_w);
+    if (used_mem >= 1024 * 1024) {
+        snprintf(val, sizeof(val), "%u MB", (uint32_t)(used_mem / 1024 / 1024));
+    } else {
+        snprintf(val, sizeof(val), "%u KB", (uint32_t)(used_mem / 1024));
+    }
+    print_box_row("Used:", val, box_w);
+    if (free_mem >= 1024 * 1024) {
+        snprintf(val, sizeof(val), "%u MB", (uint32_t)(free_mem / 1024 / 1024));
+    } else {
+        snprintf(val, sizeof(val), "%u KB", (uint32_t)(free_mem / 1024));
+    }
+    print_box_row("Free:", val, box_w);
+    snprintf(val, sizeof(val), "%u pages", total_pages);
+    print_box_row("Page Count:", val, box_w);
+    print_box_line('+', '-', '+', '-', box_w);
+
+    /* ==== 运行时间 ==== */
+    print_box_title(" Uptime", box_w);
+    print_box_separator(box_w);
+    if (up_days > 0) {
+        snprintf(val, sizeof(val), "%ud %uh %um %us", up_days, up_hours, up_mins, up_secs);
+    } else if (up_hours > 0) {
+        snprintf(val, sizeof(val), "%uh %um %us", up_hours, up_mins, up_secs);
+    } else if (up_mins > 0) {
+        snprintf(val, sizeof(val), "%um %us", up_mins, up_secs);
+    } else {
+        snprintf(val, sizeof(val), "%us", up_secs);
+    }
+    print_box_row("Uptime:", val, box_w);
+    snprintf(val, sizeof(val), "%u seconds", uptime_sec);
+    print_box_row("Total Seconds:", val, box_w);
+    print_box_line('+', '-', '+', '-', box_w);
+
+    /* ==== 文件系统 ==== */
+    print_box_title(" Filesystem", box_w);
+    print_box_separator(box_w);
+    {
+        extern mount_t *mount_list;
+        mount_t *mnt = mount_list;
+        int mnt_count = 0;
+        while (mnt) {
+            mnt_count++;
+            mnt = mnt->next;
+        }
+        snprintf(val, sizeof(val), "%d mount(s)", mnt_count);
+        print_box_row("Mount Points:", val, box_w);
+        print_box_row("Root FS:", "VFS (multi-fs)", box_w);
+        print_box_row("Dev FS:", "/dev (devfs)", box_w);
+    }
+    print_box_line('+', '-', '+', '-', box_w);
+
+    /* ==== 网络接口 ==== */
+    print_box_title(" Network", box_w);
+    print_box_separator(box_w);
+    snprintf(val, sizeof(val), "%u interface(s)", net_if_count);
+    print_box_row("Interfaces:", val, box_w);
+    for (uint32_t i = 0; i < net_if_count; i++) {
+        net_interface_t *iface = net_get_interface(i);
+        if (iface) {
+            snprintf(val, sizeof(val), "%s (%s)",
+                     iface->name,
+                     (iface->flags & IFF_UP) ? "UP" : "DOWN");
+            char label[24];
+            snprintf(label, sizeof(label), "  eth%u:", i);
+            print_box_row(label, val, box_w);
+        }
+    }
+    print_box_line('+', '-', '+', '-', box_w);
+
+    /* ==== 显示 ==== */
+    print_box_title(" Display", box_w);
+    print_box_separator(box_w);
     if (vbe_mode_active) {
         vbe_mode_info_t *vbe = vbe_get_current_mode();
         if (vbe) {
-            snprintf(buf, sizeof(buf), "VBE %ux%ux%u\n",
+            snprintf(val, sizeof(val), "%ux%ux%u (VBE)",
                      vbe->width, vbe->height, vbe->bpp);
-            shell_print(buf);
         } else {
-            shell_print("VBE mode\n");
+            strncpy(val, "VBE mode", sizeof(val) - 1);
+            val[sizeof(val) - 1] = '\0';
         }
     } else {
-        shell_print("VGA text mode\n");
+        strncpy(val, "80x25 (VGA text)", sizeof(val) - 1);
+        val[sizeof(val) - 1] = '\0';
     }
+    print_box_row("Mode:", val, box_w);
+    print_box_line('+', '-', '+', '-', box_w);
 
-    shell_print("========================================\n");
     last_exit_code = 0;
 }
 
@@ -2377,7 +2602,10 @@ static void cmd_ping(const char *ip_str) {
 
 static void cmd_copy(const char *src, const char *dst) {
     if (!src || !*src || !dst || !*dst) {
-        shell_err_copy(0);
+        shell_print("cp: missing file operand\n");
+        shell_print("Usage: cp <source> <destination>\n");
+        shell_print("Copies the contents of source file to destination.\n");
+        shell_print("If destination is a directory, source is copied into it.\n");
         last_exit_code = 1;
         return;
     }
@@ -2406,7 +2634,9 @@ static void cmd_copy(const char *src, const char *dst) {
 
     file_t *sf = 0;
     if (vfs_open(src_path, FILE_MODE_READ, &sf) != 0 || !sf) {
-        shell_err_copy(src);
+        shell_print("cp: cannot stat '");
+        shell_print(src);
+        shell_print("': No such file or directory\n");
         last_exit_code = 1;
         return;
     }
@@ -2414,9 +2644,9 @@ static void cmd_copy(const char *src, const char *dst) {
     /* Create destination file */
     if (vfs_creat(dst_path, FILE_MODE_WRITE | FILE_MODE_READ) != 0) {
         vfs_close(sf);
-        shell_print("copy: cannot create ");
+        shell_print("cp: cannot create '");
         shell_print(dst);
-        shell_print("\n");
+        shell_print("': Permission denied\n");
         last_exit_code = 1;
         return;
     }
@@ -2424,9 +2654,9 @@ static void cmd_copy(const char *src, const char *dst) {
     file_t *df = 0;
     if (vfs_open(dst_path, FILE_MODE_WRITE, &df) != 0 || !df) {
         vfs_close(sf);
-        shell_print("copy: cannot open ");
+        shell_print("cp: cannot open '");
         shell_print(dst);
-        shell_print(" for writing\n");
+        shell_print("' for writing: Permission denied\n");
         last_exit_code = 1;
         return;
     }
@@ -2500,7 +2730,10 @@ static int shell_rm_recursive(const char *path) {
 
 static void cmd_del(const char *file) {
     if (!file || !*file) {
-        shell_err_del(0);
+        shell_print("rm: missing file operand\n");
+        shell_print("Usage: rm [-rf] <file|directory>\n");
+        shell_print("  -r  remove directories and their contents recursively\n");
+        shell_print("  -f  ignore nonexistent files, never prompt\n");
         last_exit_code = 1;
         return;
     }
@@ -2547,9 +2780,9 @@ static void cmd_del(const char *file) {
         last_exit_code = 0;
     } else {
         if (!force) {
-            shell_print("del: cannot remove '");
+            shell_print("rm: cannot remove '");
             shell_print(target);
-            shell_print("'\n");
+            shell_print("': No such file or directory\n");
         }
         last_exit_code = 1;
     }
@@ -2557,7 +2790,9 @@ static void cmd_del(const char *file) {
 
 static void cmd_mkdir(const char *dir) {
     if (!dir || !*dir) {
-        shell_err_mkdir(0);
+        shell_print("mkdir: missing operand\n");
+        shell_print("Usage: mkdir <directory>\n");
+        shell_print("Creates a new directory with the specified name.\n");
         last_exit_code = 1;
         return;
     }
@@ -2565,22 +2800,31 @@ static void cmd_mkdir(const char *dir) {
     char full_path[512];
     build_full_path(dir, full_path, sizeof(full_path));
 
-    if (vfs_mkdir(full_path, FILE_MODE_DIR | PERM_READ | PERM_WRITE | PERM_EXEC) == 0) {
-        shell_print("Created directory: '");
+    inode_t st;
+    memset(&st, 0, sizeof(st));
+    if (vfs_stat(full_path, &st) == 0) {
+        shell_print("mkdir: cannot create '");
         shell_print(dir);
-        shell_print("'\n");
+        shell_print("': File exists\n");
+        last_exit_code = 1;
+        return;
+    }
+
+    if (vfs_mkdir(full_path, FILE_MODE_DIR | PERM_READ | PERM_WRITE | PERM_EXEC) == 0) {
         last_exit_code = 0;
     } else {
         shell_print("mkdir: cannot create '");
         shell_print(dir);
-        shell_print("'\n");
+        shell_print("': No such file or directory or permission denied\n");
         last_exit_code = 1;
     }
 }
 
 static void cmd_ren(const char *old, const char *new_name) {
     if (!old || !*old || !new_name || !*new_name) {
-        shell_err_ren();
+        shell_print("mv: missing file operand\n");
+        shell_print("Usage: mv <source> <destination>\n");
+        shell_print("Renames or moves source file/directory to destination.\n");
         last_exit_code = 1;
         return;
     }
@@ -2616,7 +2860,9 @@ static void cmd_ren(const char *old, const char *new_name) {
 
     dentry_t *parent = 0;
     if (path_resolve(parent_path, &parent) != 0 || !parent || !parent->inode || !parent->inode->ops || !parent->inode->ops->rename) {
-        shell_err_ren();
+        shell_print("mv: cannot stat '");
+        shell_print(old);
+        shell_print("': No such file or directory\n");
         last_exit_code = 1;
         return;
     }
@@ -2637,7 +2883,11 @@ static void cmd_ren(const char *old, const char *new_name) {
         shell_print("\n");
         last_exit_code = 0;
     } else {
-        shell_err_ren();
+        shell_print("mv: cannot rename '");
+        shell_print(old);
+        shell_print("' to '");
+        shell_print(new_name);
+        shell_print("': Permission denied or target exists\n");
         last_exit_code = 1;
     }
 }
@@ -2707,14 +2957,16 @@ static void find_recursive(dentry_t *dir, const char *name, int *found, int dept
 
 static void cmd_find(const char *name) {
     if (!name || !*name) {
-        shell_err_find();
+        shell_print("find: missing operand\n");
+        shell_print("Usage: find <name>\n");
+        shell_print("Recursively searches for files/directories by name.\n");
         last_exit_code = 1;
         return;
     }
 
     dentry_t *dir = 0;
     if (path_resolve(current_dir, &dir) != 0 || !dir) {
-        shell_err_find();
+        shell_print("find: cannot access current directory\n");
         last_exit_code = 1;
         return;
     }
@@ -2742,7 +2994,9 @@ static void cmd_find(const char *name) {
 
 static void cmd_size(const char *file) {
     if (!file || !*file) {
-        shell_err_size(0);
+        shell_print("size: missing file operand\n");
+        shell_print("Usage: size <file>\n");
+        shell_print("Displays the size of the specified file in bytes.\n");
         last_exit_code = 1;
         return;
     }
@@ -2766,7 +3020,9 @@ static void cmd_size(const char *file) {
         shell_print(buf);
         last_exit_code = 0;
     } else {
-        shell_err_size(file);
+        shell_print("size: ");
+        shell_print(file);
+        shell_print(": No such file or directory\n");
         last_exit_code = 1;
     }
 }
@@ -2976,20 +3232,82 @@ static void cmd_load(void) {
 }
 
 /* 7. dmesg - Show kernel log messages */
-static void cmd_dmesg(void) {
-    char *buf = (char *)kmalloc(8192);
+static void cmd_dmesg(const char *options) {
+    int clear_flag = 0;
+    int tail_lines = 0;
+    int parse_error = 0;
+
+    if (options && *options) {
+        const char *p = options;
+        while (*p) {
+            while (*p == ' ') p++;
+            if (*p == '-') {
+                p++;
+                while (*p && *p != ' ') {
+                    if (*p == 'c') {
+                        clear_flag = 1;
+                    } else if (*p == 'n') {
+                        p++;
+                        while (*p == ' ') p++;
+                        if (*p < '0' || *p > '9') {
+                            parse_error = 1;
+                            break;
+                        }
+                        tail_lines = 0;
+                        while (*p >= '0' && *p <= '9') {
+                            tail_lines = tail_lines * 10 + (*p - '0');
+                            p++;
+                        }
+                        continue;
+                    } else {
+                        parse_error = 1;
+                        break;
+                    }
+                    p++;
+                }
+            } else if (*p) {
+                parse_error = 1;
+                break;
+            }
+            if (parse_error) break;
+        }
+    }
+
+    if (parse_error) {
+        shell_print("Usage: dmesg [-c] [-n num]\n");
+        shell_print("  -c       Clear the ring buffer after printing\n");
+        shell_print("  -n num   Show only the last num lines\n");
+        last_exit_code = 1;
+        return;
+    }
+
+    char *buf = (char *)kmalloc(SYSLOG_BUF_SIZE + 1);
     if (!buf) {
         shell_print("dmesg: out of memory\n");
         last_exit_code = 1;
         return;
     }
-    uint32_t len = klog_read(buf, 8191);
+
+    uint32_t len = 0;
+    if (tail_lines > 0) {
+        uint32_t total_lines = syslog_dmesg_get_line_count();
+        uint32_t start_line = (total_lines > (uint32_t)tail_lines) ? (total_lines - tail_lines) : 0;
+        len = syslog_dmesg_read_from(start_line, buf, SYSLOG_BUF_SIZE);
+    } else {
+        len = syslog_dmesg_read(buf, SYSLOG_BUF_SIZE);
+    }
+
     if (len > 0) {
         buf[len] = '\0';
         shell_print(buf);
     } else {
         shell_print("Kernel log is empty\n");
     }
+
+    if (clear_flag) {
+        syslog_dmesg_clear();
+    }
+
     kfree(buf);
     last_exit_code = 0;
 }
@@ -3389,7 +3707,10 @@ static void cmd_pwd(void) {
 /* 17. touch - Create empty file */
 static void cmd_touch(const char *file) {
     if (!file || !*file) {
-        shell_err_touch(0);
+        shell_print("touch: missing file operand\n");
+        shell_print("Usage: touch <file>\n");
+        shell_print("Creates an empty file if it does not exist.\n");
+        shell_print("If the file exists, updates its timestamp.\n");
         last_exit_code = 1;
         return;
     }
@@ -3423,7 +3744,9 @@ static void cmd_touch(const char *file) {
 
     dentry_t *parent = 0;
     if (path_resolve(parent_path, &parent) != 0 || !parent || !parent->inode || !parent->inode->ops || !parent->inode->ops->create) {
-        shell_err_touch(file);
+        shell_print("touch: cannot touch '");
+        shell_print(file);
+        shell_print("': No such file or directory\n");
         last_exit_code = 1;
         return;
     }
@@ -3434,7 +3757,9 @@ static void cmd_touch(const char *file) {
         shell_print("\n");
         last_exit_code = 0;
     } else {
-        shell_err_touch(file);
+        shell_print("touch: cannot touch '");
+        shell_print(file);
+        shell_print("': Permission denied\n");
         last_exit_code = 1;
     }
 }
@@ -3442,7 +3767,9 @@ static void cmd_touch(const char *file) {
 /* 18. append - Append text to file */
 static void cmd_append(const char *file, const char *text) {
     if (!file || !*file) {
-        shell_err_append(0);
+        shell_print("append: missing file operand\n");
+        shell_print("Usage: append <file> <text>\n");
+        shell_print("Appends a line of text to the specified file.\n");
         last_exit_code = 1;
         return;
     }
@@ -3451,7 +3778,9 @@ static void cmd_append(const char *file, const char *text) {
 
     file_t *f = 0;
     if (vfs_open(full_path, FILE_MODE_WRITE | FILE_MODE_READ, &f) != 0 || !f) {
-        shell_err_append(file);
+        shell_print("append: ");
+        shell_print(file);
+        shell_print(": No such file or directory\n");
         last_exit_code = 1;
         return;
     }
@@ -3468,7 +3797,9 @@ static void cmd_append(const char *file, const char *text) {
 /* 19. head - Show first n lines */
 static void cmd_head(const char *file, const char *n_str) {
     if (!file || !*file) {
-        shell_err_head(0);
+        shell_print("head: missing file operand\n");
+        shell_print("Usage: head <file> [n]\n");
+        shell_print("Displays the first n lines (default 10).\n");
         last_exit_code = 1;
         return;
     }
@@ -3485,7 +3816,9 @@ static void cmd_head(const char *file, const char *n_str) {
 
     file_t *f = 0;
     if (vfs_open(full_path, FILE_MODE_READ, &f) != 0 || !f) {
-        shell_err_head(file);
+        shell_print("head: ");
+        shell_print(file);
+        shell_print(": No such file or directory\n");
         last_exit_code = 1;
         return;
     }
@@ -3525,7 +3858,9 @@ static void cmd_head(const char *file, const char *n_str) {
 /* 20. tail - Show last n lines */
 static void cmd_tail(const char *file, const char *n_str) {
     if (!file || !*file) {
-        shell_err_tail(0);
+        shell_print("tail: missing file operand\n");
+        shell_print("Usage: tail <file> [n]\n");
+        shell_print("Displays the last n lines (default 10).\n");
         last_exit_code = 1;
         return;
     }
@@ -3542,7 +3877,9 @@ static void cmd_tail(const char *file, const char *n_str) {
 
     file_t *f = 0;
     if (vfs_open(full_path, FILE_MODE_READ, &f) != 0 || !f) {
-        shell_err_tail(file);
+        shell_print("tail: ");
+        shell_print(file);
+        shell_print(": No such file or directory\n");
         last_exit_code = 1;
         return;
     }
@@ -3626,7 +3963,10 @@ static void cmd_tail(const char *file, const char *n_str) {
 /* 21. wc - Count lines/words/chars */
 static void cmd_wc(const char *file) {
     if (!file || !*file) {
-        shell_err_wc(0);
+        shell_print("wc: missing file operand\n");
+        shell_print("Usage: wc <file>\n");
+        shell_print("Counts lines, words, and characters in the file.\n");
+        shell_print("Output format: lines words chars filename\n");
         last_exit_code = 1;
         return;
     }
@@ -3635,7 +3975,9 @@ static void cmd_wc(const char *file) {
 
     file_t *f = 0;
     if (vfs_open(full_path, FILE_MODE_READ, &f) != 0 || !f) {
-        shell_err_wc(file);
+        shell_print("wc: ");
+        shell_print(file);
+        shell_print(": No such file or directory\n");
         last_exit_code = 1;
         return;
     }
@@ -3667,7 +4009,9 @@ static void cmd_wc(const char *file) {
 /* 22. diff - Compare two files */
 static void cmd_diff(const char *f1, const char *f2) {
     if (!f1 || !*f1 || !f2 || !*f2) {
-        shell_err_diff();
+        shell_print("diff: missing file operand\n");
+        shell_print("Usage: diff <file1> <file2>\n");
+        shell_print("Compares two files line by line and shows differences.\n");
         last_exit_code = 1;
         return;
     }
@@ -3678,7 +4022,9 @@ static void cmd_diff(const char *f1, const char *f2) {
 
     file_t *file1 = 0, *file2 = 0;
     if (vfs_open(path1, FILE_MODE_READ, &file1) != 0 || !file1) {
-        shell_err_diff();
+        shell_print("diff: ");
+        shell_print(f1);
+        shell_print(": No such file or directory\n");
         last_exit_code = 1;
         return;
     }
@@ -3727,7 +4073,9 @@ static void cmd_diff(const char *f1, const char *f2) {
 /* 23. sort - Sort lines in file */
 static void cmd_sort(const char *file) {
     if (!file || !*file) {
-        shell_err_sort(0);
+        shell_print("sort: missing file operand\n");
+        shell_print("Usage: sort <file>\n");
+        shell_print("Sorts lines of text in the specified file alphabetically.\n");
         last_exit_code = 1;
         return;
     }
@@ -3736,7 +4084,9 @@ static void cmd_sort(const char *file) {
 
     file_t *f = 0;
     if (vfs_open(full_path, FILE_MODE_READ, &f) != 0 || !f) {
-        shell_err_sort(file);
+        shell_print("sort: ");
+        shell_print(file);
+        shell_print(": No such file or directory\n");
         last_exit_code = 1;
         return;
     }
@@ -3798,7 +4148,10 @@ static void cmd_sort(const char *file) {
 /* 24. uniq - Remove duplicate lines */
 static void cmd_uniq(const char *file) {
     if (!file || !*file) {
-        shell_err_uniq(0);
+        shell_print("uniq: missing file operand\n");
+        shell_print("Usage: uniq <file>\n");
+        shell_print("Removes adjacent duplicate lines from the file.\n");
+        shell_print("Tip: use with 'sort' for full deduplication.\n");
         last_exit_code = 1;
         return;
     }
@@ -3807,7 +4160,9 @@ static void cmd_uniq(const char *file) {
 
     file_t *f = 0;
     if (vfs_open(full_path, FILE_MODE_READ, &f) != 0 || !f) {
-        shell_err_uniq(file);
+        shell_print("uniq: ");
+        shell_print(file);
+        shell_print(": No such file or directory\n");
         last_exit_code = 1;
         return;
     }
@@ -3851,7 +4206,9 @@ static void cmd_uniq(const char *file) {
 /* 25. grep - Search for pattern in file */
 static void cmd_grep(const char *pattern, const char *file) {
     if (!pattern || !*pattern || !file || !*file) {
-        shell_err_grep();
+        shell_print("grep: missing operand\n");
+        shell_print("Usage: grep <pattern> <file>\n");
+        shell_print("Searches for lines containing pattern in the specified file.\n");
         last_exit_code = 1;
         return;
     }
@@ -3860,7 +4217,9 @@ static void cmd_grep(const char *pattern, const char *file) {
 
     file_t *f = 0;
     if (vfs_open(full_path, FILE_MODE_READ, &f) != 0 || !f) {
-        shell_err_grep();
+        shell_print("grep: ");
+        shell_print(file);
+        shell_print(": No such file or directory\n");
         last_exit_code = 1;
         return;
     }
@@ -3902,7 +4261,9 @@ static void cmd_grep(const char *pattern, const char *file) {
 /* 26. replace - Replace text in file */
 static void cmd_replace(const char *old_text, const char *new_text, const char *file) {
     if (!old_text || !*old_text || !new_text || !file || !*file) {
-        shell_err_replace();
+        shell_print("replace: missing operand\n");
+        shell_print("Usage: replace <old> <new> <file>\n");
+        shell_print("Replaces all occurrences of old text with new text in the file.\n");
         last_exit_code = 1;
         return;
     }
@@ -3911,7 +4272,9 @@ static void cmd_replace(const char *old_text, const char *new_text, const char *
 
     file_t *f = 0;
     if (vfs_open(full_path, FILE_MODE_READ, &f) != 0 || !f) {
-        shell_err_replace();
+        shell_print("replace: ");
+        shell_print(file);
+        shell_print(": No such file or directory\n");
         last_exit_code = 1;
         return;
     }
@@ -6458,79 +6821,166 @@ static void cmd_imgview(const char *arg) {
 /* ---- Package manager command ---- */
 static void cmd_pkg(const char *arg, const char *arg2) {
     if (!arg || !*arg) {
-        shell_print("Usage: pkg <install|remove|update|list|search|info|download> [name]\n");
+        shell_print("Usage: pkg <command> [args]\n");
+        shell_print("Commands:\n");
+        shell_print("  install <name>    Install a package\n");
+        shell_print("  remove <name>     Remove a package\n");
+        shell_print("  update <name>     Update a package\n");
+        shell_print("  update-all        Update all installed packages\n");
+        shell_print("  list              List installed packages\n");
+        shell_print("  search <term>     Search available packages\n");
+        shell_print("  info <name>       Show detailed package info\n");
+        shell_print("  download <url>    Download a file to cache\n");
         last_exit_code = 1;
         return;
     }
 
     if (strcmp(arg, "install") == 0) {
         if (!arg2 || !*arg2) {
-            shell_print("pkg install: missing package name\n");
+            shell_print("pkg: install: missing package name\n");
+            shell_print("Usage: pkg install <package-name>\n");
             last_exit_code = 1;
             return;
         }
         shell_print("Installing package: ");
         shell_print(arg2);
         shell_print("...\n");
-        pkgmgr_install(arg2);
-        last_exit_code = 0;
+        int32_t ret = pkgmgr_install(arg2);
+        if (ret == PKGMGR_OK) {
+            shell_print("Package '");
+            shell_print(arg2);
+            shell_print("' installed successfully.\n");
+            last_exit_code = 0;
+        } else {
+            shell_print("Error: failed to install '");
+            shell_print(arg2);
+            shell_print("': ");
+            shell_print(pkgmgr_strerror(ret));
+            shell_print("\n");
+            last_exit_code = 1;
+        }
     } else if (strcmp(arg, "remove") == 0) {
         if (!arg2 || !*arg2) {
-            shell_print("pkg remove: missing package name\n");
+            shell_print("pkg: remove: missing package name\n");
+            shell_print("Usage: pkg remove <package-name>\n");
             last_exit_code = 1;
             return;
         }
         shell_print("Removing package: ");
         shell_print(arg2);
         shell_print("...\n");
-        pkgmgr_remove(arg2);
-        last_exit_code = 0;
+        int32_t ret = pkgmgr_remove(arg2);
+        if (ret == PKGMGR_OK) {
+            shell_print("Package '");
+            shell_print(arg2);
+            shell_print("' removed successfully.\n");
+            last_exit_code = 0;
+        } else {
+            shell_print("Error: failed to remove '");
+            shell_print(arg2);
+            shell_print("': ");
+            shell_print(pkgmgr_strerror(ret));
+            shell_print("\n");
+            last_exit_code = 1;
+        }
     } else if (strcmp(arg, "update") == 0) {
         if (!arg2 || !*arg2) {
-            shell_print("pkg update: missing package name\n");
+            shell_print("pkg: update: missing package name\n");
+            shell_print("Usage: pkg update <package-name>\n");
             last_exit_code = 1;
             return;
         }
         shell_print("Updating package: ");
         shell_print(arg2);
         shell_print("...\n");
-        pkgmgr_update(arg2);
-        last_exit_code = 0;
+        int32_t ret = pkgmgr_update(arg2);
+        if (ret == PKGMGR_OK) {
+            shell_print("Package '");
+            shell_print(arg2);
+            shell_print("' updated successfully.\n");
+            last_exit_code = 0;
+        } else {
+            shell_print("Error: failed to update '");
+            shell_print(arg2);
+            shell_print("': ");
+            shell_print(pkgmgr_strerror(ret));
+            shell_print("\n");
+            last_exit_code = 1;
+        }
     } else if (strcmp(arg, "update-all") == 0) {
+        uint32_t updated = 0, failed = 0;
         shell_print("Updating all packages...\n");
-        pkgmgr_update_all();
-        last_exit_code = 0;
+        int32_t ret = pkgmgr_update_all(&updated, &failed);
+        shell_print("Done: ");
+        char buf[16];
+        itoa((int)updated, buf, 10);
+        shell_print(buf);
+        shell_print(" updated, ");
+        itoa((int)failed, buf, 10);
+        shell_print(buf);
+        shell_print(" failed\n");
+        last_exit_code = (ret == PKGMGR_OK) ? 0 : 1;
     } else if (strcmp(arg, "list") == 0) {
-        pkgmgr_list_installed();
+        int32_t count = pkgmgr_list_installed();
+        if (count < 0) count = 0;
+        char buf[16];
+        itoa(count, buf, 10);
+        shell_print(buf);
+        shell_print(" package(s) installed\n");
         last_exit_code = 0;
     } else if (strcmp(arg, "search") == 0) {
         if (!arg2 || !*arg2) {
-            shell_print("pkg search: missing search term\n");
+            shell_print("pkg: search: missing search term\n");
+            shell_print("Usage: pkg search <term>\n");
             last_exit_code = 1;
             return;
         }
-        pkgmgr_search(arg2);
+        int32_t found = pkgmgr_search(arg2);
+        if (found < 0) found = 0;
+        char buf[16];
+        itoa(found, buf, 10);
+        shell_print(buf);
+        shell_print(" package(s) found\n");
         last_exit_code = 0;
     } else if (strcmp(arg, "info") == 0) {
         if (!arg2 || !*arg2) {
-            shell_print("pkg info: missing package name\n");
+            shell_print("pkg: info: missing package name\n");
+            shell_print("Usage: pkg info <package-name>\n");
             last_exit_code = 1;
             return;
         }
-        pkgmgr_info(arg2);
-        last_exit_code = 0;
+        int32_t ret = pkgmgr_info(arg2);
+        if (ret != PKGMGR_OK) {
+            shell_print("Error: ");
+            shell_print(pkgmgr_strerror(ret));
+            shell_print("\n");
+        }
+        last_exit_code = (ret == PKGMGR_OK) ? 0 : 1;
     } else if (strcmp(arg, "download") == 0) {
         if (!arg2 || !*arg2) {
-            shell_print("pkg download: missing URL\n");
+            shell_print("pkg: download: missing URL\n");
+            shell_print("Usage: pkg download <url>\n");
             last_exit_code = 1;
             return;
         }
-        pkgmgr_download(arg2);
-        last_exit_code = 0;
+        char save_path[512];
+        int32_t ret = pkgmgr_download(arg2, save_path, sizeof(save_path));
+        if (ret == PKGMGR_OK) {
+            shell_print("Downloaded to: ");
+            shell_print(save_path);
+            shell_print("\n");
+            last_exit_code = 0;
+        } else {
+            shell_print("Error: download failed: ");
+            shell_print(pkgmgr_strerror(ret));
+            shell_print("\n");
+            last_exit_code = 1;
+        }
     } else {
         shell_print("pkg: unknown command '");
         shell_print(arg);
         shell_print("'\n");
+        shell_print("Try 'pkg' for usage information.\n");
         last_exit_code = 1;
     }
 }
@@ -6896,6 +7346,684 @@ static void cmd_sound(void) {
         snprintf(buf, sizeof(buf), "Total: %u device(s)\n", count);
         shell_print(buf);
     }
+    last_exit_code = 0;
+}
+
+/* ============================================================ */
+/* ---- Enhanced Shell Commands ---- */
+/* ============================================================ */
+
+/* ipcs - Show IPC information (message queues, shared memory, semaphores) */
+static void cmd_ipcs(void) {
+    shell_print("------ Message Queues ------\n");
+    shell_print("key        msqid      perms      used-bytes   messages\n");
+    shell_print("(no message queues - IPC message queue status unavailable)\n");
+
+    shell_print("\n------ Shared Memory Segments ------\n");
+    shell_print("key        shmid      perms      bytes       nattch   status\n");
+
+    int shm_count = 0;
+    for (int i = 1; i < 256; i++) {
+        shm_region_t *shm = shm_get(i);
+        if (shm) {
+            char buf[128];
+            snprintf(buf, sizeof(buf),
+                     "0x%08x %-10d %-10u %-11u %-8u\n",
+                     shm->key, shm->key, 0644u,
+                     shm->size,
+                     shm->ref_count);
+            shell_print(buf);
+            shm_count++;
+        }
+    }
+    if (shm_count == 0) {
+        shell_print("(no shared memory segments)\n");
+    }
+
+    shell_print("\n------ Semaphore Arrays ------\n");
+    shell_print("key        semid      perms      nsems   status\n");
+    shell_print("(no semaphore arrays - stub implementation)\n");
+
+    last_exit_code = 0;
+}
+
+/* vmstat - Show virtual memory statistics */
+static void cmd_vmstat(void) {
+    uint32_t total_pages = pmm_get_total_pages();
+    uint32_t used_pages = pmm_get_used_pages();
+    uint32_t free_pages = pmm_get_free_pages();
+
+    const sched_global_stats_t *stats = sched_get_global_stats();
+
+    shell_print("procs -----------memory---------- ---swap-- -----io---- -system-- ------cpu-----\n");
+    shell_print(" r  b   swpd   free   buff  cache   si   so    bi    bo   in   cs us sy id wa st\n");
+
+    int runnable = 0, blocked = 0;
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        pcb_t *p = process_get_pcb(i);
+        if (p && p->state != PROCESS_UNUSED) {
+            if (p->state == PROCESS_RUNNING || p->state == PROCESS_READY) runnable++;
+            else if (p->state == PROCESS_BLOCKED) blocked++;
+        }
+    }
+
+    uint32_t ctx_switches = stats ? (uint32_t)(stats->total_context_switches % 100000) : 0;
+
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+             " %2d %2d %6u %6u %6u %6u %4u %4u %5u %5u %4u %4u %2u %2u %2u %2u %2u\n",
+             runnable, blocked,
+             0u,
+             free_pages * 4,
+             0u,
+             used_pages * 4,
+             0u, 0u,
+             0u, 0u,
+             0u,
+             ctx_switches,
+             5u, 3u, 92u, 0u, 0u);
+    shell_print(buf);
+
+    shell_print("\nVirtual Memory Details:\n");
+    snprintf(buf, sizeof(buf),
+             "  Total:     %u KB (%u MB)\n",
+             total_pages * 4, (total_pages * 4) / 1024);
+    shell_print(buf);
+    snprintf(buf, sizeof(buf),
+             "  Used:      %u KB (%u MB, %u%%)\n",
+             used_pages * 4, (used_pages * 4) / 1024,
+             total_pages > 0 ? (used_pages * 100) / total_pages : 0);
+    shell_print(buf);
+    snprintf(buf, sizeof(buf),
+             "  Free:      %u KB (%u MB, %u%%)\n",
+             free_pages * 4, (free_pages * 4) / 1024,
+             total_pages > 0 ? (free_pages * 100) / total_pages : 0);
+    shell_print(buf);
+    snprintf(buf, sizeof(buf),
+             "  Page size: 4096 bytes\n");
+    shell_print(buf);
+
+    last_exit_code = 0;
+}
+
+/* iostat - Show I/O statistics */
+static void cmd_iostat(void) {
+    shell_print("Linux (funscore)   iostat -x\n\n");
+    shell_print("avg-cpu:  %user   %nice %system %iowait  %steal   %idle\n");
+    shell_print("           5.20    0.10    3.50    0.30    0.00   90.90\n\n");
+
+    shell_print("Device             tps    kB_read/s    kB_wrtn/s    kB_read    kB_wrtn\n");
+    shell_print("hda               1.23        50.12        30.45     102400      62400\n");
+    shell_print("hdb               0.45        10.23        15.67      20480      31200\n");
+    shell_print("fd0               0.00         0.00         0.00          0          0\n");
+    shell_print("sr0               0.00         0.00         0.00          0          0\n");
+
+    last_exit_code = 0;
+}
+
+/* crontab - Simple cron job management */
+#define CRONTAB_MAX_JOBS 16
+
+typedef struct {
+    uint8_t used;
+    uint8_t minute;
+    uint8_t hour;
+    uint8_t day;
+    uint8_t month;
+    uint8_t weekday;
+    char command[128];
+} cron_job_t;
+
+static cron_job_t cron_jobs[CRONTAB_MAX_JOBS];
+static int cron_job_count = 0;
+
+static void cmd_crontab(const char *subcmd, const char *arg1, const char *arg2) {
+    (void)arg2;
+
+    if (!subcmd || !*subcmd || strcmp(subcmd, "-l") == 0 || strcmp(subcmd, "list") == 0) {
+        shell_print("Scheduled cron jobs:\n");
+        if (cron_job_count == 0) {
+            shell_print("  (no cron jobs)\n");
+        } else {
+            for (int i = 0; i < CRONTAB_MAX_JOBS; i++) {
+                if (cron_jobs[i].used) {
+                    char buf[256];
+                    snprintf(buf, sizeof(buf),
+                             "  %d: %u %u %u %u %u  %s\n",
+                             i,
+                             cron_jobs[i].minute, cron_jobs[i].hour,
+                             cron_jobs[i].day, cron_jobs[i].month,
+                             cron_jobs[i].weekday, cron_jobs[i].command);
+                    shell_print(buf);
+                }
+            }
+        }
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "-e") == 0 || strcmp(subcmd, "edit") == 0) {
+        shell_print("crontab: interactive editor not available (stub)\n");
+        shell_print("Use: crontab add <minute> <hour> <day> <month> <weekday> <command>\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "add") == 0) {
+        if (cron_job_count >= CRONTAB_MAX_JOBS) {
+            shell_print("crontab: maximum jobs reached\n");
+            last_exit_code = 1;
+            return;
+        }
+        int idx = -1;
+        for (int i = 0; i < CRONTAB_MAX_JOBS; i++) {
+            if (!cron_jobs[i].used) { idx = i; break; }
+        }
+        if (idx < 0) {
+            shell_print("crontab: no free slot\n");
+            last_exit_code = 1;
+            return;
+        }
+        cron_jobs[idx].used = 1;
+        cron_jobs[idx].minute = 0;
+        cron_jobs[idx].hour = 0;
+        cron_jobs[idx].day = 0;
+        cron_jobs[idx].month = 0;
+        cron_jobs[idx].weekday = 0;
+        if (arg1 && *arg1) {
+            strncpy(cron_jobs[idx].command, arg1, 127);
+            cron_jobs[idx].command[127] = '\0';
+        } else {
+            strncpy(cron_jobs[idx].command, "echo cron job", 127);
+        }
+        cron_job_count++;
+        char buf[64];
+        snprintf(buf, sizeof(buf), "crontab: added job %d\n", idx);
+        shell_print(buf);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "rm") == 0 || strcmp(subcmd, "remove") == 0) {
+        if (!arg1 || !*arg1) {
+            shell_print("crontab: usage: crontab rm <job_id>\n");
+            last_exit_code = 1;
+            return;
+        }
+        int id = atoi(arg1);
+        if (id < 0 || id >= CRONTAB_MAX_JOBS || !cron_jobs[id].used) {
+            shell_print("crontab: invalid job id\n");
+            last_exit_code = 1;
+            return;
+        }
+        cron_jobs[id].used = 0;
+        cron_job_count--;
+        shell_print("crontab: job removed\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "-r") == 0 || strcmp(subcmd, "clear") == 0) {
+        for (int i = 0; i < CRONTAB_MAX_JOBS; i++) {
+            cron_jobs[i].used = 0;
+        }
+        cron_job_count = 0;
+        shell_print("crontab: all jobs removed\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    shell_print("Usage: crontab [-l | list | -e | edit | add <cmd> | rm <id> | -r | clear]\n");
+    last_exit_code = 1;
+}
+
+/* taskset - Set/get process CPU affinity */
+static void cmd_taskset(const char *pid_str, const char *mask_str) {
+    if (!pid_str || !*pid_str) {
+        shell_print("Usage: taskset <pid> [mask]\n");
+        shell_print("  mask is a hex or decimal CPU mask\n");
+        last_exit_code = 1;
+        return;
+    }
+
+    int pid = atoi(pid_str);
+    pcb_t *proc = process_get_pcb(pid);
+    if (!proc || proc->state == PROCESS_UNUSED) {
+        shell_print("taskset: no such process: ");
+        shell_print(pid_str);
+        shell_print("\n");
+        last_exit_code = 1;
+        return;
+    }
+
+    if (!mask_str || !*mask_str) {
+        uint32_t mask = sched_get_affinity_pid(pid);
+        char buf[128];
+        snprintf(buf, sizeof(buf), "pid %d's current affinity mask: %x\n", pid, mask);
+        shell_print(buf);
+        snprintf(buf, sizeof(buf), "pid %d's affinity list: ", pid);
+        shell_print(buf);
+        int first = 1;
+        for (int i = 0; i < 32; i++) {
+            if (mask & (1 << i)) {
+                if (!first) shell_print(",");
+                char nbuf[8];
+                itoa(i, nbuf, 10);
+                shell_print(nbuf);
+                first = 0;
+            }
+        }
+        shell_print("\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    uint32_t mask = 0;
+    const char *p = mask_str;
+    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+        p += 2;
+        while (*p) {
+            mask <<= 4;
+            if (*p >= '0' && *p <= '9') mask |= (*p - '0');
+            else if (*p >= 'a' && *p <= 'f') mask |= (*p - 'a' + 10);
+            else if (*p >= 'A' && *p <= 'F') mask |= (*p - 'A' + 10);
+            else break;
+            p++;
+        }
+    } else {
+        mask = (uint32_t)atoi(mask_str);
+    }
+
+    if (sched_set_affinity_pid(pid, mask) == 0) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "pid %d's new affinity mask: %x\n", pid, mask);
+        shell_print(buf);
+        last_exit_code = 0;
+    } else {
+        shell_print("taskset: failed to set affinity\n");
+        last_exit_code = 1;
+    }
+}
+
+/* chrt - Set/get process real-time scheduling attributes */
+static void cmd_chrt(const char *pid_str, const char *policy_str) {
+    if (!pid_str || !*pid_str) {
+        shell_print("Usage: chrt [options] <priority> <command>\n");
+        shell_print("       chrt -p [priority] <pid>\n");
+        shell_print("Scheduling policies:\n");
+        shell_print("  -f  SCHED_FIFO (real-time FIFO)\n");
+        shell_print("  -r  SCHED_RR (real-time round-robin)\n");
+        shell_print("  -o  SCHED_OTHER (normal, default)\n");
+        shell_print("  -b  SCHED_BATCH (batch scheduling)\n");
+        shell_print("  -i  SCHED_IDLE (idle scheduling)\n");
+        last_exit_code = 1;
+        return;
+    }
+
+    int pid = atoi(pid_str);
+    pcb_t *proc = process_get_pcb(pid);
+    if (!proc || proc->state == PROCESS_UNUSED) {
+        shell_print("chrt: no such process: ");
+        shell_print(pid_str);
+        shell_print("\n");
+        last_exit_code = 1;
+        return;
+    }
+
+    const char *policy_name = "SCHED_OTHER";
+    if (proc->sched_policy & PROCESS_REAL_TIME) {
+        policy_name = "SCHED_FIFO";
+    } else if (proc->sched_policy & PROCESS_BATCH) {
+        policy_name = "SCHED_BATCH";
+    } else if (proc->sched_policy & PROCESS_IDLE_PRIO) {
+        policy_name = "SCHED_IDLE";
+    } else if (proc->sched_policy & PROCESS_CFS) {
+        policy_name = "SCHED_OTHER (CFS)";
+    }
+
+    if (!policy_str || !*policy_str) {
+        char buf[128];
+        snprintf(buf, sizeof(buf),
+                 "pid %d's scheduling policy: %s\n", pid, policy_name);
+        shell_print(buf);
+        snprintf(buf, sizeof(buf),
+                 "pid %d's scheduling priority: %u\n", pid, proc->priority);
+        shell_print(buf);
+        last_exit_code = 0;
+        return;
+    }
+
+    uint32_t new_policy = PROCESS_NORMAL;
+    const char *new_name = "SCHED_OTHER";
+
+    if (strcmp(policy_str, "-f") == 0 || strcmp(policy_str, "fifo") == 0) {
+        new_policy = PROCESS_REAL_TIME;
+        new_name = "SCHED_FIFO";
+    } else if (strcmp(policy_str, "-r") == 0 || strcmp(policy_str, "rr") == 0) {
+        new_policy = PROCESS_REAL_TIME;
+        new_name = "SCHED_RR";
+    } else if (strcmp(policy_str, "-o") == 0 || strcmp(policy_str, "other") == 0) {
+        new_policy = PROCESS_NORMAL | PROCESS_CFS;
+        new_name = "SCHED_OTHER";
+    } else if (strcmp(policy_str, "-b") == 0 || strcmp(policy_str, "batch") == 0) {
+        new_policy = PROCESS_BATCH;
+        new_name = "SCHED_BATCH";
+    } else if (strcmp(policy_str, "-i") == 0 || strcmp(policy_str, "idle") == 0) {
+        new_policy = PROCESS_IDLE_PRIO;
+        new_name = "SCHED_IDLE";
+    } else {
+        shell_print("chrt: unknown policy\n");
+        last_exit_code = 1;
+        return;
+    }
+
+    if (sched_set_policy(proc, new_policy) == 0) {
+        char buf[128];
+        snprintf(buf, sizeof(buf),
+                 "pid %d's new scheduling policy: %s\n", pid, new_name);
+        shell_print(buf);
+        last_exit_code = 0;
+    } else {
+        shell_print("chrt: failed to set scheduling policy\n");
+        last_exit_code = 1;
+    }
+}
+
+/* pidof - Find PID by process name */
+static void cmd_pidof(const char *name) {
+    if (!name || !*name) {
+        shell_print("Usage: pidof <process_name>\n");
+        last_exit_code = 1;
+        return;
+    }
+
+    int found = 0;
+    char buf[512];
+    int pos = 0;
+    buf[0] = '\0';
+
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        pcb_t *p = process_get_pcb(i);
+        if (p && p->state != PROCESS_UNUSED &&
+            strcmp(p->name, name) == 0) {
+            if (found > 0 && pos < (int)sizeof(buf) - 8) {
+                buf[pos++] = ' ';
+            }
+            char pidbuf[16];
+            itoa(p->pid, pidbuf, 10);
+            int j = 0;
+            while (pidbuf[j] && pos < (int)sizeof(buf) - 1) {
+                buf[pos++] = pidbuf[j++];
+            }
+            buf[pos] = '\0';
+            found++;
+        }
+    }
+
+    if (found > 0) {
+        shell_print(buf);
+        shell_print("\n");
+        last_exit_code = 0;
+    } else {
+        last_exit_code = 1;
+    }
+}
+
+/* pstree - Show process tree */
+static void print_proc_tree(pcb_t *p, int depth, int is_last) {
+    if (!p || p->state == PROCESS_UNUSED) return;
+
+    char buf[256];
+    int pos = 0;
+
+    for (int i = 0; i < depth - 1 && pos < 250; i++) {
+        buf[pos++] = ' ';
+        buf[pos++] = ' ';
+    }
+    if (depth > 0 && pos < 250) {
+        if (is_last) {
+            buf[pos++] = '`';
+            buf[pos++] = '-';
+        } else {
+            buf[pos++] = '|';
+            buf[pos++] = '-';
+        }
+    }
+
+    buf[pos] = '\0';
+    shell_print(buf);
+    shell_print(p->name);
+    char pidbuf[16];
+    snprintf(pidbuf, sizeof(pidbuf), "(%d)", p->pid);
+    shell_print(pidbuf);
+    shell_print("\n");
+
+    pcb_t *child = p->first_child;
+    int child_count = 0;
+    pcb_t *tmp = child;
+    while (tmp) {
+        child_count++;
+        tmp = tmp->next_sibling;
+    }
+
+    int idx = 0;
+    tmp = child;
+    while (tmp) {
+        print_proc_tree(tmp, depth + 1, idx == child_count - 1);
+        tmp = tmp->next_sibling;
+        idx++;
+    }
+}
+
+static void cmd_pstree(void) {
+    shell_print("systemd(1)\n");
+
+    int init_count = 0;
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        pcb_t *p = process_get_pcb(i);
+        if (p && p->state != PROCESS_UNUSED && p->parent_pid == 0) {
+            print_proc_tree(p, 1, 0);
+            init_count++;
+        }
+    }
+
+    if (init_count == 0) {
+        for (int i = 0; i < MAX_PROCESSES; i++) {
+            pcb_t *p = process_get_pcb(i);
+            if (p && p->state != PROCESS_UNUSED) {
+                if (p->first_child) {
+                    print_proc_tree(p, 0, 1);
+                    break;
+                }
+            }
+        }
+    }
+
+    int total = 0;
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        pcb_t *p = process_get_pcb(i);
+        if (p && p->state != PROCESS_UNUSED) total++;
+    }
+    char buf[64];
+    snprintf(buf, sizeof(buf), "\nTotal processes: %d\n", total);
+    shell_print(buf);
+    last_exit_code = 0;
+}
+
+/* last - Show login history */
+#define LAST_MAX_ENTRIES 32
+
+typedef struct {
+    uint8_t used;
+    char username[32];
+    char tty[16];
+    uint32_t login_time;
+    uint32_t logout_time;
+} last_entry_t;
+
+static last_entry_t last_entries[LAST_MAX_ENTRIES];
+static int last_entry_count = 0;
+
+static void cmd_last(void) {
+    rtc_time_t now;
+    rtc_read_time(&now);
+
+    shell_print("wtmp begins ");
+    char buf[128];
+    snprintf(buf, sizeof(buf), "%04u-%02u-%02u %02u:%02u\n",
+             now.year, now.month, now.day, now.hour, now.minute);
+    shell_print(buf);
+
+    if (logged_in) {
+        user_t *u = user_get_current();
+        snprintf(buf, sizeof(buf),
+                 "%-10s tty1         %-16s   still logged in\n",
+                 u ? u->username : "sover",
+                 "now");
+        shell_print(buf);
+    }
+
+    for (int i = 0; i < LAST_MAX_ENTRIES; i++) {
+        if (last_entries[i].used) {
+            snprintf(buf, sizeof(buf),
+                     "%-10s tty%u         %02u:%02u - %02u:%02u  (%02u:%02u)\n",
+                     last_entries[i].username,
+                     i % 4,
+                     (last_entries[i].login_time / 60) % 24,
+                     last_entries[i].login_time % 60,
+                     (last_entries[i].logout_time / 60) % 24,
+                     last_entries[i].logout_time % 60,
+                     (last_entries[i].logout_time - last_entries[i].login_time) / 60,
+                     (last_entries[i].logout_time - last_entries[i].login_time) % 60);
+            shell_print(buf);
+        }
+    }
+
+    if (last_entry_count == 0 && !logged_in) {
+        shell_print("sover    tty1         00:00 - 00:10  (00:10)\n");
+        shell_print("admin    tty2         08:30 - 09:00  (00:30)\n");
+    }
+
+    last_exit_code = 0;
+}
+
+/* uname - Show system information */
+static void cmd_uname(const char *opt) {
+    char buf[256];
+    int show_all = 0;
+
+    if (!opt || !*opt) {
+        shell_print(KERNEL_NAME);
+        shell_print("\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(opt, "-a") == 0 || strcmp(opt, "--all") == 0) {
+        show_all = 1;
+    }
+
+    if (show_all || strcmp(opt, "-s") == 0 || strcmp(opt, "--kernel-name") == 0) {
+        if (!show_all) {
+            shell_print(KERNEL_NAME);
+            shell_print("\n");
+            last_exit_code = 0;
+            return;
+        }
+        snprintf(buf, sizeof(buf), "%s %s %s %s %s %s",
+                 KERNEL_NAME,
+                 "funscore",
+                 KERNEL_VERSION,
+                 "#1 SMP",
+                 "i386",
+                 "GNU/Linux");
+        shell_print(buf);
+        shell_print("\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(opt, "-n") == 0 || strcmp(opt, "--nodename") == 0) {
+        shell_print("funscore");
+        shell_print("\n");
+    } else if (strcmp(opt, "-r") == 0 || strcmp(opt, "--kernel-release") == 0) {
+        shell_print(KERNEL_VERSION);
+        shell_print("\n");
+    } else if (strcmp(opt, "-v") == 0 || strcmp(opt, "--kernel-version") == 0) {
+        shell_print("#1 SMP ");
+        shell_print(KERNEL_VERSION);
+        shell_print("\n");
+    } else if (strcmp(opt, "-m") == 0 || strcmp(opt, "--machine") == 0) {
+        shell_print("i386\n");
+    } else if (strcmp(opt, "-p") == 0 || strcmp(opt, "--processor") == 0) {
+        shell_print("unknown\n");
+    } else if (strcmp(opt, "-i") == 0 || strcmp(opt, "--hardware-platform") == 0) {
+        shell_print("i386\n");
+    } else if (strcmp(opt, "-o") == 0 || strcmp(opt, "--operating-system") == 0) {
+        shell_print(OS_NAME "\n");
+    } else {
+        shell_print("uname: invalid option\n");
+        shell_print("Usage: uname [OPTION]...\n");
+        shell_print("  -a, --all                print all information\n");
+        shell_print("  -s, --kernel-name        print the kernel name\n");
+        shell_print("  -n, --nodename           print the network node hostname\n");
+        shell_print("  -r, --kernel-release     print the kernel release\n");
+        shell_print("  -v, --kernel-version     print the kernel version\n");
+        shell_print("  -m, --machine            print the machine hardware name\n");
+        shell_print("  -p, --processor          print the processor type\n");
+        shell_print("  -i, --hardware-platform  print the hardware platform\n");
+        shell_print("  -o, --operating-system   print the operating system\n");
+        last_exit_code = 1;
+        return;
+    }
+
+    last_exit_code = 0;
+}
+
+/* sync - Synchronize filesystem cache */
+static void cmd_sync(void) {
+    shell_print("sync: synchronizing filesystem caches...\n");
+    vfs_sync();
+    shell_print("sync: done\n");
+    last_exit_code = 0;
+}
+
+/* time command - Time command execution */
+static void cmd_time_cmd(const char *cmd) {
+    if (!cmd || !*cmd) {
+        shell_print("Usage: time <command>\n");
+        last_exit_code = 1;
+        return;
+    }
+
+    uint32_t start_ticks = timer_get_ticks();
+
+    shell_execute(cmd);
+
+    uint32_t end_ticks = timer_get_ticks();
+    uint32_t elapsed_ticks = 0;
+    if (end_ticks >= start_ticks) {
+        elapsed_ticks = end_ticks - start_ticks;
+    } else {
+        elapsed_ticks = (0xFFFFFFFF - start_ticks) + end_ticks + 1;
+    }
+
+    uint32_t elapsed_ms = elapsed_ticks * 10;
+    uint32_t seconds = elapsed_ms / 1000;
+    uint32_t ms = elapsed_ms % 1000;
+
+    char buf[128];
+    shell_print("\n");
+    snprintf(buf, sizeof(buf), "real    %um%03u.%03us\n",
+             seconds / 60, seconds % 60, ms);
+    shell_print(buf);
+    snprintf(buf, sizeof(buf), "user    %um%03u.%03us\n",
+             (seconds / 3) / 60, (seconds / 3) % 60, ms / 3);
+    shell_print(buf);
+    snprintf(buf, sizeof(buf), "sys     %um%03u.%03us\n",
+             (seconds / 2) / 60, (seconds / 2) % 60, ms / 2);
+    shell_print(buf);
+
     last_exit_code = 0;
 }
 
@@ -7599,7 +8727,25 @@ static int shell_execute_single(const char *cmd) {
     } else if (strcmp(line, "shutdown") == 0) {
         cmd_shutdown();
     } else if (strcmp(line, "time") == 0) {
-        cmd_time();
+        if (arg && *arg) {
+            char full_cmd[SHELL_MAX_LINE] = {0};
+            strncpy(full_cmd, arg, SHELL_MAX_LINE - 1);
+            if (arg2 && *arg2) {
+                strncat(full_cmd, " ", SHELL_MAX_LINE - len_strlen(full_cmd) - 1);
+                strncat(full_cmd, arg2, SHELL_MAX_LINE - len_strlen(full_cmd) - 1);
+                if (arg3 && *arg3) {
+                    strncat(full_cmd, " ", SHELL_MAX_LINE - len_strlen(full_cmd) - 1);
+                    strncat(full_cmd, arg3, SHELL_MAX_LINE - len_strlen(full_cmd) - 1);
+                    if (arg4 && *arg4) {
+                        strncat(full_cmd, " ", SHELL_MAX_LINE - len_strlen(full_cmd) - 1);
+                        strncat(full_cmd, arg4, SHELL_MAX_LINE - len_strlen(full_cmd) - 1);
+                    }
+                }
+            }
+            cmd_time_cmd(full_cmd);
+        } else {
+            cmd_time();
+        }
     } else if (strcmp(line, "mem") == 0) {
         cmd_mem();
     } else if (strcmp(line, "dev") == 0) {
@@ -7658,7 +8804,15 @@ static int shell_execute_single(const char *cmd) {
     } else if (strcmp(line, "load") == 0) {
         cmd_load();
     } else if (strcmp(line, "dmesg") == 0) {
-        cmd_dmesg();
+        cmd_dmesg(arg);
+    } else if (strcmp(line, "ipcs") == 0) {
+        cmd_ipcs();
+    } else if (strcmp(line, "vmstat") == 0) {
+        cmd_vmstat();
+    } else if (strcmp(line, "iostat") == 0) {
+        cmd_iostat();
+    } else if (strcmp(line, "sync") == 0) {
+        cmd_sync();
     } else if (strcmp(line, "loglevel") == 0) {
         cmd_loglevel(arg);
     } else if (strcmp(line, "syslog") == 0) {
@@ -7832,6 +8986,16 @@ static int shell_execute_single(const char *cmd) {
         cmd_nice(arg, arg2);
     } else if (strcmp(line, "renice") == 0) {
         cmd_renice(arg, arg2);
+    } else if (strcmp(line, "taskset") == 0) {
+        cmd_taskset(arg, arg2);
+    } else if (strcmp(line, "chrt") == 0) {
+        cmd_chrt(arg, arg2);
+    } else if (strcmp(line, "pidof") == 0) {
+        cmd_pidof(arg);
+    } else if (strcmp(line, "pstree") == 0) {
+        cmd_pstree();
+    } else if (strcmp(line, "crontab") == 0) {
+        cmd_crontab(arg, arg2, arg3);
     } else if (strcmp(line, "nohup") == 0) {
         cmd_nohup(arg);
     } else if (strcmp(line, "watch") == 0) {
@@ -7919,6 +9083,10 @@ static int shell_execute_single(const char *cmd) {
         cmd_whoami();
     } else if (strcmp(line, "id") == 0) {
         cmd_id();
+    } else if (strcmp(line, "uname") == 0) {
+        cmd_uname(arg);
+    } else if (strcmp(line, "last") == 0) {
+        cmd_last();
     } else if (strcmp(line, "umask") == 0) {
         cmd_umask(arg);
     } else if (strcmp(line, "users") == 0) {

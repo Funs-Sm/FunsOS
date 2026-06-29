@@ -14,12 +14,49 @@
 #define PROCESS_NORMAL    0x0002
 #define PROCESS_IDLE      0x0004
 #define PROCESS_CFS       0x0008  /* CFS完全公平调度策略 */
+#define PROCESS_DEADLINE  0x0010  /* Deadline调度策略 */
+#define PROCESS_BATCH     0x0020  /* 批处理调度策略 */
+#define PROCESS_IDLE_PRIO 0x0040  /* 空闲优先级 */
 
 #define BLOCK_REASON_NONE   0
 #define BLOCK_REASON_IO     1
 #define BLOCK_REASON_SLEEP  2
 #define BLOCK_REASON_WAIT   3
 #define BLOCK_REASON_MUTEX  4
+#define BLOCK_REASON_WAITPID 5
+#define BLOCK_REASON_SIGNAL  6
+#define BLOCK_REASON_FUTEX   7
+
+/* CPU亲和性 */
+#define MAX_CPU_AFFINITY 32
+typedef struct cpu_affinity {
+    uint32_t cpumask;
+    uint32_t cpu_count;
+} cpu_affinity_t;
+
+/* Deadline调度参数 */
+typedef struct deadline_params {
+    uint64_t runtime;      /* 运行时间 (ns/ticks) */
+    uint64_t deadline;     /* 相对截止时间 */
+    uint64_t period;       /* 周期 */
+    uint64_t remaining_runtime;
+    uint64_t current_deadline;
+    uint8_t  active;
+} deadline_params_t;
+
+/* 调度统计信息 */
+typedef struct sched_stat {
+    uint64_t sched_count;       /* 被调度次数 */
+    uint64_t total_runtime;     /* 总运行时间(ticks) */
+    uint64_t max_runtime;       /* 最长单次运行 */
+    uint64_t min_runtime;       /* 最短单次运行 */
+    uint64_t avg_runtime;       /* 平均运行时间 */
+    uint64_t wait_time;         /* 总等待时间 */
+    uint64_t context_switches;  /* 上下文切换次数 */
+    uint64_t voluntary_ctx;     /* 主动让出次数 */
+    uint64_t involuntary_ctx;   /* 被动抢占次数 */
+    uint64_t last_sched_time;   /* 上次调度时间 */
+} sched_stat_t;
 
 typedef struct sched_queue {
     pcb_t *head;
@@ -145,5 +182,101 @@ process_group_t *sched_get_group(pid_t pgid);
 void sched_dump_queue(int queue_index); /* 打印指定队列内容 */
 void sched_set_debug_level(int level);  /* 0=off, 1=basic, 2=verbose */
 int  sched_get_debug_level(void);
+
+/* ============================================================
+ * Deadline 调度器 (SCHED_DEADLINE)
+ * ============================================================ */
+
+#define SCHED_DL_MAX_PROCS 64
+#define SCHED_DL_GRANULARITY 1
+
+typedef struct dl_node {
+    pcb_t              *proc;
+    deadline_params_t   params;
+    struct dl_node     *next;
+    struct dl_node     *prev;
+} dl_node_t;
+
+typedef struct dl_rq {
+    dl_node_t *head;
+    dl_node_t *tail;
+    uint32_t   nr_running;
+    uint64_t   running_bw;
+} dl_rq_t;
+
+void sched_dl_init(void);
+int  sched_set_policy_deadline(pcb_t *proc, uint64_t runtime,
+                               uint64_t deadline, uint64_t period);
+void sched_dl_enqueue(pcb_t *proc);
+pcb_t *sched_dl_dequeue(void);
+void sched_dl_tick(pcb_t *proc);
+int  sched_dl_check_preempt(pcb_t *curr, pcb_t *new);
+
+/* ============================================================
+ * CPU 亲和性 (CPU Affinity)
+ * ============================================================ */
+
+int  sched_set_affinity(pcb_t *proc, uint32_t cpumask);
+uint32_t sched_get_affinity(pcb_t *proc);
+int  sched_set_affinity_pid(pid_t pid, uint32_t cpumask);
+uint32_t sched_get_affinity_pid(pid_t pid);
+
+/* ============================================================
+ * 优先级继承 (Priority Inheritance)
+ * ============================================================ */
+
+#define PI_MAX_DEPTH 8
+
+typedef struct pi_info {
+    pcb_t   *owner;
+    uint32_t original_priority;
+    uint32_t boosted_priority;
+    uint8_t   boosted;
+} pi_info_t;
+
+void sched_pi_init(void);
+int  sched_pi_boost(pcb_t *proc, uint32_t new_priority);
+int  sched_pi_unboost(pcb_t *proc);
+int  sched_pi_mutex_lock(pcb_t *holder, pcb_t *waiter);
+int  sched_pi_mutex_unlock(pcb_t *holder);
+
+/* ============================================================
+ * 调度统计 (Scheduler Statistics)
+ * ============================================================ */
+
+typedef struct sched_global_stats {
+    uint64_t total_context_switches;
+    uint64_t total_ticks;
+    uint64_t idle_ticks;
+    uint64_t user_ticks;
+    uint64_t kernel_ticks;
+    uint64_t preempt_count;
+    uint64_t yield_count;
+} sched_global_stats_t;
+
+void sched_stats_init(void);
+void sched_stats_account(pcb_t *proc, int ticks_used, int voluntary);
+sched_stat_t *sched_get_proc_stats(pid_t pid);
+const sched_global_stats_t *sched_get_global_stats(void);
+void sched_stats_print(void);
+void sched_stats_reset(void);
+
+/* ============================================================
+ * 批处理调度 (Batch Scheduling)
+ * ============================================================ */
+
+#define BATCH_MAX_JOBS 32
+
+typedef struct batch_job {
+    pid_t pid;
+    uint32_t priority;
+    uint64_t est_runtime;
+    uint8_t  used;
+} batch_job_t;
+
+void sched_batch_init(void);
+int  sched_batch_add(pid_t pid, uint32_t prio, uint64_t est_runtime);
+int  sched_batch_remove(pid_t pid);
+void sched_batch_tick(void);
 
 #endif

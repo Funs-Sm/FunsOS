@@ -20,6 +20,16 @@
 #define SYSLOG_FAC_LOCAL0   (16 << 3) /* Local use 0-7 */
 #define SYSLOG_FAC_LOCAL7   (23 << 3)
 
+/* Log levels (matching standard syslog priorities) */
+#define LOG_EMERG    0   /* System is unusable */
+#define LOG_ALERT    1   /* Action must be taken immediately */
+#define LOG_CRIT     2   /* Critical conditions */
+#define LOG_ERR      3   /* Error conditions */
+#define LOG_WARNING  4   /* Warning conditions */
+#define LOG_NOTICE   5   /* Normal but significant */
+#define LOG_INFO     6   /* Informational */
+#define LOG_DEBUG    7   /* Debug messages */
+
 /* Syslog output targets */
 #define SYSLOG_TARGET_SERIAL  0x01
 #define SYSLOG_TARGET_KLOG    0x02
@@ -27,6 +37,8 @@
 #define SYSLOG_TARGET_NETWORK 0x08
 
 #define SYSLOG_MAX_RULES 16
+#define SYSLOG_BUF_SIZE  (16 * 1024)  /* 16KB ring buffer */
+#define SYSLOG_MAX_LINE  512
 
 typedef struct syslog_rule {
     uint32_t facility;       /* Facility mask (bitfield) */
@@ -48,5 +60,11 @@ void syslog_flush(void);
 
 /* Per-process log */
 void syslog_process_log(uint32_t pid, uint32_t level, const char *msg);
+
+/* dmesg buffer read interface */
+uint32_t syslog_dmesg_read(char *out, uint32_t max_len);
+uint32_t syslog_dmesg_read_from(uint32_t start_line, char *out, uint32_t max_len);
+uint32_t syslog_dmesg_get_line_count(void);
+void syslog_dmesg_clear(void);
 
 #endif

@@ -10,6 +10,7 @@
 #include "string.h"
 #include "stddef.h"
 #include "sync.h"
+#include "klog.h"
 
 /* ------------------------------------------------------------------ */
 /* 全局变量                                                           */
@@ -93,43 +94,44 @@ static int xfs_read_block(uint64_t block_num, void *buf) {
 }
 
 /* ------------------------------------------------------------------ */
-/* AG (Allocation Group) 头部                                         */
+/* 超级块解析                                                         */
 /* ------------------------------------------------------------------ */
 
-/* XFS AGF (AG Free Space) header - at AG_start + 1 block */
-typedef struct {
-    uint32_t magic;      /* 0x58414746 'AGF' */
-    uint32_t version;
-    uint32_t seqno;      /* AG number */
-    uint32_t length;     /* AG size in blocks */
-    uint32_t bnofirst;
-    uint32_t bnocnt;
-    uint32_t btreefirst;
-    uint32_t btreecnt;
-    uint32_t flfirst;
-    uint32_t flcnt;
-    uint32_t flblocks;
-    uint32_t freeblks;
-    uint32_t longest;
-} __attribute__((packed)) xfs_agf_t;
+int xfs_read_superblock(xfs_superblock_t *sb) {
+    if (!sb) return -1;
 
-/* XFS AGI (AG Inode Info) header - at AG_start + 2 blocks */
-typedef struct {
-    uint32_t magic;      /* 0x58414749 'AGI' */
-    uint32_t version;
-    uint32_t seqno;      /* AG number */
-    uint32_t length;     /* AG size in blocks */
-    uint32_t count;      /* allocated inodes */
-    uint32_t root;       /* root of inode B+ tree (block number, relative to AG) */
-    uint32_t level;
-    uint32_t freecount;
-    uint32_t newino;
-    uint32_t dirino;
-    uint32_t first_agino;
-} __attribute__((packed)) xfs_agi_t;
+    uint8_t *buf = (uint8_t *)kmalloc(xfs_sb.blocksize ? xfs_sb.blocksize : 4096);
+    if (!buf) return -1;
 
-/* Read AGI header for a given AG index */
-static int xfs_read_agi(uint32_t ag_index, xfs_agi_t *agi) {
+    if (xfs_read_from_device(0, buf, sizeof(xfs_superblock_t)) != 0) {
+        kfree(buf);
+        return -1;
+    }
+
+    memcpy(sb, buf, sizeof(xfs_superblock_t));
+    kfree(buf);
+
+    if (sb->magic != (uint32_t)XFS_MAGIC) {
+        return -1;
+    }
+
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* AG (Allocation Group) 支持                                         */
+/* ------------------------------------------------------------------ */
+
+int xfs_read_agf(uint32_t ag_index, xfs_agf_t *agf) {
+    if (!agf || ag_index >= xfs_sb.agcount) return -1;
+
+    uint64_t ag_start = (uint64_t)ag_index * xfs_sb.agsize * xfs_sb.blocksize;
+    return xfs_read_from_device(ag_start + 1 * xfs_sb.blocksize, agf, sizeof(xfs_agf_t));
+}
+
+int xfs_read_agi(uint32_t ag_index, xfs_agi_t *agi) {
+    if (!agi || ag_index >= xfs_sb.agcount) return -1;
+
     uint64_t ag_start = (uint64_t)ag_index * xfs_sb.agsize * xfs_sb.blocksize;
     return xfs_read_from_device(ag_start + 2 * xfs_sb.blocksize, agi, sizeof(xfs_agi_t));
 }
@@ -138,16 +140,15 @@ static int xfs_read_agi(uint32_t ag_index, xfs_agi_t *agi) {
 /* Inode 读取                                                         */
 /* ------------------------------------------------------------------ */
 
-/* XFS disk inode - on-disk format (simplified) */
 typedef struct {
-    uint16_t magic;          /* 0x494E 'IN' */
-    uint16_t mode;           /* file type and permissions */
+    uint16_t magic;
+    uint16_t mode;
     int16_t  version;
-    int32_t  format;         /* data format: 1=local, 2=extent, 3=btree */
-    uint8_t  link;           /* link count for v1 */
+    int32_t  format;
+    uint8_t  link;
     uint32_t uid;
     uint32_t gid;
-    uint32_t nlink;          /* link count for v2 */
+    uint32_t nlink;
     uint16_t projid;
     uint8_t  pad[6];
     uint16_t flushiter;
@@ -158,20 +159,19 @@ typedef struct {
     uint64_t nblocks;
     uint32_t extsize;
     uint32_t nextents;
-    uint8_t  bmx[0];        /* extent or B+ tree data follows */
+    uint8_t  bmx[0];
 } __attribute__((packed)) xfs_dinode_t;
 
-/* XFS extent format (in bmx array) */
 typedef struct {
-    uint64_t br_startoff;   /* file offset (in blocks) */
-    uint64_t br_startblock; /* disk block number */
-    uint32_t br_blockcount; /* number of blocks */
+    uint64_t br_startoff;
+    uint64_t br_startblock;
+    uint32_t br_blockcount;
 } xfs_bmbt_rec_t;
 
-/* Decode a raw 64-bit extent record (big-endian on disk, but we read as-is) */
-static void xfs_decode_extent(const uint8_t *raw, uint64_t *startoff,
-                               uint64_t *startblock, uint32_t *blockcount) {
-    /* XFS extent records are 3 x 64-bit values packed in big-endian */
+int xfs_decode_extent(const uint8_t *raw, uint64_t *startoff,
+                      uint64_t *startblock, uint32_t *blockcount) {
+    if (!raw || !startoff || !startblock || !blockcount) return -1;
+
     uint64_t v0 = ((uint64_t)raw[0] << 56) | ((uint64_t)raw[1] << 48) |
                   ((uint64_t)raw[2] << 40) | ((uint64_t)raw[3] << 32) |
                   ((uint64_t)raw[4] << 24) | ((uint64_t)raw[5] << 16) |
@@ -185,43 +185,43 @@ static void xfs_decode_extent(const uint8_t *raw, uint64_t *startoff,
                   ((uint64_t)raw[20] << 24) | ((uint64_t)raw[21] << 16) |
                   ((uint64_t)raw[22] << 8)  | raw[23];
 
-    /* Extract fields from packed format */
     *startoff = v0;
     *startblock = v1;
     *blockcount = (uint32_t)v2;
+
+    return 0;
 }
 
-/* Calculate inode location from inode number */
-static int xfs_read_disk_inode(uint64_t ino, xfs_dinode_t *di) {
-    if (!xfs_mounted || ino == 0) return -1;
+int xfs_read_disk_inode(uint64_t ino, void *di_buf) {
+    if (!xfs_mounted || ino == 0 || !di_buf) return -1;
 
-    /* Calculate AG and inode index within AG */
     uint64_t ag_inodes_per_ag = (uint64_t)xfs_sb.agsize * xfs_sb.inopblock;
     uint32_t ag_index = (uint32_t)(ino / ag_inodes_per_ag);
     uint64_t ag_ino = ino % ag_inodes_per_ag;
 
     if (ag_index >= xfs_sb.agcount) return -1;
 
-    /* Read AGI to find inode chunk location */
     xfs_agi_t agi;
     if (xfs_read_agi(ag_index, &agi) != 0) return -1;
 
-    /* Inode location: AG start + inode chunk offset + inode within chunk */
     uint64_t ag_start = (uint64_t)ag_index * xfs_sb.agsize * xfs_sb.blocksize;
-
-    /* Simple calculation: inodes are at fixed offset within AG
-     * AG header takes 4 blocks (sb, agf, agi, agfl), then inode chunks follow */
     uint64_t inode_offset = ag_start + 4 * xfs_sb.blocksize + ag_ino * xfs_sb.inodesize;
 
-    return xfs_read_from_device(inode_offset, di, xfs_sb.inodesize);
+    return xfs_read_from_device(inode_offset, di_buf, xfs_sb.inodesize);
 }
 
-/* Read inode info into our internal structure */
 static int xfs_read_inode_info(uint64_t ino, xfs_inode_info_t *info) {
+    if (!info) return -1;
+
     xfs_dinode_t *di = (xfs_dinode_t *)kmalloc(xfs_sb.inodesize);
     if (!di) return -1;
 
     if (xfs_read_disk_inode(ino, di) != 0) {
+        kfree(di);
+        return -1;
+    }
+
+    if (di->magic != XFS_INODE_MAGIC) {
         kfree(di);
         return -1;
     }
@@ -235,10 +235,10 @@ static int xfs_read_inode_info(uint64_t ino, xfs_inode_info_t *info) {
     info->atime = di->atime;
     info->mtime = di->mtime;
     info->ctime = di->ctime;
+    info->format = di->format;
+    info->nextents = di->nextents;
 
-    /* Parse first extent if extent-based */
-    if (di->format == 2 && di->nextents > 0) {
-        /* bmx starts at offset 0x64 (100) in the inode for v2 inodes */
+    if (di->format == XFS_DINODE_FMT_EXTENTS && di->nextents > 0) {
         uint8_t *bmx = (uint8_t *)di + 100;
         uint64_t startoff, startblock;
         uint32_t blockcount;
@@ -258,7 +258,6 @@ static int xfs_read_inode_info(uint64_t ino, xfs_inode_info_t *info) {
 /* 目录操作                                                           */
 /* ------------------------------------------------------------------ */
 
-/* XFS shortform directory entry (inline in inode) */
 typedef struct {
     uint8_t  namelen;
     uint8_t  filetype;
@@ -266,8 +265,7 @@ typedef struct {
     char     name[256];
 } xfs_sf_dir_entry_t;
 
-/* Read directory entries from a directory inode */
-static int xfs_read_dir_entries(uint64_t dir_ino, xfs_dir_entry_t **head) {
+int xfs_read_dir_entries(uint64_t dir_ino, xfs_dir_entry_t **head) {
     if (!head) return -1;
     *head = NULL;
 
@@ -282,12 +280,10 @@ static int xfs_read_dir_entries(uint64_t dir_ino, xfs_dir_entry_t **head) {
     xfs_dir_entry_t *tail = NULL;
     int count = 0;
 
-    if (di->format == 1) {
-        /* Shortform directory - data is inline in inode */
-        uint8_t *data = (uint8_t *)di + 100; /* after inode core */
-        /* Shortform header: parent inode (8 bytes) + count (4 bytes) + i8count (4 bytes) */
+    if (di->format == XFS_DINODE_FMT_LOCAL) {
+        uint8_t *data = (uint8_t *)di + 100;
         uint32_t sf_count = *(uint32_t *)(data + 8);
-        uint8_t *p = data + 16; /* skip header */
+        uint8_t *p = data + 16;
 
         for (uint32_t i = 0; i < sf_count && i < 512; i++) {
             if (p + 2 > (uint8_t *)di + xfs_sb.inodesize) break;
@@ -299,7 +295,6 @@ static int xfs_read_dir_entries(uint64_t dir_ino, xfs_dir_entry_t **head) {
             if (!entry) break;
             memset(entry, 0, sizeof(xfs_dir_entry_t));
 
-            /* Read inode number (4 or 8 bytes depending on i8count) */
             uint32_t sf_i8count = *(uint32_t *)(data + 12);
             if (sf_i8count > 0) {
                 entry->ino = *(uint64_t *)p;
@@ -325,8 +320,7 @@ static int xfs_read_dir_entries(uint64_t dir_ino, xfs_dir_entry_t **head) {
             tail = entry;
             count++;
         }
-    } else if (di->format == 2 || di->format == 3) {
-        /* Block/B+tree directory - read directory data blocks via extents */
+    } else if (di->format == XFS_DINODE_FMT_EXTENTS || di->format == XFS_DINODE_FMT_BTREE) {
         uint8_t *bmx = (uint8_t *)di + 100;
         uint32_t nextents = di->nextents;
 
@@ -344,16 +338,15 @@ static int xfs_read_dir_entries(uint64_t dir_ino, xfs_dir_entry_t **head) {
                     continue;
                 }
 
-                /* XFS block directory: header at start, then entries */
-                /* Magic at offset 0: 0x58443242 ('XD2B') for v2, 0x58443246 ('XD2F') for v2 leaf */
                 uint32_t blk_magic = *(uint32_t *)blk;
-                if (blk_magic != 0x58443242 && blk_magic != 0x58443246 &&
-                    blk_magic != 0x58443244 && blk_magic != 0x5844324C) {
+                if (blk_magic != XFS_DIR2_BLOCK_MAGIC &&
+                    blk_magic != XFS_DIR2_LEAF_MAGIC &&
+                    blk_magic != XFS_DIR2_FREE_MAGIC &&
+                    blk_magic != XFS_DIR2_DATA_MAGIC) {
                     kfree(blk);
                     continue;
                 }
 
-                /* Skip header (varies by type, typically 48 bytes for v2 block) */
                 uint32_t hdr_size = 48;
                 uint8_t *p = blk + hdr_size;
                 uint8_t *end = blk + xfs_sb.blocksize;
@@ -378,7 +371,6 @@ static int xfs_read_dir_entries(uint64_t dir_ino, xfs_dir_entry_t **head) {
                     entry->name[namelen] = '\0';
                     p += namelen;
 
-                    /* Align to 8 bytes */
                     uint32_t total = 9 + namelen;
                     total = (total + 7) & ~7;
                     p = blk + hdr_size + ((p - blk - hdr_size + 7) & ~7);
@@ -402,8 +394,7 @@ static int xfs_read_dir_entries(uint64_t dir_ino, xfs_dir_entry_t **head) {
     return count;
 }
 
-/* Free directory entry list */
-static void xfs_free_dir_entries(xfs_dir_entry_t *head) {
+void xfs_free_dir_entries(xfs_dir_entry_t *head) {
     while (head) {
         xfs_dir_entry_t *next = head->next;
         kfree(head);
@@ -415,8 +406,9 @@ static void xfs_free_dir_entries(xfs_dir_entry_t *head) {
 /* Extent 数据读取                                                    */
 /* ------------------------------------------------------------------ */
 
-static int xfs_read_extent_data(uint64_t ino, void *buf,
-                                uint64_t offset, uint32_t size) {
+int xfs_read_extent_data(uint64_t ino, void *buf, uint64_t offset, uint32_t size) {
+    if (!buf) return -1;
+
     xfs_dinode_t *di = (xfs_dinode_t *)kmalloc(xfs_sb.inodesize);
     if (!di) return -1;
 
@@ -425,8 +417,7 @@ static int xfs_read_extent_data(uint64_t ino, void *buf,
         return -1;
     }
 
-    if (di->format == 1) {
-        /* Local data - inline in inode */
+    if (di->format == XFS_DINODE_FMT_LOCAL) {
         uint8_t *data = (uint8_t *)di + 100;
         if (offset < di->size) {
             uint32_t to_copy = size;
@@ -439,7 +430,6 @@ static int xfs_read_extent_data(uint64_t ino, void *buf,
         return 0;
     }
 
-    /* Extent-based data */
     uint8_t *bmx = (uint8_t *)di + 100;
     uint32_t nextents = di->nextents;
     uint32_t blocksize = xfs_sb.blocksize;
@@ -451,18 +441,14 @@ static int xfs_read_extent_data(uint64_t ino, void *buf,
         uint32_t blockcount;
         xfs_decode_extent(bmx + e * 24, &startoff, &startblock, &blockcount);
 
-        /* Calculate file block range for this extent */
         uint64_t extent_start_block = startoff;
         uint64_t extent_end_block = startoff + blockcount;
         uint32_t file_start_block = (uint32_t)(offset / blocksize);
         uint32_t file_end_block = (uint32_t)((offset + size + blocksize - 1) / blocksize);
 
-        /* Skip extents before our read range */
         if (extent_end_block <= file_start_block) continue;
-        /* Stop if past our read range */
         if (extent_start_block >= file_end_block) break;
 
-        /* Calculate overlap */
         uint32_t start = (file_start_block > extent_start_block) ?
                          file_start_block : (uint32_t)extent_start_block;
         uint32_t end = (file_end_block < extent_end_block) ?
@@ -503,7 +489,6 @@ static dentry_t *xfs_lookup_op(dentry_t *dir, const char *name) {
     xfs_inode_info_t *dir_info = (xfs_inode_info_t *)dir->inode->private_data;
     if (!dir_info) return NULL;
 
-    /* Read directory entries */
     xfs_dir_entry_t *entries = NULL;
     xfs_read_dir_entries(dir_info->ino, &entries);
 
@@ -520,7 +505,6 @@ static dentry_t *xfs_lookup_op(dentry_t *dir, const char *name) {
         return NULL;
     }
 
-    /* Read the found inode's info */
     xfs_inode_info_t *info = (xfs_inode_info_t *)kmalloc(sizeof(xfs_inode_info_t));
     if (!info) {
         xfs_free_dir_entries(entries);
@@ -533,7 +517,6 @@ static dentry_t *xfs_lookup_op(dentry_t *dir, const char *name) {
         return NULL;
     }
 
-    /* Create VFS inode */
     inode_t *vfs_inode = (inode_t *)kmalloc(sizeof(inode_t));
     if (!vfs_inode) {
         kfree(info);
@@ -562,7 +545,6 @@ static dentry_t *xfs_lookup_op(dentry_t *dir, const char *name) {
     vfs_inode->ops = &xfs_inode_ops;
     vfs_inode->private_data = info;
 
-    /* Create dentry */
     dentry_t *d = (dentry_t *)kmalloc(sizeof(dentry_t));
     if (!d) {
         kfree(info);
@@ -584,31 +566,30 @@ static dentry_t *xfs_lookup_op(dentry_t *dir, const char *name) {
     return d;
 }
 
-/* Write operations - read-only filesystem */
 static int32_t xfs_create_op(dentry_t *dir, const char *name, uint32_t mode) {
     (void)dir; (void)name; (void)mode;
-    return -1;
+    return -EROFS;
 }
 
 static int32_t xfs_mkdir_op(dentry_t *dir, const char *name, uint32_t mode) {
     (void)dir; (void)name; (void)mode;
-    return -1;
+    return -EROFS;
 }
 
 static int32_t xfs_unlink_op(dentry_t *dir, const char *name) {
     (void)dir; (void)name;
-    return -1;
+    return -EROFS;
 }
 
 static int32_t xfs_rmdir_op(dentry_t *dir, const char *name) {
     (void)dir; (void)name;
-    return -1;
+    return -EROFS;
 }
 
 static int32_t xfs_rename_op(dentry_t *old_dir, const char *old_name,
                              dentry_t *new_dir, const char *new_name) {
     (void)old_dir; (void)old_name; (void)new_dir; (void)new_name;
-    return -1;
+    return -EROFS;
 }
 
 /* ------------------------------------------------------------------ */
@@ -627,7 +608,6 @@ static int32_t xfs_file_read(file_t *file, void *buf, uint32_t count) {
     xfs_inode_info_t *info = (xfs_inode_info_t *)file->inode->private_data;
     if (!info) return -1;
 
-    /* Boundary check */
     if (file->offset >= (uint32_t)info->size) return 0;
     uint32_t remaining = (uint32_t)info->size - file->offset;
     if (count > remaining) count = remaining;
@@ -641,7 +621,7 @@ static int32_t xfs_file_read(file_t *file, void *buf, uint32_t count) {
 
 static int32_t xfs_file_write(file_t *file, const void *buf, uint32_t count) {
     (void)file; (void)buf; (void)count;
-    return -1; /* read-only */
+    return -EROFS;
 }
 
 static int32_t xfs_file_close(file_t *file) {
@@ -658,9 +638,9 @@ static int32_t xfs_file_seek(file_t *file, int32_t offset, int32_t whence) {
         case SEEK_SET: new_offset = offset; break;
         case SEEK_CUR: new_offset = (int32_t)file->offset + offset; break;
         case SEEK_END: new_offset = (int32_t)file->inode->size + offset; break;
-        default: return -1;
+        default: return -EINVAL;
     }
-    if (new_offset < 0) return -1;
+    if (new_offset < 0) return -EINVAL;
     file->offset = (uint32_t)new_offset;
     return new_offset;
 }
@@ -674,39 +654,35 @@ int32_t xfs_mount(superblock_t *sb, void *data) {
 
     spinlock_lock(&xfs_lock);
 
-    /* data contains partition_start sector */
     xfs_partition_start = data ? (uint32_t)(uintptr_t)data : 0;
     xfs_drive = 0;
 
-    /* Read superblock (sector 0 of partition) */
-    uint8_t *sb_buf = (uint8_t *)kmalloc(512);
-    if (!sb_buf) {
+    xfs_sb.blocksize = 4096;
+    if (xfs_read_superblock(&xfs_sb) != 0) {
+        klog_err("xfs: failed to read superblock");
         spinlock_unlock(&xfs_lock);
         return -1;
     }
 
-    if (ide_read_sectors(xfs_drive, 1, xfs_partition_start, sb_buf) != 0) {
-        kfree(sb_buf);
-        spinlock_unlock(&xfs_lock);
-        return -1;
-    }
-
-    memcpy(&xfs_sb, sb_buf, sizeof(xfs_superblock_t));
-    kfree(sb_buf);
-
-    /* Validate superblock */
     if (xfs_sb.magic != (uint32_t)XFS_MAGIC) {
+        klog_err("xfs: invalid superblock magic 0x%x", xfs_sb.magic);
         spinlock_unlock(&xfs_lock);
         return -1;
     }
     if (xfs_sb.blocksize == 0 || xfs_sb.agcount == 0) {
+        klog_err("xfs: invalid superblock parameters");
         spinlock_unlock(&xfs_lock);
         return -1;
     }
 
     xfs_mounted = 1;
 
-    /* Create root directory inode and dentry */
+    klog_info("xfs: superblock validated, magic=0x%X agcount=%u agsize=%u",
+              xfs_sb.magic, xfs_sb.agcount, xfs_sb.agsize);
+    klog_info("xfs: blocksize=%u inodesize=%u rootino=%llu",
+              xfs_sb.blocksize, xfs_sb.inodesize,
+              (unsigned long long)xfs_sb.rootino);
+
     inode_t *root_inode = (inode_t *)kmalloc(sizeof(inode_t));
     if (!root_inode) {
         xfs_mounted = 0;
@@ -715,7 +691,6 @@ int32_t xfs_mount(superblock_t *sb, void *data) {
     }
     memset(root_inode, 0, sizeof(inode_t));
 
-    /* Read root inode info */
     xfs_inode_info_t *root_info = (xfs_inode_info_t *)kmalloc(sizeof(xfs_inode_info_t));
     if (!root_info) {
         kfree(root_inode);
@@ -725,12 +700,15 @@ int32_t xfs_mount(superblock_t *sb, void *data) {
     }
 
     if (xfs_read_inode_info(xfs_sb.rootino, root_info) != 0) {
-        /* If we can't read the root inode, set defaults */
+        klog_warn("xfs: could not read root inode, using defaults");
         memset(root_info, 0, sizeof(xfs_inode_info_t));
         root_info->ino = xfs_sb.rootino;
-        root_info->mode = 0x401FF; /* directory with 0777 */
+        root_info->mode = 0x401FF;
         root_info->size = xfs_sb.blocksize;
         root_info->nlink = 1;
+    } else {
+        klog_info("xfs: root inode read successfully, mode=0%o size=%llu",
+                  root_info->mode, (unsigned long long)root_info->size);
     }
 
     root_inode->ino = (uint32_t)root_info->ino;
@@ -760,6 +738,8 @@ int32_t xfs_mount(superblock_t *sb, void *data) {
     sb->block_size = xfs_sb.blocksize;
 
     spinlock_unlock(&xfs_lock);
+
+    klog_info("xfs: filesystem mounted successfully");
     return 0;
 }
 
@@ -770,6 +750,7 @@ int32_t xfs_mount(superblock_t *sb, void *data) {
 int xfs_init(void) {
     spinlock_init(&xfs_lock);
     xfs_mounted = 0;
+    klog_info("xfs: driver initialized");
     return 0;
 }
 

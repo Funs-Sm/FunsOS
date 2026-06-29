@@ -1,7 +1,7 @@
 # FunRender - 独立 UI 渲染引擎
 
 <p align="center">
-  <img src="https://img.shields.io/badge/FunRender-v1.2-blue" alt="Version"/>
+  <img src="https://img.shields.io/badge/FunRender-v1.3-blue" alt="Version"/>
   <img src="https://img.shields.io/badge/Status-Stable-green" alt="Status"/>
   <img src="https://img.shields.io/badge/Widgets-30%2B-purple" alt="Widget Count"/>
   <img src="https://img.shields.io/badge/Themes-9-yellow" alt="Theme Count"/>

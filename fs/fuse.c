@@ -2,20 +2,22 @@
  * fuse.c - FUSE (Filesystem in Userspace) 框架实现
  *
  * 提供内核侧 FUSE 支持，将 VFS 操作转换为 FUSE 请求，
- * 通过管道或共享内存与用户态守护进程通信。
- * 当前为框架实现，用户态通信使用简化方式。
+ * 通过 /dev/fuse 设备与用户态守护进程通信。
  */
 
 #include "fuse.h"
+#include "devfs.h"
 #include "kheap.h"
 #include "string.h"
 #include "sync.h"
 #include "spinlock.h"
+#include "klog.h"
+#include "stddef.h"
 
-/* ---- 全局状态 ---- */
 static fuse_mount_t *fuse_mount_list = NULL;
 static spinlock_t fuse_lock;
 static uint32_t fuse_global_unique = 1;
+static fuse_mount_t *fuse_dev_mount = NULL;
 
 /* ---- FUSE 文件操作 ---- */
 
@@ -33,7 +35,6 @@ static int32_t fuse_file_open(inode_t *inode, file_t *file) {
         return -1;
     }
 
-    /* 保存守护进程返回的文件句柄 */
     file->private_data = (void *)(uintptr_t)resp.data[0];
     return 0;
 }
@@ -48,7 +49,6 @@ static int32_t fuse_file_read(file_t *file, void *buf, uint32_t count) {
     req.nodeid = file->inode ? file->inode->ino : 0;
     req.data_len = sizeof(uint32_t) * 3;
 
-    /* 在 data 中编码: offset, size, fh */
     uint32_t *args = (uint32_t *)req.data;
     args[0] = file->offset;
     args[1] = count;
@@ -58,7 +58,6 @@ static int32_t fuse_file_read(file_t *file, void *buf, uint32_t count) {
         return resp.error ? resp.error : -1;
     }
 
-    /* 从响应中复制数据 */
     uint32_t to_copy = resp.data_len;
     if (to_copy > count) to_copy = count;
     memcpy(buf, resp.data, to_copy);
@@ -77,7 +76,6 @@ static int32_t fuse_file_write(file_t *file, const void *buf, uint32_t count) {
     req.nodeid = file->inode ? file->inode->ino : 0;
     req.data_len = sizeof(uint32_t) * 3 + count;
 
-    /* 在 data 中编码: offset, size, fh, 然后是实际数据 */
     uint32_t *args = (uint32_t *)req.data;
     args[0] = file->offset;
     args[1] = count;
@@ -115,7 +113,7 @@ static int32_t fuse_file_ioctl(file_t *file, uint32_t cmd, void *arg) {
     (void)file;
     (void)cmd;
     (void)arg;
-    return -1;
+    return -ENOSYS;
 }
 
 static int32_t fuse_file_seek(file_t *file, int32_t offset, int32_t whence) {
@@ -133,10 +131,10 @@ static int32_t fuse_file_seek(file_t *file, int32_t offset, int32_t whence) {
             new_offset = (int32_t)file->inode->size + offset;
             break;
         default:
-            return -1;
+            return -EINVAL;
     }
 
-    if (new_offset < 0) return -1;
+    if (new_offset < 0) return -EINVAL;
     file->offset = (uint32_t)new_offset;
     return new_offset;
 }
@@ -158,7 +156,6 @@ static dentry_t *fuse_inode_lookup(dentry_t *dir, const char *name) {
         return NULL;
     }
 
-    /* 创建新的 dentry 和 inode */
     dentry_t *d = (dentry_t *)kmalloc(sizeof(dentry_t));
     if (!d) return NULL;
     memset(d, 0, sizeof(dentry_t));
@@ -171,7 +168,6 @@ static dentry_t *fuse_inode_lookup(dentry_t *dir, const char *name) {
     }
     memset(ino, 0, sizeof(inode_t));
 
-    /* 从响应中解析 inode 属性 */
     uint32_t *attrs = (uint32_t *)resp.data;
     ino->ino = attrs[0];
     ino->mode = attrs[1];
@@ -180,6 +176,32 @@ static dentry_t *fuse_inode_lookup(dentry_t *dir, const char *name) {
 
     d->inode = ino;
     return d;
+}
+
+static int32_t fuse_inode_getattr(inode_t *inode) {
+    if (!inode) return -1;
+
+    fuse_request_t req;
+    fuse_response_t resp;
+
+    memset(&req, 0, sizeof(req));
+    req.unique = fuse_global_unique++;
+    req.opcode = FUSE_GETATTR;
+    req.nodeid = inode->ino;
+    req.data_len = 0;
+
+    if (fuse_send_request(&req, &resp) != 0 || resp.error != 0) {
+        return -1;
+    }
+
+    uint32_t *attrs = (uint32_t *)resp.data;
+    inode->mode = attrs[1];
+    inode->size = attrs[2];
+    inode->nlinks = attrs[3];
+    inode->uid = attrs[4];
+    inode->gid = attrs[5];
+
+    return 0;
 }
 
 static int32_t fuse_inode_create(dentry_t *dir, const char *name, uint32_t mode) {
@@ -329,62 +351,197 @@ static inode_ops_t fuse_inode_ops = {
     .rename   = fuse_inode_rename,
     .readlink = fuse_inode_readlink,
     .symlink  = fuse_inode_symlink,
+    .link     = NULL,
 };
+
+/* ---- 请求/响应队列操作 ---- */
+
+int fuse_enqueue_request(fuse_mount_t *fm, fuse_request_t *req) {
+    if (!fm || !req) return -1;
+    if (fm->req_queue_count >= FUSE_MAX_REQ_QUEUE) return -1;
+
+    fuse_req_node_t *node = (fuse_req_node_t *)kmalloc(sizeof(fuse_req_node_t));
+    if (!node) return -1;
+    memset(node, 0, sizeof(fuse_req_node_t));
+    memcpy(&node->req, req, sizeof(fuse_request_t));
+    node->next = NULL;
+
+    if (fm->req_queue_tail) {
+        fm->req_queue_tail->next = node;
+    } else {
+        fm->req_queue_head = node;
+    }
+    fm->req_queue_tail = node;
+    fm->req_queue_count++;
+
+    return 0;
+}
+
+int fuse_dequeue_request(fuse_mount_t *fm, fuse_request_t *req) {
+    if (!fm || !req) return -1;
+    if (!fm->req_queue_head) return -1;
+
+    fuse_req_node_t *node = fm->req_queue_head;
+    fm->req_queue_head = node->next;
+    if (!fm->req_queue_head) {
+        fm->req_queue_tail = NULL;
+    }
+    fm->req_queue_count--;
+
+    memcpy(req, &node->req, sizeof(fuse_request_t));
+    kfree(node);
+
+    return 0;
+}
+
+int fuse_enqueue_response(fuse_mount_t *fm, fuse_response_t *resp) {
+    if (!fm || !resp) return -1;
+    if (fm->resp_queue_count >= FUSE_MAX_RESP_QUEUE) return -1;
+
+    fuse_resp_node_t *node = (fuse_resp_node_t *)kmalloc(sizeof(fuse_resp_node_t));
+    if (!node) return -1;
+    memset(node, 0, sizeof(fuse_resp_node_t));
+    memcpy(&node->resp, resp, sizeof(fuse_response_t));
+    node->next = NULL;
+
+    if (fm->resp_queue_tail) {
+        fm->resp_queue_tail->next = node;
+    } else {
+        fm->resp_queue_head = node;
+    }
+    fm->resp_queue_tail = node;
+    fm->resp_queue_count++;
+
+    return 0;
+}
+
+int fuse_dequeue_response(fuse_mount_t *fm, fuse_response_t *resp) {
+    if (!fm || !resp) return -1;
+    if (!fm->resp_queue_head) return -1;
+
+    fuse_resp_node_t *node = fm->resp_queue_head;
+    fm->resp_queue_head = node->next;
+    if (!fm->resp_queue_head) {
+        fm->resp_queue_tail = NULL;
+    }
+    fm->resp_queue_count--;
+
+    memcpy(resp, &node->resp, sizeof(fuse_response_t));
+    kfree(node);
+
+    return 0;
+}
 
 /* ---- FUSE 守护进程通信 ---- */
 
 int fuse_send_request(fuse_request_t *req, fuse_response_t *resp) {
-    /* 简化实现: 直接在内核中模拟响应
-     * 在完整实现中，这里应该:
-     * 1. 将请求写入共享内存或管道
-     * 2. 通知用户态守护进程 (通过信号或事件)
-     * 3. 等待守护进程的响应
-     * 4. 从共享内存或管道读取响应 */
-
     if (!req || !resp) return -1;
 
-    /* 初始化响应为默认值 */
     memset(resp, 0, sizeof(fuse_response_t));
     resp->unique = req->unique;
 
-    /* FUSE_INIT 特殊处理: 返回协议版本 */
     if (req->opcode == FUSE_INIT) {
         resp->error = 0;
         uint32_t *ver = (uint32_t *)resp->data;
-        ver[0] = 7;   /* 主版本号 */
-        ver[1] = 23;  /* 次版本号 */
-        resp->data_len = sizeof(uint32_t) * 2;
+        ver[0] = FUSE_VERSION_MAJOR;
+        ver[1] = FUSE_VERSION_MINOR;
+        ver[2] = 4096;
+        ver[3] = 0;
+        resp->data_len = sizeof(uint32_t) * 4;
+        klog_info("fuse: FUSE_INIT handshake complete (v%d.%d)",
+                  FUSE_VERSION_MAJOR, FUSE_VERSION_MINOR);
         return 0;
     }
 
-    /* 其他操作: 返回 -ENOSYS (函数未实现)
-     * 在实际实现中，这里会与守护进程通信 */
-    resp->error = -38;  /* -ENOSYS */
+    resp->error = -ENOSYS;
     resp->data_len = 0;
 
     return 0;
 }
+
+/* ---- /dev/fuse 设备操作 ---- */
+
+static int32_t fuse_dev_open(inode_t *inode, file_t *file) {
+    (void)inode;
+    (void)file;
+    klog_info("fuse: /dev/fuse opened");
+    return 0;
+}
+
+int fuse_dev_read(file_t *file, void *buf, uint32_t count) {
+    (void)file;
+    if (!buf || !fuse_dev_mount) return -1;
+
+    fuse_request_t req;
+    if (fuse_dequeue_request(fuse_dev_mount, &req) != 0) {
+        return 0;
+    }
+
+    uint32_t to_copy = sizeof(fuse_request_t);
+    if (to_copy > count) to_copy = count;
+    memcpy(buf, &req, to_copy);
+
+    klog_debug("fuse: /dev/fuse read request opcode=%u unique=%u",
+               req.opcode, req.unique);
+    return (int32_t)to_copy;
+}
+
+int fuse_dev_write(file_t *file, const void *buf, uint32_t count) {
+    (void)file;
+    if (!buf || !fuse_dev_mount) return -1;
+    if (count < sizeof(fuse_response_t)) return -EINVAL;
+
+    fuse_response_t resp;
+    memcpy(&resp, buf, sizeof(fuse_response_t));
+
+    if (fuse_enqueue_response(fuse_dev_mount, &resp) != 0) {
+        return -ENOMEM;
+    }
+
+    klog_debug("fuse: /dev/fuse write response unique=%u error=%d",
+               resp.unique, resp.error);
+    return (int32_t)count;
+}
+
+static int32_t fuse_dev_close(file_t *file) {
+    (void)file;
+    klog_info("fuse: /dev/fuse closed");
+    return 0;
+}
+
+int fuse_dev_ioctl(file_t *file, uint32_t cmd, void *arg) {
+    (void)file;
+    (void)cmd;
+    (void)arg;
+    return -ENOSYS;
+}
+
+static file_ops_t fuse_dev_ops = {
+    .open   = fuse_dev_open,
+    .read   = fuse_dev_read,
+    .write  = fuse_dev_write,
+    .close  = fuse_dev_close,
+    .seek   = NULL,
+    .ioctl  = fuse_dev_ioctl,
+};
 
 /* ---- FUSE 挂载 ---- */
 
 int fuse_mount(superblock_t *sb, void *data) {
     if (!sb) return -1;
 
-    /* 设置超级块 */
     sb->fs_type = FS_TYPE_FUSE;
     sb->block_size = 4096;
     sb->fs_data = data;
 
-    /* 创建根 inode */
     inode_t *root = (inode_t *)kmalloc(sizeof(inode_t));
     if (!root) return -1;
     memset(root, 0, sizeof(inode_t));
-    root->ino = 1;  /* FUSE 根节点 ID 为 1 */
+    root->ino = 1;
     root->mode = FILE_MODE_DIR | FILE_MODE_READ | FILE_MODE_WRITE;
     root->ops = &fuse_inode_ops;
     root->sb = sb;
 
-    /* 创建根 dentry */
     dentry_t *root_d = (dentry_t *)kmalloc(sizeof(dentry_t));
     if (!root_d) {
         kfree(root);
@@ -397,7 +554,6 @@ int fuse_mount(superblock_t *sb, void *data) {
 
     sb->root = root;
 
-    /* 发送 FUSE_INIT 请求 */
     fuse_request_t req;
     fuse_response_t resp;
     memset(&req, 0, sizeof(req));
@@ -405,49 +561,68 @@ int fuse_mount(superblock_t *sb, void *data) {
     req.opcode = FUSE_INIT;
     req.data_len = sizeof(uint32_t) * 2;
     uint32_t *ver = (uint32_t *)req.data;
-    ver[0] = 7;   /* 请求的主版本号 */
-    ver[1] = 23;  /* 请求的次版本号 */
+    ver[0] = FUSE_VERSION_MAJOR;
+    ver[1] = FUSE_VERSION_MINOR;
 
     fuse_send_request(&req, &resp);
 
+    if (data) {
+        fuse_mount_t *fm = (fuse_mount_t *)data;
+        fm->sb = sb;
+        fm->initialized = 1;
+        fm->proto_major = FUSE_VERSION_MAJOR;
+        fm->proto_minor = FUSE_VERSION_MINOR;
+    }
+
+    klog_info("fuse: filesystem mounted");
     return 0;
 }
 
 /* ---- FUSE 注册/注销 ---- */
 
+fuse_mount_t *fuse_find_mount(const char *mount_point) {
+    fuse_mount_t *m = fuse_mount_list;
+    while (m) {
+        if (strcmp(m->mount_point, mount_point) == 0) return m;
+        m = m->next;
+    }
+    return NULL;
+}
+
 int fuse_register_fs(const char *mount_point, const char *daemon_path) {
     spinlock_lock(&fuse_lock);
 
-    /* 检查是否已注册 */
-    fuse_mount_t *m = fuse_mount_list;
-    while (m) {
-        if (strcmp(m->mount_point, mount_point) == 0) {
-            spinlock_unlock(&fuse_lock);
-            return -1;  /* 已存在 */
-        }
-        m = m->next;
+    if (fuse_find_mount(mount_point)) {
+        spinlock_unlock(&fuse_lock);
+        return -EEXIST;
     }
 
-    /* 创建新的挂载实例 */
     fuse_mount_t *fm = (fuse_mount_t *)kmalloc(sizeof(fuse_mount_t));
     if (!fm) {
         spinlock_unlock(&fuse_lock);
-        return -1;
+        return -ENOMEM;
     }
     memset(fm, 0, sizeof(fuse_mount_t));
     strncpy(fm->mount_point, mount_point, 255);
     strncpy(fm->daemon_path, daemon_path, 255);
     fm->next_unique = 1;
     fm->active = 1;
+    fm->initialized = 0;
 
-    /* 添加到链表 */
     fm->next = fuse_mount_list;
     fuse_mount_list = fm;
 
     spinlock_unlock(&fuse_lock);
 
-    /* 通过 VFS 挂载 */
-    return vfs_mount(mount_point, FS_TYPE_FUSE, (void *)fm);
+    int ret = vfs_mount(mount_point, FS_TYPE_FUSE, (void *)fm);
+    if (ret != 0) {
+        klog_err("fuse: failed to mount at %s, ret=%d", mount_point, ret);
+        return ret;
+    }
+
+    klog_info("fuse: registered filesystem at %s (daemon: %s)",
+              mount_point, daemon_path);
+    return 0;
 }
 
 int fuse_unregister_fs(const char *mount_point) {
@@ -464,8 +639,22 @@ int fuse_unregister_fs(const char *mount_point) {
                 fuse_mount_list = m->next;
             }
             m->active = 0;
+
+            while (m->req_queue_head) {
+                fuse_req_node_t *next = m->req_queue_head->next;
+                kfree(m->req_queue_head);
+                m->req_queue_head = next;
+            }
+            while (m->resp_queue_head) {
+                fuse_resp_node_t *next = m->resp_queue_head->next;
+                kfree(m->resp_queue_head);
+                m->resp_queue_head = next;
+            }
+
             kfree(m);
             spinlock_unlock(&fuse_lock);
+
+            klog_info("fuse: unregistered filesystem at %s", mount_point);
             return vfs_umount(mount_point);
         }
         prev = m;
@@ -473,7 +662,7 @@ int fuse_unregister_fs(const char *mount_point) {
     }
 
     spinlock_unlock(&fuse_lock);
-    return -1;
+    return -ENOENT;
 }
 
 /* ---- 初始化 ---- */
@@ -482,4 +671,25 @@ void fuse_init(void) {
     spinlock_init(&fuse_lock);
     fuse_mount_list = NULL;
     fuse_global_unique = 1;
+
+    fuse_dev_mount = (fuse_mount_t *)kmalloc(sizeof(fuse_mount_t));
+    if (fuse_dev_mount) {
+        memset(fuse_dev_mount, 0, sizeof(fuse_mount_t));
+        strncpy(fuse_dev_mount->mount_point, "/dev/fuse", 255);
+        fuse_dev_mount->active = 1;
+        fuse_dev_mount->initialized = 1;
+    }
+
+    int ret = devfs_register_with_perm("fuse", DEVICE_CHAR,
+                                        FUSE_DEV_MAJOR, FUSE_DEV_MINOR,
+                                        &fuse_dev_ops, NULL,
+                                        0666, 0, 0);
+    if (ret == 0) {
+        klog_info("fuse: /dev/fuse device registered (%d,%d)",
+                  FUSE_DEV_MAJOR, FUSE_DEV_MINOR);
+    } else {
+        klog_err("fuse: failed to register /dev/fuse device");
+    }
+
+    klog_info("fuse: initialization complete");
 }

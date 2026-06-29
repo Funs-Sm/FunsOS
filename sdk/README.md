@@ -1,11 +1,11 @@
 # FunsOS SDK - 软件开发工具包
 
 <p align="center">
-  <img src="https://img.shields.io/badge/SDK_Version-1.2.0-blue" alt="SDK Version"/>
-  <img src="https://img.shields.io/badge/Target_OS-FunsOS_0.6-green" alt="Target OS"/>
-  <img src="https://img.shields.io/badge/Kernel-FunsCore_v0.6-orange" alt="Kernel Version"/>
+  <img src="https://img.shields.io/badge/SDK_Version-1.3.0-blue" alt="SDK Version"/>
+  <img src="https://img.shields.io/badge/Target_OS-FunsOS_0.7-green" alt="Target OS"/>
+  <img src="https://img.shields.io/badge/Kernel-FunsCore_v0.7-orange" alt="Kernel Version"/>
   <img src="https://img.shields.io/badge/APIs-200%2B_Syscalls-red" alt="API Count"/>
-  <img src="https://img.shields.io/badge/Examples-20%2B-purple" alt="Examples Count"/>
+  <img src="https://img.shields.io/badge/Examples-25%2B-purple" alt="Examples Count"/>
 </p>
 
 <p align="center">

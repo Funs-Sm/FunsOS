@@ -156,6 +156,128 @@ int netstat_format(int kind, char *out, uint32_t cap) {
         p = append(p, end, "(no IPv6 interfaces)\n");
         return (int)(p - out);
     }
+
+    if (kind == NETSTAT_TCP_DETAIL) {
+        p = append(p, end,
+            "Proto Recv-Q Send-Q Local Address           Foreign Address         State\n");
+        uint32_t sc = 0;
+        const tcp_socket_t *s = tcp_get_sockets(&sc);
+        for (uint32_t i = 0; i < sc && s; i++, s = s->next_all) {
+            char lip[32], rip[32];
+            fmt_ip(lip, s->local_ip.addr);
+            fmt_ip(rip, s->remote_ip.addr);
+            const char *state_name = tcp_state_name(s->state);
+            uint32_t recv_q = s->recv_buf_len;
+            uint32_t send_q = s->send_buf_len;
+            if (s->state == TCP_STATE_LISTEN) {
+                p = append(p, end, "tcp  %6u %6u %s:%-5hu %-23s %s\n",
+                    recv_q, send_q, "0.0.0.0", s->local_port, "0.0.0.0:0", state_name);
+            } else {
+                p = append(p, end, "tcp  %6u %6u %s:%-5hu %s:%-5hu %s\n",
+                    recv_q, send_q, lip, s->local_port, rip, s->remote_port, state_name);
+            }
+        }
+        return (int)(p - out);
+    }
+
+    if (kind == NETSTAT_UDP_DETAIL) {
+        p = append(p, end,
+            "Proto Recv-Q Send-Q Local Address           Foreign Address         State\n");
+        uint32_t sc = 0;
+        const udp_socket_t *u = udp_get_sockets(&sc);
+        for (uint32_t i = 0; i < sc && u; i++, u = u->next) {
+            char rip[32];
+            fmt_ip(rip, u->remote_ip.addr);
+            p = append(p, end, "udp  %6u %6u %s:%-5hu %s:%-5hu %s\n",
+                u->recv_len, 0u, "0.0.0.0", u->local_port,
+                u->remote_port ? rip : "0.0.0.0", u->remote_port,
+                u->bound ? "ESTAB" : "UNCONN");
+        }
+        return (int)(p - out);
+    }
+
+    if (kind == NETSTAT_ROUTE_FULL) {
+        p = append(p, end,
+            "Kernel IP routing table\n"
+            "Destination     Gateway         Genmask         Flags Metric Ref    Use Iface\n");
+        uint32_t count = 0;
+        const route_entry_t *routes = route_get_all(&count);
+        for (uint32_t i = 0; i < count; i++) {
+            if (!routes[i].iface || !(routes[i].flags & ROUTE_FLAG_UP))
+                continue;
+            char dest[32], gw[32], mask[32];
+            fmt_ip(dest, routes[i].dest.addr);
+            fmt_ip(gw, routes[i].gateway.addr);
+            fmt_ip(mask, routes[i].mask.addr);
+            char flags[8] = {0};
+            int fi = 0;
+            if (routes[i].flags & ROUTE_FLAG_UP)       flags[fi++] = 'U';
+            if (routes[i].flags & ROUTE_FLAG_GATEWAY)  flags[fi++] = 'G';
+            if (routes[i].flags & ROUTE_FLAG_STATIC)   flags[fi++] = 'S';
+            if (routes[i].flags & ROUTE_FLAG_BLACKHOLE) flags[fi++] = '!';
+            if (fi == 0) flags[fi++] = 'U';
+            p = append(p, end, "%-15s %-15s %-15s %-5s %6u %3u %6u %s\n",
+                dest, gw, mask, flags, routes[i].metric, 0u, 0u,
+                routes[i].iface ? routes[i].iface->name : "?");
+        }
+        if (count == 0) {
+            for (uint32_t i = 0; i < net_get_interface_count(); i++) {
+                net_interface_t *n = net_get_interface(i);
+                if (!n || !n->up) continue;
+                char dest[32], gw[32], mask[32];
+                fmt_ip(dest, n->ip.addr & n->mask.addr);
+                fmt_ip(gw, n->gateway.addr);
+                fmt_ip(mask, n->mask.addr);
+                p = append(p, end, "%-15s %-15s %-15s %-5s %6u %3u %6u %s\n",
+                    dest, "0.0.0.0", mask, "U", 0u, 0u, 0u, n->name);
+                if (n->gateway.addr) {
+                    p = append(p, end, "%-15s %-15s %-15s %-5s %6u %3u %6u %s\n",
+                        "0.0.0.0", gw, "0.0.0.0", "UG", 0u, 0u, 0u, n->name);
+                }
+            }
+        }
+        return (int)(p - out);
+    }
+
+    if (kind == NETSTAT_IF_STATS) {
+        p = append(p, end,
+            "Kernel Interface table\n"
+            "%-10s %-15s %-10s %-12s %-12s %-10s %-10s\n"
+            "%-10s %-15s %-10s %-12s %-12s %-10s %-10s\n",
+            "Iface", "MTU", "State", "RX-OK", "RX-ERR", "RX-DRP", "RX-OVR",
+            "", "", "", "TX-OK", "TX-ERR", "TX-DRP", "TX-OVR");
+        for (uint32_t i = 0; i < net_get_interface_count(); i++) {
+            net_interface_t *n = net_get_interface(i);
+            if (!n) continue;
+            const char *state = n->up ? "UP" : "DOWN";
+            p = append(p, end, "%-10s %-15u %-10s %-12u %-12u %-10u %-10u\n",
+                n->name, n->mtu, state, n->rx_packets, n->rx_errors, 0u, 0u);
+            p = append(p, end, "%-10s %-15s %-10s %-12u %-12u %-10u %-10u\n",
+                "", "", "", n->tx_packets, n->tx_errors, 0u, 0u);
+            char ip[32], mask[32];
+            fmt_ip(ip, n->ip.addr);
+            fmt_ip(mask, n->mask.addr);
+            p = append(p, end, "  inet %s  netmask %s\n", ip, mask);
+        }
+        return (int)(p - out);
+    }
+
+    if (kind == NETSTAT_ALL) {
+        int len;
+        p = append(p, end, "=== Active Internet connections ===\n");
+        len = netstat_format(NETSTAT_TCP_DETAIL, p, (uint32_t)(end - p));
+        if (len > 0) p += len;
+        len = netstat_format(NETSTAT_UDP_DETAIL, p, (uint32_t)(end - p));
+        if (len > 0) p += len;
+        p = append(p, end, "\n=== Kernel IP routing table ===\n");
+        len = netstat_format(NETSTAT_ROUTE_FULL, p, (uint32_t)(end - p));
+        if (len > 0) p += len;
+        p = append(p, end, "\n=== Kernel Interface statistics ===\n");
+        len = netstat_format(NETSTAT_IF_STATS, p, (uint32_t)(end - p));
+        if (len > 0) p += len;
+        return (int)(p - out);
+    }
+
     return -1;
 }
 
