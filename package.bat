@@ -2,7 +2,7 @@
 setlocal enabledelayedexpansion
 
 echo ==========================================
-echo   Funs Core v0.6 - Package Script
+echo   Funs Core v0.7 - Package Script
 echo ==========================================
 echo.
 
@@ -16,7 +16,7 @@ if %ERRORLEVEL% neq 0 (
 )
 
 REM Create package directory
-set PKG_DIR=funs-core-0.6
+set PKG_DIR=funs-core-0.7
 if exist %PKG_DIR% rmdir /s /q %PKG_DIR%
 mkdir %PKG_DIR%
 mkdir %PKG_DIR%\boot
@@ -34,7 +34,7 @@ copy debug.bat %PKG_DIR%\ >nul
 
 REM Create README
 echo [3/4] Creating README...
-echo Funs Core v0.6 > %PKG_DIR%\README.txt
+echo Funs Core v0.7 > %PKG_DIR%\README.txt
 echo ================ >> %PKG_DIR%\README.txt
 echo. >> %PKG_DIR%\README.txt
 echo A 32-bit x86 operating system kernel. >> %PKG_DIR%\README.txt

@@ -325,3 +325,109 @@ int user_rename(uint32_t uid, const char *new_name) {
 
     return 0;
 }
+
+user_role_t user_get_role(uint32_t uid) {
+    if (uid == USER_UID_SOVER) return USER_ROLE_SOVER;
+    if (uid == USER_UID_NOBODY) return USER_ROLE_NOBODY;
+
+    user_t *u = user_find_by_uid(uid);
+    if (!u) return USER_ROLE_NOBODY;
+
+    if (u->is_admin) return USER_ROLE_ADMIN;
+    return USER_ROLE_USER;
+}
+
+const char *user_role_name(user_role_t role) {
+    switch (role) {
+        case USER_ROLE_SOVER:  return "Sover";
+        case USER_ROLE_ADMIN:  return "Admin";
+        case USER_ROLE_USER:   return "User";
+        case USER_ROLE_NOBODY: return "Nobody";
+        default: return "Unknown";
+    }
+}
+
+int user_is_sover(uint32_t uid) {
+    return uid == USER_UID_SOVER;
+}
+
+int user_is_admin(uint32_t uid) {
+    if (uid == USER_UID_SOVER) return 1;
+    user_t *u = user_find_by_uid(uid);
+    return u ? u->is_admin : 0;
+}
+
+int user_is_regular(uint32_t uid) {
+    user_t *u = user_find_by_uid(uid);
+    if (!u) return 0;
+    if (uid == USER_UID_SOVER) return 0;
+    if (uid == USER_UID_NOBODY) return 0;
+    return !u->is_admin;
+}
+
+int user_is_nobody(uint32_t uid) {
+    return uid == USER_UID_NOBODY;
+}
+
+uint32_t user_alloc_uid(void) {
+    uint32_t uid = USER_UID_MIN;
+    while (user_find_by_uid(uid)) {
+        uid++;
+        if (uid > USER_UID_MAX) return 0;
+    }
+    return uid;
+}
+
+uint32_t user_alloc_gid(void) {
+    uint32_t gid = USER_UID_MIN;
+    while (group_find_by_gid(gid)) {
+        gid++;
+        if (gid > USER_UID_MAX) return 0;
+    }
+    return gid;
+}
+
+int user_get_groups(uint32_t uid, uint32_t *groups, uint32_t max_groups) {
+    if (!groups || max_groups == 0) return -1;
+
+    user_t *u = user_find_by_uid(uid);
+    if (!u) return -1;
+
+    uint32_t count = 0;
+
+    if (count < max_groups) {
+        groups[count++] = u->gid;
+    }
+
+    uint32_t gc = group_count();
+    for (uint32_t i = 0; i < gc && count < max_groups; i++) {
+        group_t *g = group_get_by_index(i);
+        if (!g) continue;
+        if (g->gid == u->gid) continue;
+
+        for (uint32_t j = 0; j < g->member_count; j++) {
+            if (g->members[j] == uid) {
+                groups[count++] = g->gid;
+                break;
+            }
+        }
+    }
+
+    return (int)count;
+}
+
+int user_in_group(uint32_t uid, uint32_t gid) {
+    user_t *u = user_find_by_uid(uid);
+    if (!u) return 0;
+
+    if (u->gid == gid) return 1;
+
+    group_t *g = group_find_by_gid(gid);
+    if (!g) return 0;
+
+    for (uint32_t i = 0; i < g->member_count; i++) {
+        if (g->members[i] == uid) return 1;
+    }
+
+    return 0;
+}

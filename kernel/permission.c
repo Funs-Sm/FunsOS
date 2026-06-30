@@ -3,6 +3,9 @@
 #include "user.h"
 #include "string.h"
 #include "kheap.h"
+#include "vfs.h"
+#include "dentry.h"
+#include "path.h"
 
 static uint32_t current_umask = 0022;
 
@@ -185,4 +188,195 @@ const char *perm_denied_reason(const char *path, uint32_t required_perm) {
     }
 
     return "Permission denied";
+}
+
+int permission_check_file(const char *path, uint32_t required_perm) {
+    if (!path) return -1;
+
+    if (perm_is_sover()) return 0;
+
+    if (perm_check_path(path, required_perm) != 0) return -1;
+
+    dentry_t *dentry = 0;
+    if (path_resolve(path, &dentry) != 0 || !dentry || !dentry->inode) {
+        return -1;
+    }
+
+    user_t *u = user_get_current();
+    uint32_t proc_uid = u ? u->uid : UID_NOBODY;
+    uint32_t proc_gid = u ? u->gid : GID_NOGROUP;
+
+    return perm_check(dentry->inode->uid, dentry->inode->gid,
+                      (uint16_t)dentry->inode->mode,
+                      proc_uid, proc_gid, required_perm);
+}
+
+int permission_check_user(uint32_t target_uid) {
+    user_t *u = user_get_current();
+    if (!u) return -1;
+
+    if (u->uid == target_uid) return 0;
+
+    if (u->uid == UID_SOVER) return 0;
+
+    if (u->is_admin && target_uid != UID_SOVER) return 0;
+
+    return -1;
+}
+
+int permission_check_user_operation(uint32_t target_uid, int is_admin_op) {
+    user_t *u = user_get_current();
+    if (!u) return -1;
+
+    if (u->uid == UID_SOVER) return 0;
+
+    if (is_admin_op && !u->is_admin) return -1;
+
+    if (target_uid == UID_SOVER && u->uid != UID_SOVER) return -1;
+
+    if (u->is_admin) return 0;
+
+    if (u->uid == target_uid && !is_admin_op) return 0;
+
+    return -1;
+}
+
+int permission_can_chmod(uint32_t file_uid) {
+    user_t *u = user_get_current();
+    if (!u) return 0;
+
+    if (u->uid == UID_SOVER) return 1;
+
+    if (u->is_admin) return 1;
+
+    if (u->uid == file_uid) return 1;
+
+    return 0;
+}
+
+int permission_can_chown(uint32_t file_uid) {
+    user_t *u = user_get_current();
+    if (!u) return 0;
+
+    if (u->uid == UID_SOVER) return 1;
+
+    if (u->is_admin) return 1;
+
+    return 0;
+}
+
+int permission_can_create_user(void) {
+    return perm_is_admin();
+}
+
+int permission_can_delete_user(uint32_t target_uid) {
+    if (target_uid == UID_SOVER) return 0;
+
+    return perm_is_admin();
+}
+
+int permission_can_modify_user(uint32_t target_uid) {
+    user_t *u = user_get_current();
+    if (!u) return 0;
+
+    if (u->uid == target_uid) return 1;
+
+    if (u->uid == UID_SOVER) return 1;
+
+    if (u->is_admin && target_uid != UID_SOVER) return 1;
+
+    return 0;
+}
+
+const char *perm_mode_string(uint16_t mode, char *buf, int buf_size) {
+    if (!buf || buf_size < 11) return "----------";
+
+    int i = 0;
+
+    if (mode & 0040000) buf[i++] = 'd';
+    else if (mode & 0120000) buf[i++] = 'l';
+    else buf[i++] = '-';
+
+    buf[i++] = (mode & 0400) ? 'r' : '-';
+    buf[i++] = (mode & 0200) ? 'w' : '-';
+    if (mode & 04000) {
+        buf[i++] = (mode & 0100) ? 's' : 'S';
+    } else {
+        buf[i++] = (mode & 0100) ? 'x' : '-';
+    }
+
+    buf[i++] = (mode & 0040) ? 'r' : '-';
+    buf[i++] = (mode & 0020) ? 'w' : '-';
+    if (mode & 02000) {
+        buf[i++] = (mode & 0010) ? 's' : 'S';
+    } else {
+        buf[i++] = (mode & 0010) ? 'x' : '-';
+    }
+
+    buf[i++] = (mode & 0004) ? 'r' : '-';
+    buf[i++] = (mode & 0002) ? 'w' : '-';
+    if (mode & 01000) {
+        buf[i++] = (mode & 0001) ? 't' : 'T';
+    } else {
+        buf[i++] = (mode & 0001) ? 'x' : '-';
+    }
+
+    buf[i] = '\0';
+    return buf;
+}
+
+const char *perm_uid_to_name(uint32_t uid, char *buf, int buf_size) {
+    if (!buf || buf_size <= 0) return "?";
+
+    user_t *u = user_find_by_uid(uid);
+    if (u) {
+        strncpy(buf, u->username, buf_size - 1);
+        buf[buf_size - 1] = '\0';
+        return buf;
+    }
+
+    char *p = buf;
+    char tmp[16];
+    int n = 0;
+    if (uid == 0) tmp[n++] = '0';
+    else {
+        uint32_t val = uid;
+        while (val > 0) {
+            tmp[n++] = '0' + (val % 10);
+            val /= 10;
+        }
+    }
+    for (int i = n - 1; i >= 0; i--) {
+        *p++ = tmp[i];
+    }
+    *p = '\0';
+    return buf;
+}
+
+const char *perm_gid_to_name(uint32_t gid, char *buf, int buf_size) {
+    if (!buf || buf_size <= 0) return "?";
+
+    group_t *g = group_find_by_gid(gid);
+    if (g) {
+        strncpy(buf, g->name, buf_size - 1);
+        buf[buf_size - 1] = '\0';
+        return buf;
+    }
+
+    char *p = buf;
+    char tmp[16];
+    int n = 0;
+    if (gid == 0) tmp[n++] = '0';
+    else {
+        uint32_t val = gid;
+        while (val > 0) {
+            tmp[n++] = '0' + (val % 10);
+            val /= 10;
+        }
+    }
+    for (int i = n - 1; i >= 0; i--) {
+        *p++ = tmp[i];
+    }
+    *p = '\0';
+    return buf;
 }

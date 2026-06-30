@@ -2448,6 +2448,35 @@ static void cmd_sysinfo(void) {
     print_box_row("Mode:", val, box_w);
     print_box_line('+', '-', '+', '-', box_w);
 
+    /* ==== 当前用户与权限 ==== */
+    print_box_title(" User & Permissions", box_w);
+    print_box_separator(box_w);
+    {
+        user_t *u = user_get_current();
+        if (u) {
+            print_box_row("Current User:", u->username, box_w);
+            snprintf(val, sizeof(val), "%u", u->uid);
+            print_box_row("UID:", val, box_w);
+            snprintf(val, sizeof(val), "%u", u->gid);
+            print_box_row("GID:", val, box_w);
+            print_box_row("Role:", perm_level_name(perm_get_level()), box_w);
+            snprintf(val, sizeof(val), "%s", u->is_admin ? "Yes" : "No");
+            print_box_row("Admin:", val, box_w);
+            snprintf(val, sizeof(val), "%s", perm_is_sover() ? "Full" :
+                                           perm_is_admin() ? "Elevated" : "Standard");
+            print_box_row("Privilege:", val, box_w);
+            snprintf(val, sizeof(val), "%u user(s)", user_count());
+            print_box_row("Total Users:", val, box_w);
+            snprintf(val, sizeof(val), "%u group(s)", group_count());
+            print_box_row("Total Groups:", val, box_w);
+        } else {
+            print_box_row("Current User:", "nobody", box_w);
+            print_box_row("UID:", "65534", box_w);
+            print_box_row("Role:", "Nobody", box_w);
+        }
+    }
+    print_box_line('+', '-', '+', '-', box_w);
+
     last_exit_code = 0;
 }
 
@@ -4381,19 +4410,50 @@ static void cmd_chmod(const char *mode_str, const char *file) {
         last_exit_code = 1;
         return;
     }
+
+    if (!perm_is_admin()) {
+        dentry_t *dentry = 0;
+        char full_path_check[512];
+        build_full_path(file, full_path_check, sizeof(full_path_check));
+        if (path_resolve(full_path_check, &dentry) == 0 && dentry && dentry->inode) {
+            if (!permission_can_chmod(dentry->inode->uid)) {
+                shell_print("chmod: permission denied: ");
+                shell_print(file);
+                shell_print("\n");
+                last_exit_code = 1;
+                return;
+            }
+        }
+    }
+
     char full_path[512];
     build_full_path(file, full_path, sizeof(full_path));
 
     /* Parse mode (simple octal) */
     uint32_t mode = 0;
     const char *p = mode_str;
+    int valid = 1;
+    if (*p < '0' || *p > '7') valid = 0;
     while (*p >= '0' && *p <= '7') {
         mode = mode * 8 + (*p - '0');
         p++;
     }
+    if (*p != '\0' && *p != ' ') valid = 0;
+
+    if (!valid || mode > 07777) {
+        shell_print("chmod: invalid mode: '");
+        shell_print(mode_str);
+        shell_print("'\n");
+        shell_print("Usage: chmod <mode> <file>\n");
+        shell_print("  mode is octal, e.g. 755, 644, 777\n");
+        last_exit_code = 1;
+        return;
+    }
 
     if (vfs_chmod(full_path, mode) != 0) {
-        shell_err_chmod();
+        shell_print("chmod: cannot access '");
+        shell_print(file);
+        shell_print("': No such file or directory\n");
         last_exit_code = 1;
         return;
     }
@@ -4412,24 +4472,111 @@ static void cmd_chown(const char *user, const char *file) {
         last_exit_code = 1;
         return;
     }
+
+    if (!perm_is_admin()) {
+        shell_print("chown: permission denied\n");
+        shell_print("Only Admin or Sover can change file ownership\n");
+        last_exit_code = 1;
+        return;
+    }
+
     char full_path[512];
     build_full_path(file, full_path, sizeof(full_path));
 
-    /* Parse uid:gid */
-    uint32_t uid = 0, gid = 0;
+    /* Parse uid:gid or username:groupname */
+    uint32_t uid = 0, gid = 0xFFFFFFFF;
     const char *colon = NULL;
+    int has_colon = 0;
+    int parse_uid_success = 1;
+    int parse_gid_success = 1;
+
+    /* Find colon separator */
     for (const char *c = user; *c; c++) {
-        if (*c == ':') { colon = c + 1; break; }
+        if (*c == ':') {
+            colon = c + 1;
+            has_colon = 1;
+            break;
+        }
+    }
+
+    /* Parse user part (UID or username) */
+    char user_part[64];
+    int up_len = 0;
+    for (const char *c = user; *c && *c != ':' && up_len < 63; c++) {
+        user_part[up_len++] = *c;
+    }
+    user_part[up_len] = '\0';
+
+    /* Try numeric UID first */
+    parse_uid_success = 1;
+    uid = 0;
+    for (const char *c = user_part; *c; c++) {
+        if (*c < '0' || *c > '9') {
+            parse_uid_success = 0;
+            break;
+        }
         uid = uid * 10 + (*c - '0');
     }
-    if (colon) {
-        for (const char *c = colon; *c; c++) {
+
+    /* If not numeric, look up by username */
+    if (!parse_uid_success) {
+        user_t *u = user_find_by_name(user_part);
+        if (u) {
+            uid = u->uid;
+            parse_uid_success = 1;
+        }
+    }
+
+    if (!parse_uid_success) {
+        shell_print("chown: invalid user: '");
+        shell_print(user_part);
+        shell_print("'\n");
+        last_exit_code = 1;
+        return;
+    }
+
+    /* Parse group part if present */
+    if (has_colon && colon) {
+        char group_part[64];
+        int gp_len = 0;
+        for (const char *c = colon; *c && gp_len < 63; c++) {
+            group_part[gp_len++] = *c;
+        }
+        group_part[gp_len] = '\0';
+
+        /* Try numeric GID first */
+        parse_gid_success = 1;
+        gid = 0;
+        for (const char *c = group_part; *c; c++) {
+            if (*c < '0' || *c > '9') {
+                parse_gid_success = 0;
+                break;
+            }
             gid = gid * 10 + (*c - '0');
+        }
+
+        /* If not numeric, look up by group name */
+        if (!parse_gid_success) {
+            group_t *g = group_find_by_name(group_part);
+            if (g) {
+                gid = g->gid;
+                parse_gid_success = 1;
+            }
+        }
+
+        if (!parse_gid_success) {
+            shell_print("chown: invalid group: '");
+            shell_print(group_part);
+            shell_print("'\n");
+            last_exit_code = 1;
+            return;
         }
     }
 
     if (vfs_chown(full_path, uid, gid) != 0) {
-        shell_err_chown();
+        shell_print("chown: cannot access '");
+        shell_print(file);
+        shell_print("': No such file or directory\n");
         last_exit_code = 1;
         return;
     }
@@ -8295,72 +8442,99 @@ static void cmd_users(void) {
 
 static void cmd_useradd(const char *name) {
     if (!name || !*name) {
-        shell_print("Usage: useradd <username>\n");
+        shell_err_useradd();
         last_exit_code = 1;
         return;
     }
-    /* 需要 Admin 或 Sover 权限 */
-    if (!perm_is_admin()) {
-        shell_print(perm_denied_reason(0, PERM_LEVEL_ADMIN));
-        shell_print("\nYour current privilege level: ");
+
+    if (!permission_can_create_user()) {
+        shell_print("useradd: permission denied\n");
+        shell_print("Your current privilege level: ");
         shell_print(perm_level_name(perm_get_level()));
         shell_print("\nUse 'sudo' to elevate privileges.\n");
         last_exit_code = 1;
         return;
     }
-    uint32_t uid = 1002;
-    while (user_find_by_uid(uid)) uid++;
+
+    uint32_t uid = user_alloc_uid();
+    if (uid == 0) {
+        shell_print("useradd: no available UID (user limit reached)\n");
+        last_exit_code = 1;
+        return;
+    }
+
     uint32_t gid = uid;
+    if (group_find_by_gid(gid)) {
+        gid = user_alloc_gid();
+        if (gid == 0) {
+            shell_print("useradd: no available GID (group limit reached)\n");
+            last_exit_code = 1;
+            return;
+        }
+    }
+
     if (user_create(name, uid, gid, 0) == 0) {
         group_create(name, gid);
         group_add_member(gid, uid);
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%u", uid);
         shell_print("User '");
         shell_print(name);
         shell_print("' created (uid=");
-        char buf[16];
-        int pos = 0;
-        uint32_t n = uid;
-        if (n == 0) buf[pos++] = '0';
-        else {
-            char tmp[16];
-            int t = 0;
-            while (n > 0) { tmp[t++] = '0' + (n % 10); n /= 10; }
-            for (int i = t - 1; i >= 0; i--) buf[pos++] = tmp[i];
-        }
-        buf[pos] = '\0';
         shell_print(buf);
         shell_print(")\n");
-        user_persist_save();  /* 持久化用户数据 */
+        user_persist_save();
         last_exit_code = 0;
     } else {
-        shell_print("Failed to create user\n");
+        shell_print("useradd: failed to create user '");
+        shell_print(name);
+        shell_print("'\n");
         last_exit_code = 1;
     }
 }
 
 static void cmd_userdel(const char *name) {
     if (!name || !*name) {
-        shell_print("Usage: userdel <username>\n");
+        shell_err_userdel();
         last_exit_code = 1;
         return;
     }
-    /* 需要 Admin 或 Sover 权限 */
-    if (!perm_is_admin()) {
-        shell_print(perm_denied_reason(0, PERM_LEVEL_ADMIN));
-        shell_print("\nYour current privilege level: ");
+
+    user_t *target = user_find_by_name(name);
+    if (!target) {
+        shell_print("userdel: user '");
+        shell_print(name);
+        shell_print("' does not exist\n");
+        last_exit_code = 1;
+        return;
+    }
+
+    if (!permission_can_delete_user(target->uid)) {
+        shell_print("userdel: permission denied\n");
+        shell_print("Your current privilege level: ");
         shell_print(perm_level_name(perm_get_level()));
         shell_print("\nUse 'sudo' to elevate privileges.\n");
         last_exit_code = 1;
         return;
     }
+
+    user_t *current = user_get_current();
+    if (current && current->uid == target->uid) {
+        shell_print("userdel: cannot delete currently logged-in user\n");
+        last_exit_code = 1;
+        return;
+    }
+
     if (user_delete(name) == 0) {
         shell_print("User '");
         shell_print(name);
         shell_print("' deleted\n");
-        user_persist_save();  /* 持久化用户数据 */
+        user_persist_save();
         last_exit_code = 0;
     } else {
-        shell_print("Failed to delete user\n");
+        shell_print("userdel: failed to delete user '");
+        shell_print(name);
+        shell_print("'\n");
         last_exit_code = 1;
     }
 }
@@ -8543,7 +8717,39 @@ static void cmd_resume(void) {
 
 /* ---- 组管理命令 ---- */
 
-static void cmd_groups(void) {
+static void cmd_groups(const char *username) {
+    if (username && *username) {
+        user_t *u = user_find_by_name(username);
+        if (!u) {
+            shell_print("groups: user '");
+            shell_print(username);
+            shell_print("': No such user\n");
+            last_exit_code = 1;
+            return;
+        }
+        uint32_t gids[32];
+        int count = user_get_groups(u->uid, gids, 32);
+        if (count <= 0) {
+            shell_print("(no groups)\n");
+            last_exit_code = 0;
+            return;
+        }
+        for (int i = 0; i < count; i++) {
+            group_t *g = group_find_by_gid(gids[i]);
+            if (g) {
+                shell_print(g->name);
+            } else {
+                char buf[16];
+                snprintf(buf, sizeof(buf), "%u", gids[i]);
+                shell_print(buf);
+            }
+            if (i + 1 < count) shell_print(" ");
+        }
+        shell_print("\n");
+        last_exit_code = 0;
+        return;
+    }
+
     uint32_t gc = group_count();
     if (gc == 0) {
         shell_print("No groups defined.\n");
@@ -8555,33 +8761,24 @@ static void cmd_groups(void) {
     for (uint32_t i = 0; i < gc; i++) {
         group_t *g = group_get_by_index(i);
         if (!g) continue;
-        /* 组名 */
         shell_print(g->name);
         uint32_t namelen = 0;
         const char *p = g->name;
         while (*p) { namelen++; p++; }
         for (uint32_t s = namelen; s < 14; s++) shell_print(" ");
-        /* GID */
         char buf[16];
-        uint32_t n = g->gid;
-        int pos = 0;
-        if (n == 0) buf[pos++] = '0';
-        else { char tmp[16]; int t = 0; while (n > 0) { tmp[t++] = '0' + (n % 10); n /= 10; } for (int j = t - 1; j >= 0; j--) buf[pos++] = tmp[j]; }
-        buf[pos] = '\0';
+        snprintf(buf, sizeof(buf), "%u", g->gid);
         shell_print(buf);
+        int pos = 0;
+        while (buf[pos]) pos++;
         for (int s = pos; s < 7; s++) shell_print(" ");
-        /* 成员列表 */
         for (uint32_t m = 0; m < g->member_count; m++) {
             user_t *mu = user_find_by_uid(g->members[m]);
             if (mu) {
                 shell_print(mu->username);
             } else {
+                    snprintf(buf, sizeof(buf), "%u", g->members[m]);
                 shell_print("uid=");
-                uint32_t uid_n = g->members[m];
-                int upos = 0;
-                if (uid_n == 0) buf[upos++] = '0';
-                else { char tmp2[16]; int t2 = 0; while (uid_n > 0) { tmp2[t2++] = '0' + (uid_n % 10); uid_n /= 10; } for (int k = t2 - 1; k >= 0; k--) buf[upos++] = tmp2[k]; }
-                buf[upos] = '\0';
                 shell_print(buf);
             }
             if (m + 1 < g->member_count) shell_print(", ");
@@ -9112,7 +9309,7 @@ static int shell_execute_single(const char *cmd) {
     }
     /* Group & who commands */
     else if (strcmp(line, "groups") == 0) {
-        cmd_groups();
+        cmd_groups(arg);
     } else if (strcmp(line, "who") == 0) {
         cmd_who();
     }

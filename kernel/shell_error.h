@@ -134,6 +134,17 @@ void shell_err_help(const char *arg);   /* help 帮助 */
 void shell_err_logrotate(void);     /* logrotate 日志轮转 */
 void shell_err_syslog(void);        /* syslog 系统日志 */
 
+/* 用户/权限相关命令错误 */
+void shell_err_whoami(void);        /* whoami 显示当前用户 */
+void shell_err_su(void);            /* su 切换用户 */
+void shell_err_useradd(void);       /* useradd 创建用户 */
+void shell_err_userdel(void);       /* userdel 删除用户 */
+void shell_err_passwd(void);        /* passwd 修改密码 */
+void shell_err_groups(void);        /* groups 组列表 */
+void shell_err_users(void);         /* users 用户列表 */
+void shell_err_id(void);            /* id 用户信息 */
+void shell_err_umask(void);         /* umask 文件权限掩码 */
+
 /* 未知指令错误 */
 void shell_err_unknown(const char *cmd);
 

@@ -6,6 +6,26 @@
 #define USER_MAX_NAME  32
 #define USER_MAX_USERS 64
 #define USER_MAX_PASS_HASH 0xFFFFFFFF
+#define USER_MAX_GROUPS 32
+#define USER_MAX_GROUP_MEMBERS 16
+
+#define USER_UID_SOVER    0
+#define USER_UID_ADMIN    1
+#define USER_UID_NOBODY   65534
+#define USER_UID_MIN      1000
+#define USER_UID_MAX      60000
+
+#define USER_GID_ROOT     0
+#define USER_GID_ADMIN    1
+#define USER_GID_USERS    100
+#define USER_GID_NOGROUP  65534
+
+typedef enum {
+    USER_ROLE_SOVER = 0,
+    USER_ROLE_ADMIN = 1,
+    USER_ROLE_USER  = 2,
+    USER_ROLE_NOBODY = 3
+} user_role_t;
 
 typedef struct {
     uint32_t uid;
@@ -21,7 +41,7 @@ typedef struct {
 typedef struct {
     uint32_t gid;
     char name[USER_MAX_NAME];
-    uint32_t members[16];
+    uint32_t members[USER_MAX_GROUP_MEMBERS];
     uint32_t member_count;
 } group_t;
 
@@ -56,5 +76,18 @@ int user_rename(uint32_t uid, const char *new_name);
 
 uint32_t user_hash_password(const char *password);
 uint32_t user_hash_password_salt(const char *password, const char *username);
+
+user_role_t user_get_role(uint32_t uid);
+const char *user_role_name(user_role_t role);
+int user_is_sover(uint32_t uid);
+int user_is_admin(uint32_t uid);
+int user_is_regular(uint32_t uid);
+int user_is_nobody(uint32_t uid);
+
+uint32_t user_alloc_uid(void);
+uint32_t user_alloc_gid(void);
+
+int user_get_groups(uint32_t uid, uint32_t *groups, uint32_t max_groups);
+int user_in_group(uint32_t uid, uint32_t gid);
 
 #endif

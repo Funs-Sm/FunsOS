@@ -72,6 +72,7 @@
 #include "serial.h"
 #include "service_registry.h"
 #include "splash.h"
+#include "app_registry.h"
 
 static inline void sti(void) {
     asm volatile("sti");
@@ -436,6 +437,9 @@ void kernel_main(void) {
     /* ================================================================
      * 显示开屏动画
      * ================================================================ */
+    klog_info("Initializing application registry...");
+    app_registry_init();
+
     klog_info("Showing splash screen...");
     splash_show();
 

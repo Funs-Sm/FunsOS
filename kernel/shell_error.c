@@ -886,6 +886,91 @@ void shell_err_syslog(void) {
 }
 
 /* ================================================================
+ *  用户/权限相关命令错误
+ * ================================================================ */
+
+void shell_err_whoami(void) {
+    shell_print("whoami: Failed to get current user.\n");
+    shell_print("  Usage: whoami\n");
+    shell_print("  Description: Print the current user name.\n");
+    shell_print("  See also: id, users, groups\n");
+}
+
+void shell_err_su(void) {
+    shell_print("su: Failed to switch user.\n");
+    shell_print("  Usage: su [username]\n");
+    shell_print("  Description: Switch to another user account.\n");
+    shell_print("  If no username is given, defaults to 'sover' (root).\n");
+    shell_print("  Examples:\n");
+    shell_print("    su           -- switch to sover\n");
+    shell_print("    su admin     -- switch to admin user\n");
+    shell_print("    su john      -- switch to user john\n");
+}
+
+void shell_err_useradd(void) {
+    shell_print("useradd: Failed to create user.\n");
+    shell_print("  Usage: useradd <username>\n");
+    shell_print("  Description: Create a new user account (requires Admin/Sover).\n");
+    shell_print("  Examples:\n");
+    shell_print("    useradd john       -- create user 'john'\n");
+    shell_print("    useradd testuser   -- create user 'testuser'\n");
+    shell_print("  Note: New users get UID starting from 1000.\n");
+}
+
+void shell_err_userdel(void) {
+    shell_print("userdel: Failed to delete user.\n");
+    shell_print("  Usage: userdel <username>\n");
+    shell_print("  Description: Delete a user account (requires Admin/Sover).\n");
+    shell_print("  Examples:\n");
+    shell_print("    userdel john       -- delete user 'john'\n");
+    shell_print("  Note: Cannot delete 'sover' user or currently logged-in user.\n");
+}
+
+void shell_err_passwd(void) {
+    shell_print("passwd: Failed to change password.\n");
+    shell_print("  Usage: passwd [username]\n");
+    shell_print("  Description: Change user password.\n");
+    shell_print("  If no username is given, changes current user's password.\n");
+    shell_print("  Examples:\n");
+    shell_print("    passwd             -- change your own password\n");
+    shell_print("    passwd john        -- change john's password (admin only)\n");
+    shell_print("  Note: Non-admin users can only change their own password.\n");
+}
+
+void shell_err_groups(void) {
+    shell_print("groups: Failed to list groups.\n");
+    shell_print("  Usage: groups\n");
+    shell_print("  Description: List all user groups and their members.\n");
+    shell_print("  See also: users, id, whoami\n");
+}
+
+void shell_err_users(void) {
+    shell_print("users: Failed to list users.\n");
+    shell_print("  Usage: users\n");
+    shell_print("  Description: List all user accounts on the system.\n");
+    shell_print("  See also: groups, id, whoami\n");
+}
+
+void shell_err_id(void) {
+    shell_print("id: Failed to get user information.\n");
+    shell_print("  Usage: id\n");
+    shell_print("  Description: Print real and effective user and group IDs.\n");
+    shell_print("  Shows UID, GID, groups, and privilege level.\n");
+    shell_print("  See also: whoami, groups, users\n");
+}
+
+void shell_err_umask(void) {
+    shell_print("umask: Invalid file mode creation mask.\n");
+    shell_print("  Usage: umask [mode]\n");
+    shell_print("  Description: Set or get the file mode creation mask.\n");
+    shell_print("  The mask is subtracted from the default permissions.\n");
+    shell_print("  Examples:\n");
+    shell_print("    umask            -- show current mask\n");
+    shell_print("    umask 022        -- set mask to 022 (default)\n");
+    shell_print("    umask 077        -- set mask to 077 (private)\n");
+}
+
+/* ================================================================
  *  未知指令错误
  * ================================================================ */
 

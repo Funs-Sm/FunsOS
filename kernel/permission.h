@@ -34,6 +34,17 @@ typedef struct acl {
 #define PERM_LEVEL_USER    2
 #define PERM_LEVEL_NOBODY  3
 
+#define UID_SOVER    0
+#define UID_ADMIN    1
+#define UID_NOBODY   65534
+#define UID_USER_MIN 1000
+#define UID_USER_MAX 60000
+
+#define GID_ROOT     0
+#define GID_ADMIN    1
+#define GID_NOGROUP  65534
+#define GID_USER_MIN 1000
+
 int perm_check(uint32_t file_uid, uint32_t file_gid, uint16_t file_mode,
                uint32_t proc_uid, uint32_t proc_gid, uint32_t access);
 
@@ -65,5 +76,18 @@ int perm_check_path(const char *path, uint32_t required_perm);
 const char *perm_denied_reason(const char *path, uint32_t required_perm);
 int perm_get_level(void);
 const char *perm_level_name(int level);
+
+int permission_check_file(const char *path, uint32_t required_perm);
+int permission_check_user(uint32_t target_uid);
+int permission_check_user_operation(uint32_t target_uid, int is_admin_op);
+int permission_can_chmod(uint32_t file_uid);
+int permission_can_chown(uint32_t file_uid);
+int permission_can_create_user(void);
+int permission_can_delete_user(uint32_t target_uid);
+int permission_can_modify_user(uint32_t target_uid);
+
+const char *perm_mode_string(uint16_t mode, char *buf, int buf_size);
+const char *perm_uid_to_name(uint32_t uid, char *buf, int buf_size);
+const char *perm_gid_to_name(uint32_t gid, char *buf, int buf_size);
 
 #endif

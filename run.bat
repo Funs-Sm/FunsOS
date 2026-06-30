@@ -1,6 +1,6 @@
 @echo off
 echo ==========================================
-echo   Funs Core v0.6 - Quick Run Script
+echo   Funs Core v0.7 - Quick Run Script
 echo ==========================================
 echo.
 
