@@ -1,9 +1,12 @@
 #include "splash.h"
 #include "vga_text.h"
+#include "timer.h"
 #include "string.h"
 #include "stdio.h"
 #include "version.h"
 #include "serial.h"
+
+#define SPLASH_SECONDS 3
 
 static void splash_puts(int row, int col, const char *str, uint8_t fg, uint8_t bg) {
     if (row < 0 || row >= VGA_HEIGHT) return;
@@ -38,15 +41,27 @@ static void splash_draw_border(void) {
     vga[(VGA_HEIGHT - 1) * VGA_WIDTH + VGA_WIDTH - 1] = (uint16_t)('+' | (color << 8));
 }
 
-static void splash_short_delay(void) {
-    volatile uint32_t i;
-    for (i = 0; i < 8000000; i++) {
-        asm volatile("nop");
+static void splash_wait_seconds(uint32_t seconds) {
+    uint32_t start = timer_get_ticks();
+    uint32_t target = seconds * 100;
+
+    uint32_t max_loop = 200000000;
+    volatile uint32_t count = 0;
+
+    while (count < max_loop) {
+        uint32_t now = timer_get_ticks();
+        if (now - start >= target) {
+            return;
+        }
+        count++;
+        for (volatile int i = 0; i < 50; i++) {
+            asm volatile("nop");
+        }
     }
 }
 
 void splash_show(void) {
-    serial_print(COM1, "[SPLASH] Showing splash...\n");
+    serial_print(COM1, "[SPLASH] Showing splash screen...\n");
 
     vga_text_clear();
     splash_draw_border();
@@ -76,9 +91,9 @@ void splash_show(void) {
     int msg_col = (VGA_WIDTH - msg_len) / 2;
     splash_puts(title_row + 4, msg_col, boot_msg, VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
 
-    serial_print(COM1, "[SPLASH] Short delay...\n");
-    splash_short_delay();
-    serial_print(COM1, "[SPLASH] Entering shell.\n");
+    serial_print(COM1, "[SPLASH] Waiting 3 seconds...\n");
+    splash_wait_seconds(SPLASH_SECONDS);
+    serial_print(COM1, "[SPLASH] Done, entering shell.\n");
 
     vga_text_clear();
     vga_text_set_cursor(0, 0);

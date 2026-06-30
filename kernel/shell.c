@@ -8267,8 +8267,14 @@ static void shell_auto_login(void) {
     env_set("SHELL", "/bin/sh");
     env_set("PATH", "/bin:/sbin:/usr/bin:/usr/sbin");
     env_set("OLDPWD", "/");
-    vfs_chdir(home);
-    strncpy(current_dir, home, 255);
+
+    if (vfs_chdir(home) != 0) {
+        vfs_chdir("/");
+        strncpy(current_dir, "/", 255);
+        env_set("HOME", "/");
+    } else {
+        strncpy(current_dir, home, 255);
+    }
     current_dir[255] = '\0';
     env_set("PWD", current_dir);
 
