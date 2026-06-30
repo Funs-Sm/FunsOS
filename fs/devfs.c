@@ -7,6 +7,7 @@
 #include "io.h"
 #include "rtc.h"
 #include "klog.h"
+#include "sound.h"
 
 static devfs_device_t *device_list = NULL;
 
@@ -532,6 +533,107 @@ static file_ops_t disk_ops = {
     .ioctl = NULL
 };
 
+/* /dev/dsp - Digital Signal Processor (audio playback) */
+static int32_t dsp_read(file_t *file, void *buf, uint32_t count) {
+    (void)file;
+    (void)buf;
+    (void)count;
+    return 0;
+}
+
+static int32_t dsp_write(file_t *file, const void *buf, uint32_t count) {
+    (void)file;
+    if (!buf || count == 0) return 0;
+
+    if (sound_is_available(0)) {
+        sound_play(0, buf, count, 44100, 1, 8);
+    }
+    return (int32_t)count;
+}
+
+static int32_t dsp_ioctl(file_t *file, uint32_t cmd, void *arg) {
+    (void)file;
+    (void)cmd;
+    (void)arg;
+    return 0;
+}
+
+static file_ops_t dsp_ops = {
+    .open = NULL,
+    .read = dsp_read,
+    .write = dsp_write,
+    .close = NULL,
+    .seek = NULL,
+    .ioctl = dsp_ioctl
+};
+
+/* /dev/audio - Audio device (Sun /dev/audio compatibility) */
+static int32_t audio_read(file_t *file, void *buf, uint32_t count) {
+    return dsp_read(file, buf, count);
+}
+
+static int32_t audio_write(file_t *file, const void *buf, uint32_t count) {
+    return dsp_write(file, buf, count);
+}
+
+static file_ops_t audio_ops = {
+    .open = NULL,
+    .read = audio_read,
+    .write = audio_write,
+    .close = NULL,
+    .seek = NULL,
+    .ioctl = dsp_ioctl
+};
+
+/* /dev/mixer - Mixer device */
+#define SOUND_MIXER_READ  0x00
+#define SOUND_MIXER_WRITE 0x01
+
+static int32_t mixer_read(file_t *file, void *buf, uint32_t count) {
+    (void)file;
+    (void)buf;
+    (void)count;
+    return 0;
+}
+
+static int32_t mixer_write(file_t *file, const void *buf, uint32_t count) {
+    (void)file;
+    (void)buf;
+    return (int32_t)count;
+}
+
+static int32_t mixer_ioctl(file_t *file, uint32_t cmd, void *arg) {
+    (void)file;
+    uint8_t left, right;
+
+    switch (cmd & 0xFF) {
+        case SOUND_MIXER_READ:
+            sound_get_volume(0, &left, &right);
+            if (arg) {
+                *(int *)arg = (int)left | ((int)right << 8);
+            }
+            return 0;
+        case SOUND_MIXER_WRITE:
+            if (arg) {
+                int val = *(int *)arg;
+                sound_set_volume(0, (uint8_t)(val & 0xFF), (uint8_t)((val >> 8) & 0xFF));
+            }
+            return 0;
+        default:
+            break;
+    }
+    return -EINVAL;
+}
+
+static file_ops_t mixer_ops = {
+    .open = NULL,
+    .read = mixer_read,
+    .write = mixer_write,
+    .close = NULL,
+    .seek = NULL,
+    .ioctl = mixer_ioctl
+};
+
 void devfs_create_std_devices(void) {
     klog_info("devfs: creating standard character devices");
 
@@ -546,6 +648,11 @@ void devfs_create_std_devices(void) {
     devfs_register_with_perm("port",    DEVICE_CHAR, 1, 4, &port_ops,    NULL, DEV_PERM_ROOT_RW, 0, 0);
     devfs_register_with_perm("random",  DEVICE_CHAR, 1, 8, &random_ops,  NULL, DEV_PERM_RW, 0, 0);
     devfs_register_with_perm("urandom", DEVICE_CHAR, 1, 9, &urandom_ops, NULL, DEV_PERM_RW, 0, 0);
+
+    klog_info("devfs: creating audio devices");
+    devfs_register_with_perm("dsp",     DEVICE_CHAR, 14, 3, &dsp_ops,     NULL, DEV_PERM_RW, 0, 0);
+    devfs_register_with_perm("audio",   DEVICE_CHAR, 14, 4, &audio_ops,   NULL, DEV_PERM_RW, 0, 0);
+    devfs_register_with_perm("mixer",   DEVICE_CHAR, 14, 0, &mixer_ops,   NULL, DEV_PERM_RW, 0, 0);
 
     klog_info("devfs: creating standard block devices");
     devfs_register_with_perm("sda",     DEVICE_BLOCK, 8, 0, &disk_ops,   NULL, DEV_PERM_RW, 0, 0);

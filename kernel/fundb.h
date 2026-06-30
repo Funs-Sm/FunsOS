@@ -29,6 +29,10 @@
 #define FUNDB_BUSY        -9
 #define FUNDB_NO_ROW      -10
 
+/* 限制 */
+#define FUNDB_MAX_COLUMNS  32
+#define FUNDB_MAX_TABLES   32
+
 /* 列定义 */
 typedef struct {
     char name[64];

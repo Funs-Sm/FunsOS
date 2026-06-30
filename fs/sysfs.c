@@ -5,6 +5,7 @@
 #include "stddef.h"
 #include "version.h"
 #include "klog.h"
+#include "smp.h"
 
 static dentry_t *sysfs_root_dentry;
 static inode_t *sysfs_root_inode;
@@ -76,6 +77,138 @@ static sysfs_attr_t kernel_hostname_attr = {
     .mode = FILE_MODE_READ | FILE_MODE_WRITE,
     .show = kernel_hostname_show,
     .store = kernel_hostname_store
+};
+
+static int32_t kernel_uevent_seqnum_show(char *buf) {
+    return sprintf(buf, "0\n");
+}
+
+static sysfs_attr_t kernel_uevent_seqnum_attr = {
+    .name = "uevent_seqnum",
+    .mode = FILE_MODE_READ,
+    .show = kernel_uevent_seqnum_show,
+    .store = NULL
+};
+
+static int32_t kernel_profiling_show(char *buf) {
+    return sprintf(buf, "0\n");
+}
+
+static int32_t kernel_profiling_store(const char *buf, uint32_t count) {
+    klog_info("sysfs: profiling state change requested");
+    return (int32_t)count;
+}
+
+static sysfs_attr_t kernel_profiling_attr = {
+    .name = "profiling",
+    .mode = FILE_MODE_READ | FILE_MODE_WRITE,
+    .show = kernel_profiling_show,
+    .store = kernel_profiling_store
+};
+
+/* ---- /sys/devices/system/cpu/ entries ---- */
+
+static int32_t cpu_online_show(char *buf) {
+    uint32_t cpu_cnt = smp_get_cpu_count();
+    int32_t len = 0;
+    if (cpu_cnt > 0) {
+        if (cpu_cnt == 1) {
+            len = sprintf(buf, "0\n");
+        } else {
+            len = sprintf(buf, "0-%u\n", cpu_cnt - 1);
+        }
+    } else {
+        len = sprintf(buf, "\n");
+    }
+    return len;
+}
+
+static sysfs_attr_t cpu_online_attr = {
+    .name = "online",
+    .mode = FILE_MODE_READ,
+    .show = cpu_online_show,
+    .store = NULL
+};
+
+static int32_t cpu_possible_show(char *buf) {
+    uint32_t cpu_cnt = smp_get_cpu_count();
+    int32_t len = 0;
+    if (cpu_cnt > 0) {
+        if (cpu_cnt == 1) {
+            len = sprintf(buf, "0\n");
+        } else {
+            len = sprintf(buf, "0-%u\n", cpu_cnt - 1);
+        }
+    } else {
+        len = sprintf(buf, "\n");
+    }
+    return len;
+}
+
+static sysfs_attr_t cpu_possible_attr = {
+    .name = "possible",
+    .mode = FILE_MODE_READ,
+    .show = cpu_possible_show,
+    .store = NULL
+};
+
+static int32_t cpu_present_show(char *buf) {
+    uint32_t cpu_cnt = smp_get_cpu_count();
+    int32_t len = 0;
+    if (cpu_cnt > 0) {
+        if (cpu_cnt == 1) {
+            len = sprintf(buf, "0\n");
+        } else {
+            len = sprintf(buf, "0-%u\n", cpu_cnt - 1);
+        }
+    } else {
+        len = sprintf(buf, "\n");
+    }
+    return len;
+}
+
+static sysfs_attr_t cpu_present_attr = {
+    .name = "present",
+    .mode = FILE_MODE_READ,
+    .show = cpu_present_show,
+    .store = NULL
+};
+
+/* ---- /sys/firmware/ entries ---- */
+
+static int32_t firmware_acpi_show(char *buf) {
+    return sprintf(buf, "acpi\n");
+}
+
+static sysfs_attr_t firmware_acpi_attr = {
+    .name = "acpi",
+    .mode = FILE_MODE_READ,
+    .show = firmware_acpi_show,
+    .store = NULL
+};
+
+/* ---- /sys/module/ entries ---- */
+
+static int32_t module_initstate_show(char *buf) {
+    return sprintf(buf, "live\n");
+}
+
+static sysfs_attr_t module_initstate_attr = {
+    .name = "initstate",
+    .mode = FILE_MODE_READ,
+    .show = module_initstate_show,
+    .store = NULL
+};
+
+static int32_t module_refcnt_show(char *buf) {
+    return sprintf(buf, "0\n");
+}
+
+static sysfs_attr_t module_refcnt_attr = {
+    .name = "refcnt",
+    .mode = FILE_MODE_READ,
+    .show = module_refcnt_show,
+    .store = NULL
 };
 
 /* ---- /sys/devices/ entries ---- */
@@ -314,6 +447,8 @@ int32_t sysfs_init(void) {
     sysfs_create_file("osrelease", kernel_dir, &kernel_osrelease_attr);
     sysfs_create_file("ostype", kernel_dir, &kernel_ostype_attr);
     sysfs_create_file("hostname", kernel_dir, &kernel_hostname_attr);
+    sysfs_create_file("uevent_seqnum", kernel_dir, &kernel_uevent_seqnum_attr);
+    sysfs_create_file("profiling", kernel_dir, &kernel_profiling_attr);
     klog_info("sysfs: /sys/kernel/ entries created");
 
     /* /sys/devices/ */
@@ -325,6 +460,21 @@ int32_t sysfs_init(void) {
     dentry_t *devices_system_dir = sysfs_create_dir("system", devices_dir);
     if (devices_system_dir) {
         sysfs_create_file("system", devices_system_dir, &devices_system_attr);
+        dentry_t *cpu_dir = sysfs_create_dir("cpu", devices_system_dir);
+        if (cpu_dir) {
+            sysfs_create_file("online", cpu_dir, &cpu_online_attr);
+            sysfs_create_file("possible", cpu_dir, &cpu_possible_attr);
+            sysfs_create_file("present", cpu_dir, &cpu_present_attr);
+            uint32_t cpu_cnt = smp_get_cpu_count();
+            for (uint32_t i = 0; i < cpu_cnt && i < 32; i++) {
+                char cpuid_name[16];
+                sprintf(cpuid_name, "cpu%u", i);
+                dentry_t *cpuid_dir = sysfs_create_dir(cpuid_name, cpu_dir);
+                if (cpuid_dir) {
+                    sysfs_create_file("online", cpuid_dir, &cpu_online_attr);
+                }
+            }
+        }
     }
     klog_info("sysfs: /sys/devices/ entries created");
 
@@ -377,6 +527,32 @@ int32_t sysfs_init(void) {
     sysfs_create_file("state", power_dir, &power_state_attr);
     sysfs_create_file("wakeup", power_dir, &power_wakeup_attr);
     klog_info("sysfs: /sys/power/ entries created");
+
+    /* /sys/firmware/ */
+    dentry_t *firmware_dir = sysfs_create_dir("firmware", NULL);
+    if (firmware_dir) {
+        dentry_t *acpi_dir = sysfs_create_dir("acpi", firmware_dir);
+        if (acpi_dir) {
+            sysfs_create_file("acpi", acpi_dir, &firmware_acpi_attr);
+        }
+        klog_info("sysfs: /sys/firmware/ entries created");
+    }
+
+    /* /sys/module/ */
+    dentry_t *module_dir = sysfs_create_dir("module", NULL);
+    if (module_dir) {
+        const char *module_names[] = {
+            "vfat", "ext4", "tcp_ipv4", "udp_ipv4", "snd", "drm", "kvm"
+        };
+        for (int i = 0; i < 7; i++) {
+            dentry_t *mod_dir = sysfs_create_dir(module_names[i], module_dir);
+            if (mod_dir) {
+                sysfs_create_file("initstate", mod_dir, &module_initstate_attr);
+                sysfs_create_file("refcnt", mod_dir, &module_refcnt_attr);
+            }
+        }
+        klog_info("sysfs: /sys/module/ entries created");
+    }
 
     klog_info("sysfs: initialization complete");
     return 0;

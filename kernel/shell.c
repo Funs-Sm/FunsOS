@@ -4678,16 +4678,21 @@ static void cmd_stat(const char *file) {
 }
 
 /* 30. tree - Show directory tree */
+static int tree_dir_count = 0;
+static int tree_file_count = 0;
+
 static void tree_recursive(dentry_t *dir, int depth) {
     dentry_t *child = dir->child;
     while (child) {
         for (int i = 0; i < depth; i++) shell_print("  ");
         if (child->inode && (child->inode->mode & FILE_MODE_DIR)) {
+            tree_dir_count++;
             shell_print("+ ");
             shell_print(child->name);
             shell_print("/\n");
             tree_recursive(child, depth + 1);
         } else {
+            tree_file_count++;
             shell_print("- ");
             shell_print(child->name);
             shell_print("\n");
@@ -4708,9 +4713,18 @@ static void cmd_tree(const char *dir) {
         return;
     }
 
+    tree_dir_count = 0;
+    tree_file_count = 0;
+
     shell_print(full_path);
     shell_print("\n");
     tree_recursive(d, 1);
+
+    char stat_buf[128];
+    snprintf(stat_buf, sizeof(stat_buf), "\n%d directories, %d files\n",
+             tree_dir_count, tree_file_count);
+    shell_print(stat_buf);
+
     last_exit_code = 0;
 }
 

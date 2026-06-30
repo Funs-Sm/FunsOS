@@ -15,8 +15,9 @@
 #include "vmm.h"
 #include "klog.h"
 #include "user.h"
+#include "ksym.h"
 
-static procfs_entry_t entries[64];
+static procfs_entry_t entries[128];
 static uint32_t entry_count;
 
 static dentry_t *procfs_root_dentry;
@@ -436,6 +437,263 @@ static int32_t schedstat_read(char *buf, uint32_t offset, uint32_t count) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  /proc/iomem                                                        */
+/* ------------------------------------------------------------------ */
+
+static int32_t iomem_read(char *buf, uint32_t offset, uint32_t count) {
+    char tmp[1024];
+    int32_t len = 0;
+
+    len += sprintf(tmp + len,
+        "00000000-00000fff : System ROM\n"
+        "000a0000-000bffff : Video RAM\n"
+        "000c0000-000c7fff : Video ROM\n"
+        "000e0000-000fffff : System ROM\n"
+        "00100000-0fffffff : System RAM\n"
+        "  00100000-00ffffff : Kernel code\n"
+        "  01000000-01ffffff : Kernel data\n"
+        "f0000000-f7ffffff : PCI Bus 0000:00\n"
+        "  f0000000-f000ffff : VGA compatible controller\n"
+        "  f0010000-f001ffff : Ethernet controller\n"
+        "fec00000-fec00fff : IO-APIC\n"
+        "fee00000-fee00fff : Local APIC\n"
+        "fffc0000-ffffffff : System ROM\n");
+
+    if (offset >= (uint32_t)len) return 0;
+    uint32_t avail = (uint32_t)len - offset;
+    if (avail > count) avail = count;
+    memcpy(buf, tmp + offset, avail);
+    return (int32_t)avail;
+}
+
+/* ------------------------------------------------------------------ */
+/*  /proc/ioports                                                      */
+/* ------------------------------------------------------------------ */
+
+static int32_t ioports_read(char *buf, uint32_t offset, uint32_t count) {
+    char tmp[1024];
+    int32_t len = 0;
+
+    len += sprintf(tmp + len,
+        "0000-001f : dma1\n"
+        "0020-0021 : pic1\n"
+        "0040-0043 : timer0\n"
+        "0050-0053 : timer1\n"
+        "0060-0060 : keyboard\n"
+        "0064-0064 : keyboard\n"
+        "0070-0071 : rtc\n"
+        "0080-008f : dma page reg\n"
+        "00a0-00a1 : pic2\n"
+        "00c0-00df : dma2\n"
+        "00f0-00ff : fpu\n"
+        "0170-0177 : ide1\n"
+        "01f0-01f7 : ide0\n"
+        "02f8-02ff : serial\n"
+        "0376-0376 : ide1\n"
+        "03c0-03df : vga+ \n"
+        "03f6-03f6 : ide0\n"
+        "03f8-03ff : serial\n");
+
+    if (offset >= (uint32_t)len) return 0;
+    uint32_t avail = (uint32_t)len - offset;
+    if (avail > count) avail = count;
+    memcpy(buf, tmp + offset, avail);
+    return (int32_t)avail;
+}
+
+/* ------------------------------------------------------------------ */
+/*  /proc/misc                                                         */
+/* ------------------------------------------------------------------ */
+
+static int32_t misc_read(char *buf, uint32_t offset, uint32_t count) {
+    char tmp[256];
+    int32_t len = 0;
+
+    len += sprintf(tmp + len,
+        " 10 misc\n"
+        " 13 input\n"
+        " 29 fb\n"
+        " 89 i2c-0\n"
+        " 90 mtd\n"
+        "126 kvm\n"
+        "130 watchdog\n"
+        "180 usb\n"
+        "189 usb_device\n"
+        "202 cpu/msr\n"
+        "203 cpu/cpuid\n"
+        "226 drm\n"
+        "245 aux\n"
+        "249 watchdog\n"
+        "250 rtc\n"
+        "251 hwrng\n"
+        "252 psaux\n"
+        "253 ptp\n"
+        "254 ppp\n");
+
+    if (offset >= (uint32_t)len) return 0;
+    uint32_t avail = (uint32_t)len - offset;
+    if (avail > count) avail = count;
+    memcpy(buf, tmp + offset, avail);
+    return (int32_t)avail;
+}
+
+/* ------------------------------------------------------------------ */
+/*  /proc/kallsyms                                                     */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    char *buf;
+    int32_t len;
+    int32_t max_len;
+} kallsyms_ctx_t;
+
+static void kallsyms_callback(ksym_entry_t *entry, void *arg) {
+    kallsyms_ctx_t *ctx = (kallsyms_ctx_t *)arg;
+    if (ctx->len + 128 >= ctx->max_len) return;
+
+    char type = '?';
+    if (entry->flags & KSYM_FLAG_FUNCTION) {
+        type = 'T';
+    } else if (entry->flags & KSYM_FLAG_DATA) {
+        type = 'D';
+    }
+
+    ctx->len += sprintf(ctx->buf + ctx->len, "%08x %c %s\n",
+        entry->addr, type, entry->name);
+}
+
+static int32_t kallsyms_read(char *buf, uint32_t offset, uint32_t count) {
+    char tmp[4096];
+    kallsyms_ctx_t ctx;
+    ctx.buf = tmp;
+    ctx.len = 0;
+    ctx.max_len = sizeof(tmp);
+
+    uint32_t sym_count = ksym_count();
+    if (sym_count == 0) {
+        ctx.len += sprintf(tmp + ctx.len,
+            "c0100000 T _start\n"
+            "c0101000 T kernel_main\n"
+            "c0200000 D kernel_stack\n"
+            "c0300000 B __bss_start\n"
+            "c0400000 T ksym_init\n"
+            "c0401000 T ksym_register\n"
+            "c0402000 T ksym_lookup\n"
+            "c0500000 T sched_init\n"
+            "c0501000 T sched_schedule\n"
+            "c0600000 T vmm_init\n"
+            "c0601000 T pmm_init\n"
+            "c0700000 T vfs_init\n"
+            "c0701000 T procfs_init\n"
+            "c0702000 T sysfs_init\n");
+    } else {
+        ksym_for_each(kallsyms_callback, &ctx);
+    }
+
+    if (offset >= (uint32_t)ctx.len) return 0;
+    uint32_t avail = (uint32_t)ctx.len - offset;
+    if (avail > count) avail = count;
+    memcpy(buf, tmp + offset, avail);
+    return (int32_t)avail;
+}
+
+/* ------------------------------------------------------------------ */
+/*  /proc/softirqs                                                     */
+/* ------------------------------------------------------------------ */
+
+static int32_t softirqs_read(char *buf, uint32_t offset, uint32_t count) {
+    char tmp[512];
+    int32_t len = 0;
+    uint32_t cpu_cnt = smp_get_cpu_count();
+
+    len += sprintf(tmp + len, "                    CPU0");
+    for (uint32_t i = 1; i < cpu_cnt && i < 8; i++) {
+        len += sprintf(tmp + len, "       CPU%u", i);
+    }
+    len += sprintf(tmp + len, "\n");
+
+    const char *softirq_names[] = {
+        "HI", "TIMER", "NET_TX", "NET_RX",
+        "BLOCK", "BLOCK_IOPOLL", "TASKLET", "SCHED",
+        "HRTIMER", "RCU"
+    };
+
+    for (int i = 0; i < 10; i++) {
+        len += sprintf(tmp + len, "%-16s:", softirq_names[i]);
+        for (uint32_t j = 0; j < cpu_cnt && j < 8; j++) {
+            len += sprintf(tmp + len, "%10u", 0);
+        }
+        len += sprintf(tmp + len, "\n");
+    }
+
+    if (offset >= (uint32_t)len) return 0;
+    uint32_t avail = (uint32_t)len - offset;
+    if (avail > count) avail = count;
+    memcpy(buf, tmp + offset, avail);
+    return (int32_t)avail;
+}
+
+/* ------------------------------------------------------------------ */
+/*  /proc/sys/kernel/ostype                                            */
+/* ------------------------------------------------------------------ */
+
+static int32_t sys_kernel_ostype_read(char *buf, uint32_t offset, uint32_t count) {
+    char tmp[64];
+    int32_t len = sprintf(tmp, "%s\n", OS_NAME);
+
+    if (offset >= (uint32_t)len) return 0;
+    uint32_t avail = (uint32_t)len - offset;
+    if (avail > count) avail = count;
+    memcpy(buf, tmp + offset, avail);
+    return (int32_t)avail;
+}
+
+/* ------------------------------------------------------------------ */
+/*  /proc/sys/kernel/osrelease                                         */
+/* ------------------------------------------------------------------ */
+
+static int32_t sys_kernel_osrelease_read(char *buf, uint32_t offset, uint32_t count) {
+    char tmp[64];
+    int32_t len = sprintf(tmp, "%s\n", KERNEL_VERSION);
+
+    if (offset >= (uint32_t)len) return 0;
+    uint32_t avail = (uint32_t)len - offset;
+    if (avail > count) avail = count;
+    memcpy(buf, tmp + offset, avail);
+    return (int32_t)avail;
+}
+
+/* ------------------------------------------------------------------ */
+/*  /proc/sys/kernel/version                                           */
+/* ------------------------------------------------------------------ */
+
+static int32_t sys_kernel_version_read(char *buf, uint32_t offset, uint32_t count) {
+    char tmp[128];
+    int32_t len = sprintf(tmp, "#1 %s\n", KERNEL_STRING);
+
+    if (offset >= (uint32_t)len) return 0;
+    uint32_t avail = (uint32_t)len - offset;
+    if (avail > count) avail = count;
+    memcpy(buf, tmp + offset, avail);
+    return (int32_t)avail;
+}
+
+/* ------------------------------------------------------------------ */
+/*  /proc/sys/kernel/hostname                                          */
+/* ------------------------------------------------------------------ */
+
+static int32_t sys_kernel_hostname_read(char *buf, uint32_t offset, uint32_t count) {
+    char tmp[64];
+    int32_t len = sprintf(tmp, "funsos\n");
+
+    if (offset >= (uint32_t)len) return 0;
+    uint32_t avail = (uint32_t)len - offset;
+    if (avail > count) avail = count;
+    memcpy(buf, tmp + offset, avail);
+    return (int32_t)avail;
+}
+
+/* ------------------------------------------------------------------ */
 /*  /proc/[pid]/status                                                 */
 /* ------------------------------------------------------------------ */
 
@@ -455,7 +713,7 @@ static int32_t pid_status_read(char *buf, uint32_t offset, uint32_t count) {
 /* ------------------------------------------------------------------ */
 
 static void procfs_add_entry(const char *name, uint32_t mode, int32_t (*read_proc)(char *, uint32_t, uint32_t)) {
-    if (entry_count >= 64) return;
+    if (entry_count >= 128) return;
     strncpy(entries[entry_count].name, name, 63);
     entries[entry_count].name[63] = '\0';
     entries[entry_count].ino = entry_count + 1;
@@ -466,7 +724,7 @@ static void procfs_add_entry(const char *name, uint32_t mode, int32_t (*read_pro
 }
 
 int32_t procfs_create_pid_entry(uint32_t pid) {
-    if (entry_count >= 64) return -1;
+    if (entry_count >= 128) return -1;
 
     char name[64];
     sprintf(name, "%u/status", pid);
@@ -497,6 +755,15 @@ int32_t procfs_init(void) {
     procfs_add_entry("swaps", FILE_MODE_READ, swaps_read);
     procfs_add_entry("vmstat", FILE_MODE_READ, vmstat_read);
     procfs_add_entry("schedstat", FILE_MODE_READ, schedstat_read);
+    procfs_add_entry("iomem", FILE_MODE_READ, iomem_read);
+    procfs_add_entry("ioports", FILE_MODE_READ, ioports_read);
+    procfs_add_entry("misc", FILE_MODE_READ, misc_read);
+    procfs_add_entry("kallsyms", FILE_MODE_READ, kallsyms_read);
+    procfs_add_entry("softirqs", FILE_MODE_READ, softirqs_read);
+    procfs_add_entry("sys/kernel/ostype", FILE_MODE_READ, sys_kernel_ostype_read);
+    procfs_add_entry("sys/kernel/osrelease", FILE_MODE_READ, sys_kernel_osrelease_read);
+    procfs_add_entry("sys/kernel/version", FILE_MODE_READ, sys_kernel_version_read);
+    procfs_add_entry("sys/kernel/hostname", FILE_MODE_READ, sys_kernel_hostname_read);
 
     uint32_t pid;
     for (pid = 0; pid < PROCFS_MAX_PROCS; pid++) {

@@ -363,6 +363,93 @@ static int extract_identifier(const char *s, char *out, int max_len)
     return i;
 }
 
+/* 解析类型字符串 */
+static uint32_t parse_type(const char *type_str)
+{
+    if (str_prefix_ci(type_str, "INT") || str_prefix_ci(type_str, "INTEGER"))
+        return FUNDB_TYPE_INT;
+    if (str_prefix_ci(type_str, "FLOAT") || str_prefix_ci(type_str, "DOUBLE") ||
+        str_prefix_ci(type_str, "REAL"))
+        return FUNDB_TYPE_FLOAT;
+    if (str_prefix_ci(type_str, "TEXT") || str_prefix_ci(type_str, "VARCHAR") ||
+        str_prefix_ci(type_str, "CHAR") || str_prefix_ci(type_str, "STRING"))
+        return FUNDB_TYPE_TEXT;
+    if (str_prefix_ci(type_str, "BLOB") || str_prefix_ci(type_str, "BINARY"))
+        return FUNDB_TYPE_BLOB;
+    if (str_prefix_ci(type_str, "BOOL") || str_prefix_ci(type_str, "BOOLEAN"))
+        return FUNDB_TYPE_BOOL;
+    if (str_prefix_ci(type_str, "DATE") || str_prefix_ci(type_str, "DATETIME") ||
+        str_prefix_ci(type_str, "TIME"))
+        return FUNDB_TYPE_DATE;
+    return FUNDB_TYPE_TEXT;
+}
+
+/* 解析 CREATE TABLE 的列定义 */
+static int parse_create_columns(const char *sql, sql_statement_t *stmt)
+{
+    const char *p = sql;
+    stmt->new_col_count = 0;
+
+    while (*p && *p != ';') {
+        p = skip_spaces(p);
+        if (!*p || *p == ')') break;
+
+        if (stmt->new_col_count >= FUNDB_MAX_COLUMNS) break;
+
+        fundb_column_t *col = &stmt->new_columns[stmt->new_col_count];
+        memset(col, 0, sizeof(fundb_column_t));
+
+        p += extract_identifier(p, col->name, sizeof(col->name));
+        p = skip_spaces(p);
+
+        char type_str[32];
+        int ti = 0;
+        while (*p && *p != ' ' && *p != '\t' && *p != ',' &&
+               *p != '(' && *p != ')' && *p != ';' && ti < 31) {
+            type_str[ti++] = *p++;
+        }
+        type_str[ti] = '\0';
+        col->type = parse_type(type_str);
+
+        p = skip_spaces(p);
+        if (*p == '(') {
+            p++;
+            col->size = 0;
+            while (*p >= '0' && *p <= '9') {
+                col->size = col->size * 10 + (*p - '0');
+                p++;
+            }
+            if (*p == ')') p++;
+        }
+
+        while (*p && *p != ',' && *p != ')' && *p != ';') {
+            p = skip_spaces(p);
+            if (str_prefix_ci(p, "NOT NULL")) {
+                col->not_null = 1;
+                p += 8;
+            } else if (str_prefix_ci(p, "PRIMARY KEY")) {
+                col->primary_key = 1;
+                p += 11;
+            } else if (str_prefix_ci(p, "AUTO_INCREMENT") || str_prefix_ci(p, "AUTOINCREMENT")) {
+                col->auto_increment = 1;
+                p += 14;
+            } else if (str_prefix_ci(p, "DEFAULT")) {
+                p += 7;
+                p = skip_spaces(p);
+                col->default_value = 0;
+            } else if (*p) {
+                p++;
+            }
+        }
+
+        stmt->new_col_count++;
+
+        if (*p == ',') p++;
+    }
+
+    return stmt->new_col_count > 0 ? FUNDB_OK : FUNDB_ERROR;
+}
+
 /* 解析 SQL 语句 */
 static int sql_parse(const char *sql, sql_statement_t *stmt)
 {
@@ -474,9 +561,12 @@ static int sql_parse(const char *sql, sql_statement_t *stmt)
         stmt->type = SQL_CREATE;
         p = skip_spaces(p + 12);
         p += extract_identifier(p, stmt->table, sizeof(stmt->table));
+        p = skip_spaces(p);
 
-        /* 简化：不解析列定义，使用默认列 */
-        stmt->new_col_count = 0;
+        if (*p == '(') {
+            p++;
+            parse_create_columns(p, stmt);
+        }
 
         return FUNDB_OK;
     }
@@ -489,6 +579,318 @@ static int sql_parse(const char *sql, sql_statement_t *stmt)
     }
 
     return FUNDB_ERROR;
+}
+
+/* ---- WHERE 条件操作符 ---- */
+
+#define OP_EQ    1  /* = */
+#define OP_NE    2  /* != or <> */
+#define OP_GT    3  /* > */
+#define OP_LT    4  /* < */
+#define OP_GE    5  /* >= */
+#define OP_LE    6  /* <= */
+#define OP_LIKE  7  /* LIKE */
+
+/* WHERE 条件结构 */
+typedef struct {
+    char column[64];
+    uint32_t op;
+    char value[256];
+    uint8_t has_next;
+    uint32_t logical_op;  /* 0=none, 1=AND, 2=OR */
+} where_condition_t;
+
+/* ---- 查找列索引 ---- */
+
+static int find_column_index(fundb_table_t *table, const char *name)
+{
+    for (uint32_t i = 0; i < table->col_count; i++) {
+        if (strcmp(table->columns[i].name, name) == 0)
+            return (int)i;
+    }
+    return -1;
+}
+
+/* ---- 解析值字符串为实际数据 ---- */
+
+static int parse_value(const char *str, uint32_t *out_type, void **out_val, uint32_t *out_size)
+{
+    if (!str || !*str) {
+        *out_type = FUNDB_TYPE_NULL;
+        *out_val = NULL;
+        *out_size = 0;
+        return FUNDB_OK;
+    }
+
+    const char *p = str;
+    while (*p == ' ' || *p == '\t') p++;
+
+    if (*p == '\'') {
+        p++;
+        char buf[256];
+        int i = 0;
+        while (*p && *p != '\'' && i < 255) buf[i++] = *p++;
+        buf[i] = '\0';
+
+        *out_type = FUNDB_TYPE_TEXT;
+        *out_size = i + 1;
+        *out_val = fundb_alloc(*out_size);
+        if (*out_val) memcpy(*out_val, buf, *out_size);
+        return FUNDB_OK;
+    }
+
+    if ((*p >= '0' && *p <= '9') || *p == '-') {
+        int is_float = 0;
+        const char *q = p;
+        while (*q) {
+            if (*q == '.') is_float = 1;
+            q++;
+        }
+
+        if (is_float) {
+            *out_type = FUNDB_TYPE_FLOAT;
+            *out_size = sizeof(double);
+            *out_val = fundb_alloc(*out_size);
+            if (*out_val) {
+                double val = strtod(p, NULL);
+                memcpy(*out_val, &val, sizeof(double));
+            }
+        } else {
+            *out_type = FUNDB_TYPE_INT;
+            *out_size = sizeof(int32_t);
+            *out_val = fundb_alloc(*out_size);
+            if (*out_val) {
+                int32_t val = atoi(p);
+                memcpy(*out_val, &val, sizeof(int32_t));
+            }
+        }
+        return FUNDB_OK;
+    }
+
+    if (str_prefix_ci(p, "NULL")) {
+        *out_type = FUNDB_TYPE_NULL;
+        *out_val = NULL;
+        *out_size = 0;
+        return FUNDB_OK;
+    }
+
+    if (str_prefix_ci(p, "TRUE") || str_prefix_ci(p, "FALSE")) {
+        *out_type = FUNDB_TYPE_BOOL;
+        *out_size = sizeof(uint8_t);
+        *out_val = fundb_alloc(*out_size);
+        if (*out_val) {
+            uint8_t val = str_prefix_ci(p, "TRUE") ? 1 : 0;
+            *(uint8_t *)*out_val = val;
+        }
+        return FUNDB_OK;
+    }
+
+    *out_type = FUNDB_TYPE_TEXT;
+    *out_size = strlen(p) + 1;
+    *out_val = fundb_alloc(*out_size);
+    if (*out_val) memcpy(*out_val, p, *out_size);
+    return FUNDB_OK;
+}
+
+/* ---- 比较两个值 ---- */
+
+static int compare_values(uint32_t type1, void *val1, uint32_t size1,
+                          uint32_t type2, void *val2, uint32_t size2)
+{
+    if (type1 == FUNDB_TYPE_NULL || type2 == FUNDB_TYPE_NULL)
+        return 0;
+
+    if (type1 == FUNDB_TYPE_INT && type2 == FUNDB_TYPE_INT) {
+        int32_t a = *(int32_t *)val1;
+        int32_t b = *(int32_t *)val2;
+        if (a == b) return 0;
+        return (a < b) ? -1 : 1;
+    }
+
+    if ((type1 == FUNDB_TYPE_INT || type1 == FUNDB_TYPE_FLOAT) &&
+        (type2 == FUNDB_TYPE_INT || type2 == FUNDB_TYPE_FLOAT)) {
+        double a = (type1 == FUNDB_TYPE_INT) ? (double)*(int32_t *)val1 : *(double *)val1;
+        double b = (type2 == FUNDB_TYPE_INT) ? (double)*(int32_t *)val2 : *(double *)val2;
+        if (a == b) return 0;
+        return (a < b) ? -1 : 1;
+    }
+
+    if (type1 == FUNDB_TYPE_TEXT && type2 == FUNDB_TYPE_TEXT) {
+        return strcmp((char *)val1, (char *)val2);
+    }
+
+    return 0;
+}
+
+/* ---- LIKE 模式匹配 ---- */
+
+static int like_match(const char *str, const char *pattern)
+{
+    if (*pattern == '\0') return *str == '\0';
+
+    if (*pattern == '%') {
+        while (*str) {
+            if (like_match(str, pattern + 1)) return 1;
+            str++;
+        }
+        return like_match(str, pattern + 1);
+    }
+
+    if (*pattern == '_') {
+        if (*str == '\0') return 0;
+        return like_match(str + 1, pattern + 1);
+    }
+
+    if (*str == '\0') return 0;
+    if (*str != *pattern) return 0;
+    return like_match(str + 1, pattern + 1);
+}
+
+/* ---- 解析单个 WHERE 条件 ---- */
+
+static int parse_single_condition(const char *clause, where_condition_t *cond)
+{
+    const char *p = clause;
+    while (*p == ' ' || *p == '\t') p++;
+
+    int i = 0;
+    while (*p && *p != ' ' && *p != '\t' && *p != '=' && *p != '!' &&
+           *p != '<' && *p != '>' && i < 63) {
+        cond->column[i++] = *p++;
+    }
+    cond->column[i] = '\0';
+
+    while (*p == ' ' || *p == '\t') p++;
+
+    if (*p == '=') {
+        cond->op = OP_EQ;
+        p++;
+    } else if (*p == '!' && *(p + 1) == '=') {
+        cond->op = OP_NE;
+        p += 2;
+    } else if (*p == '<' && *(p + 1) == '>') {
+        cond->op = OP_NE;
+        p += 2;
+    } else if (*p == '>' && *(p + 1) == '=') {
+        cond->op = OP_GE;
+        p += 2;
+    } else if (*p == '<' && *(p + 1) == '=') {
+        cond->op = OP_LE;
+        p += 2;
+    } else if (*p == '>') {
+        cond->op = OP_GT;
+        p++;
+    } else if (*p == '<') {
+        cond->op = OP_LT;
+        p++;
+    } else {
+        return FUNDB_ERROR;
+    }
+
+    while (*p == ' ' || *p == '\t') p++;
+
+    i = 0;
+    if (*p == '\'') {
+        p++;
+        cond->value[i++] = '\'';
+        while (*p && *p != '\'' && i < 254) cond->value[i++] = *p++;
+        if (*p == '\'') p++;
+        cond->value[i] = '\'';
+        cond->value[i + 1] = '\0';
+    } else {
+        while (*p && *p != ' ' && *p != '\t' && *p != ';' && i < 254) {
+            cond->value[i++] = *p++;
+        }
+        cond->value[i] = '\0';
+    }
+
+    while (*p == ' ' || *p == '\t') p++;
+
+    if (str_prefix_ci(p, "AND")) {
+        cond->has_next = 1;
+        cond->logical_op = 1;
+    } else if (str_prefix_ci(p, "OR")) {
+        cond->has_next = 1;
+        cond->logical_op = 2;
+    } else {
+        cond->has_next = 0;
+    }
+
+    return FUNDB_OK;
+}
+
+/* ---- 评估单个条件 ---- */
+
+static int evaluate_single_condition(fundb_table_t *table, fundb_row_t *row, where_condition_t *cond)
+{
+    int col_idx = find_column_index(table, cond->column);
+    if (col_idx < 0) return 0;
+
+    uint32_t val_type;
+    void *val_data;
+    uint32_t val_size;
+    parse_value(cond->value, &val_type, &val_data, &val_size);
+
+    int cmp = compare_values(row->types[col_idx], row->values[col_idx], row->sizes[col_idx],
+                             val_type, val_data, val_size);
+
+    int result = 0;
+    switch (cond->op) {
+    case OP_EQ:  result = (cmp == 0); break;
+    case OP_NE:  result = (cmp != 0); break;
+    case OP_GT:  result = (cmp > 0); break;
+    case OP_LT:  result = (cmp < 0); break;
+    case OP_GE:  result = (cmp >= 0); break;
+    case OP_LE:  result = (cmp <= 0); break;
+    case OP_LIKE:
+        if (row->types[col_idx] == FUNDB_TYPE_TEXT && val_type == FUNDB_TYPE_TEXT)
+            result = like_match((char *)row->values[col_idx], (char *)val_data);
+        break;
+    }
+
+    if (val_data) fundb_free_mem(val_data);
+    return result;
+}
+
+/* ---- 评估整个 WHERE 子句 ---- */
+
+static int evaluate_where(fundb_table_t *table, fundb_row_t *row, const char *where_clause)
+{
+    if (!where_clause || !*where_clause) return 1;
+
+    const char *p = where_clause;
+    int result = 1;
+    int first = 1;
+    uint32_t logical_op = 0;
+
+    while (*p) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+
+        where_condition_t cond;
+        if (parse_single_condition(p, &cond) != FUNDB_OK) break;
+
+        int cond_result = evaluate_single_condition(table, row, &cond);
+
+        if (first) {
+            result = cond_result;
+            first = 0;
+        } else if (logical_op == 1) {
+            result = result && cond_result;
+        } else if (logical_op == 2) {
+            result = result || cond_result;
+        }
+
+        if (!cond.has_next) break;
+        logical_op = cond.logical_op;
+
+        while (*p && *p != ' ' && *p != '\t') p++;
+        while (*p == ' ' || *p == '\t') p++;
+        if (str_prefix_ci(p, "AND")) p += 3;
+        else if (str_prefix_ci(p, "OR")) p += 2;
+    }
+
+    return result;
 }
 
 /* ---- 查找表 ---- */
@@ -624,6 +1026,84 @@ void fundb_init(void)
     klog_info("FunDB: Database engine initialized");
 }
 
+/* 从磁盘加载所有表 */
+static int fundb_load_tables(fundb_db_t *db)
+{
+    char dir_path[256];
+    int pos = 0;
+    for (int i = 0; FUNDB_DB_PATH[i]; i++) dir_path[pos++] = FUNDB_DB_PATH[i];
+    for (int i = 0; db->path[i] && db->path[i] != '.' && i < 200; i++)
+        dir_path[pos++] = db->path[i];
+    dir_path[pos] = '\0';
+
+    vfs_mkdir(dir_path, 0x1FF);
+
+    file_t *dir = NULL;
+    if (vfs_opendir(dir_path, &dir) != 0 || !dir)
+        return FUNDB_OK;
+
+    vfs_dirent_t entry;
+    while (vfs_readdir(dir, &entry) == 0) {
+        if (entry.name[0] == '.') continue;
+
+        int len = 0;
+        while (entry.name[len]) len++;
+        if (len < 5) continue;
+        if (entry.name[len - 4] != '.' || entry.name[len - 3] != 't' ||
+            entry.name[len - 2] != 'b' || entry.name[len - 1] != 'l')
+            continue;
+
+        if (db->table_count >= FUNDB_MAX_TABLES) break;
+
+        fundb_table_t *table = &db->tables[db->table_count];
+        memset(table, 0, sizeof(fundb_table_t));
+
+        int name_len = len - 4;
+        if (name_len > 63) name_len = 63;
+        for (int i = 0; i < name_len; i++)
+            table->name[i] = entry.name[i];
+        table->name[name_len] = '\0';
+
+        if (fundb_read_table(db, table) == FUNDB_OK) {
+            table->dirty = 0;
+
+            table->next_auto_id = 1;
+            for (uint32_t i = 0; i < table->col_count; i++) {
+                if (table->columns[i].auto_increment || table->columns[i].primary_key) {
+                    uint32_t max_id = 0;
+                    for (uint32_t r = 0; r < table->row_count; r++) {
+                        if (table->rows[r].types[i] == FUNDB_TYPE_INT && table->rows[r].values[i]) {
+                            uint32_t val = *(uint32_t *)table->rows[r].values[i];
+                            if (val > max_id) max_id = val;
+                        }
+                    }
+                    table->next_auto_id = max_id + 1;
+                    break;
+                }
+            }
+
+            for (uint32_t i = 0; i < table->col_count; i++) {
+                if (table->columns[i].primary_key) {
+                    char idx_name[128];
+                    idx_name[0] = 'p'; idx_name[1] = 'k'; idx_name[2] = '_';
+                    int p = 3;
+                    for (int j = 0; table->name[j] && p < 120; j++)
+                        idx_name[p++] = table->name[j];
+                    idx_name[p] = '\0';
+                    fundb_create_index((fundb_handle_t)db, table->name,
+                                       table->columns[i].name, idx_name);
+                    break;
+                }
+            }
+
+            db->table_count++;
+        }
+    }
+
+    vfs_closedir(dir);
+    return FUNDB_OK;
+}
+
 /* 打开数据库 */
 fundb_handle_t fundb_open(const char *path)
 {
@@ -644,14 +1124,14 @@ fundb_handle_t fundb_open(const char *path)
     db->index_count = 0;
     db->last_error = FUNDB_OK;
 
-    /* 初始化 WAL */
     wal_init(db);
 
-    /* 注册数据库 */
+    fundb_load_tables(db);
+
     g_databases[g_db_count] = db;
     g_db_count++;
 
-    klog_info("FunDB: Opened database: %s", path);
+    klog_info("FunDB: Opened database: %s (%u tables)", path, db->table_count);
     return (fundb_handle_t)db;
 }
 
@@ -876,17 +1356,34 @@ int fundb_update(fundb_handle_t db, const char *table_name,
     fundb_table_t *table = find_table(d, table_name);
     if (!table) return FUNDB_NO_TABLE;
 
-    /* 简化实现：更新所有匹配行 */
+    if (!row) return FUNDB_ERROR;
+
     int updated = 0;
     for (uint32_t i = 0; i < table->row_count; i++) {
-        /* WAL 记录 */
+        if (!evaluate_where(table, &table->rows[i], where_clause))
+            continue;
+
         if (d->in_transaction) {
             wal_append(d, WAL_OP_UPDATE, table_name, i,
                        &table->rows[i], table->col_count);
         }
 
-        /* 更新行数据 */
-        fundb_row_copy(&table->rows[i], row, table->col_count);
+        for (uint32_t j = 0; j < table->col_count; j++) {
+            if (row->types[j] != FUNDB_TYPE_NULL) {
+                if (table->rows[i].values[j]) {
+                    fundb_free_mem(table->rows[i].values[j]);
+                    table->rows[i].values[j] = NULL;
+                }
+                table->rows[i].types[j] = row->types[j];
+                table->rows[i].sizes[j] = row->sizes[j];
+                if (row->values[j] && row->sizes[j] > 0) {
+                    table->rows[i].values[j] = fundb_alloc(row->sizes[j]);
+                    if (table->rows[i].values[j]) {
+                        memcpy(table->rows[i].values[j], row->values[j], row->sizes[j]);
+                    }
+                }
+            }
+        }
         updated++;
     }
 
@@ -901,21 +1398,69 @@ int fundb_delete(fundb_handle_t db, const char *table_name, const char *where_cl
     fundb_table_t *table = find_table(d, table_name);
     if (!table) return FUNDB_NO_TABLE;
 
-    /* 简化实现：删除所有匹配行 */
-    if (table->row_count > 0) {
-        /* WAL 记录 */
+    int deleted = 0;
+    for (int i = (int)table->row_count - 1; i >= 0; i--) {
+        if (!evaluate_where(table, &table->rows[i], where_clause))
+            continue;
+
         if (d->in_transaction) {
-            wal_append(d, WAL_OP_DELETE, table_name, 0,
-                       &table->rows[0], table->col_count);
+            wal_append(d, WAL_OP_DELETE, table_name, i,
+                       &table->rows[i], table->col_count);
         }
 
-        /* 释放最后一行 */
-        fundb_row_free(&table->rows[table->row_count - 1], table->col_count);
+        fundb_row_free(&table->rows[i], table->col_count);
+
+        for (uint32_t k = i; k < table->row_count - 1; k++) {
+            table->rows[k] = table->rows[k + 1];
+        }
         table->row_count--;
-        table->dirty = 1;
+        deleted++;
     }
 
+    if (deleted > 0)
+        table->dirty = 1;
+
     return FUNDB_OK;
+}
+
+/* 排序比较函数的上下文 */
+typedef struct {
+    fundb_table_t *table;
+    int sort_col;
+    int ascending;
+} sort_ctx_t;
+
+/* 行交换 */
+static void swap_rows(fundb_row_t *a, fundb_row_t *b, uint32_t col_count)
+{
+    fundb_row_t tmp = *a;
+    *a = *b;
+    *b = tmp;
+}
+
+/* 对结果集进行排序 */
+static void sort_result(fundb_result_t *result, int sort_col, int ascending)
+{
+    if (sort_col < 0 || (uint32_t)sort_col >= result->col_count)
+        return;
+
+    for (uint32_t i = 0; i < result->row_count; i++) {
+        for (uint32_t j = i + 1; j < result->row_count; j++) {
+            int cmp = compare_values(
+                result->rows[i].types[sort_col],
+                result->rows[i].values[sort_col],
+                result->rows[i].sizes[sort_col],
+                result->rows[j].types[sort_col],
+                result->rows[j].values[sort_col],
+                result->rows[j].sizes[sort_col]
+            );
+
+            int swap = ascending ? (cmp > 0) : (cmp < 0);
+            if (swap) {
+                swap_rows(&result->rows[i], &result->rows[j], result->col_count);
+            }
+        }
+    }
 }
 
 /* 查询行 */
@@ -935,21 +1480,170 @@ fundb_result_t *fundb_select(fundb_handle_t db, const char *table_name,
     result->columns = (fundb_column_t *)fundb_alloc(sizeof(fundb_column_t) * table->col_count);
     memcpy(result->columns, table->columns, sizeof(fundb_column_t) * table->col_count);
 
-    /* 确定返回行数 */
-    uint32_t count = table->row_count;
+    /* 临时数组存储匹配的行索引 */
+    uint32_t *matched = (uint32_t *)fundb_alloc(sizeof(uint32_t) * table->row_count);
+    uint32_t matched_count = 0;
+
+    if (matched) {
+        /* 应用 WHERE 条件过滤 */
+        for (uint32_t i = 0; i < table->row_count; i++) {
+            if (evaluate_where(table, &table->rows[i], where_clause)) {
+                matched[matched_count++] = i;
+            }
+        }
+    } else {
+        /* 内存不足时，回退到所有行 */
+        matched_count = table->row_count;
+    }
+
+    /* 确定返回行数（应用 LIMIT） */
+    uint32_t count = matched_count;
     if (limit > 0 && limit < count) count = limit;
 
     result->row_count = count;
     result->row_capacity = count;
     result->rows = (fundb_row_t *)fundb_alloc(sizeof(fundb_row_t) * count);
 
-    /* 复制行数据 */
+    if (!result->rows) {
+        if (matched) fundb_free_mem(matched);
+        fundb_free_result(result);
+        return NULL;
+    }
+
+    /* 复制匹配的行数据 */
     for (uint32_t i = 0; i < count; i++) {
+        uint32_t src_idx = matched ? matched[i] : i;
         fundb_row_init(&result->rows[i], table->col_count);
-        fundb_row_copy(&result->rows[i], &table->rows[i], table->col_count);
+        fundb_row_copy(&result->rows[i], &table->rows[src_idx], table->col_count);
+    }
+
+    if (matched) fundb_free_mem(matched);
+
+    /* 应用 ORDER BY 排序 */
+    if (order_by && *order_by) {
+        char col_name[64];
+        int ascending = 1;
+        const char *p = order_by;
+
+        while (*p == ' ' || *p == '\t') p++;
+
+        int i = 0;
+        while (*p && *p != ' ' && *p != '\t' && i < 63) {
+            col_name[i++] = *p++;
+        }
+        col_name[i] = '\0';
+
+        while (*p == ' ' || *p == '\t') p++;
+
+        if (str_prefix_ci(p, "DESC")) {
+            ascending = 0;
+        }
+
+        int sort_col = find_column_index(table, col_name);
+        if (sort_col >= 0) {
+            sort_result(result, sort_col, ascending);
+        }
     }
 
     return result;
+}
+
+/* 解析逗号分隔的值列表 */
+static int parse_values_list(const char *values_str, fundb_row_t *row,
+                             fundb_table_t *table)
+{
+    const char *p = values_str;
+    uint32_t col_idx = 0;
+
+    while (*p && col_idx < table->col_count) {
+        while (*p == ' ' || *p == '\t' || *p == ',') p++;
+        if (!*p || *p == ';' || *p == ')') break;
+
+        char val_str[256];
+        int vi = 0;
+
+        if (*p == '\'') {
+            p++;
+            val_str[vi++] = '\'';
+            while (*p && *p != '\'' && vi < 254) val_str[vi++] = *p++;
+            if (*p == '\'') p++;
+            val_str[vi] = '\'';
+            val_str[vi + 1] = '\0';
+        } else {
+            while (*p && *p != ',' && *p != ' ' && *p != '\t' &&
+                   *p != ';' && *p != ')' && vi < 254) {
+                val_str[vi++] = *p++;
+            }
+            val_str[vi] = '\0';
+        }
+
+        uint32_t val_type;
+        void *val_data;
+        uint32_t val_size;
+        parse_value(val_str, &val_type, &val_data, &val_size);
+
+        row->types[col_idx] = val_type;
+        row->sizes[col_idx] = val_size;
+        row->values[col_idx] = val_data;
+
+        col_idx++;
+    }
+
+    return FUNDB_OK;
+}
+
+/* 解析 UPDATE SET 子句 */
+static int parse_set_clause(const char *set_str, fundb_row_t *row,
+                            fundb_table_t *table)
+{
+    const char *p = set_str;
+
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == ',') p++;
+        if (!*p || *p == ';') break;
+
+        char col_name[64];
+        int ci = 0;
+        while (*p && *p != ' ' && *p != '\t' && *p != '=' && ci < 63) {
+            col_name[ci++] = *p++;
+        }
+        col_name[ci] = '\0';
+
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '=') p++;
+        while (*p == ' ' || *p == '\t') p++;
+
+        char val_str[256];
+        int vi = 0;
+        if (*p == '\'') {
+            p++;
+            val_str[vi++] = '\'';
+            while (*p && *p != '\'' && vi < 254) val_str[vi++] = *p++;
+            if (*p == '\'') p++;
+            val_str[vi] = '\'';
+            val_str[vi + 1] = '\0';
+        } else {
+            while (*p && *p != ',' && *p != ' ' && *p != '\t' &&
+                   *p != ';' && vi < 254) {
+                val_str[vi++] = *p++;
+            }
+            val_str[vi] = '\0';
+        }
+
+        int col_idx = find_column_index(table, col_name);
+        if (col_idx >= 0) {
+            uint32_t val_type;
+            void *val_data;
+            uint32_t val_size;
+            parse_value(val_str, &val_type, &val_data, &val_size);
+
+            row->types[col_idx] = val_type;
+            row->sizes[col_idx] = val_size;
+            row->values[col_idx] = val_data;
+        }
+    }
+
+    return FUNDB_OK;
 }
 
 /* 执行 SQL 查询 */
@@ -965,20 +1659,36 @@ fundb_result_t *fundb_query(fundb_handle_t db, const char *sql)
                            stmt.where_clause, stmt.order_by, stmt.limit);
 
     case SQL_INSERT: {
-        /* 简化：创建一个空行并插入 */
         fundb_table_t *table = find_table((fundb_db_t *)db, stmt.table);
         if (!table) return NULL;
 
         fundb_row_t row;
         fundb_row_init(&row, table->col_count);
+
+        if (stmt.values[0]) {
+            parse_values_list(stmt.values, &row, table);
+        }
+
         fundb_insert(db, stmt.table, &row);
         fundb_row_free(&row, table->col_count);
         return NULL;
     }
 
-    case SQL_UPDATE:
-        fundb_update(db, stmt.table, stmt.where_clause, NULL);
+    case SQL_UPDATE: {
+        fundb_table_t *table = find_table((fundb_db_t *)db, stmt.table);
+        if (!table) return NULL;
+
+        fundb_row_t row;
+        fundb_row_init(&row, table->col_count);
+
+        if (stmt.values[0]) {
+            parse_set_clause(stmt.values, &row, table);
+        }
+
+        fundb_update(db, stmt.table, stmt.where_clause, &row);
+        fundb_row_free(&row, table->col_count);
         return NULL;
+    }
 
     case SQL_DELETE:
         fundb_delete(db, stmt.table, stmt.where_clause);
