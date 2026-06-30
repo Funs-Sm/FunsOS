@@ -1032,6 +1032,7 @@ static ast_node_t *parse_stmt(parser_t *p) {
 #define CI_MAX_VARS    128
 #define CI_MAX_FUNCS   64
 #define CI_MAX_STRINGS 64
+#define CI_MAX_STEPS   100000
 
 typedef enum {
     VAL_INT, VAL_PTR, VAL_STR
@@ -1069,6 +1070,9 @@ typedef struct {
     int scope_depth;
     /* Error reporting */
     int error_line;
+    /* Step counter for infinite loop protection */
+    uint32_t step_count;
+    int step_limit_hit;
 } interp_t;
 
 static interp_t ci_interp;
@@ -1252,6 +1256,16 @@ static void ci_printf(ast_node_t *args) {
 static int32_t eval_expr(ast_node_t *node) {
     if (!node) return 0;
 
+    ci_interp.step_count++;
+    if (ci_interp.step_count >= CI_MAX_STEPS) {
+        if (!ci_interp.step_limit_hit) {
+            ci_interp.step_limit_hit = 1;
+            printf("\n[C Interp] Error: step limit exceeded (%d steps) - possible infinite loop\n",
+                   CI_MAX_STEPS);
+        }
+        return 0;
+    }
+
     switch (node->type) {
         case AST_NUMBER:
         case AST_CHAR_LIT:
@@ -1392,6 +1406,156 @@ static int32_t eval_expr(ast_node_t *node) {
                 if (node->body) {
                     int32_t v = eval_expr(node->body);
                     return abs(v);
+                }
+                return 0;
+            }
+            if (strcmp(fname, "puts") == 0) {
+                if (node->body) {
+                    int32_t v = eval_expr(node->body);
+                    if (v) {
+                        printf("%s\n", (const char *)v);
+                    }
+                }
+                return 0;
+            }
+            if (strcmp(fname, "putchar") == 0) {
+                if (node->body) {
+                    int32_t c = eval_expr(node->body);
+                    putchar(c);
+                    return c;
+                }
+                return 0;
+            }
+            if (strcmp(fname, "strcpy") == 0) {
+                if (node->body && node->body->next) {
+                    int32_t dest = eval_expr(node->body);
+                    int32_t src = eval_expr(node->body->next);
+                    if (dest && src) {
+                        strcpy((char *)dest, (const char *)src);
+                    }
+                    return dest;
+                }
+                return 0;
+            }
+            if (strcmp(fname, "strcmp") == 0) {
+                if (node->body && node->body->next) {
+                    int32_t a = eval_expr(node->body);
+                    int32_t b = eval_expr(node->body->next);
+                    if (a && b) {
+                        return strcmp((const char *)a, (const char *)b);
+                    }
+                }
+                return 0;
+            }
+            if (strcmp(fname, "strcat") == 0) {
+                if (node->body && node->body->next) {
+                    int32_t dest = eval_expr(node->body);
+                    int32_t src = eval_expr(node->body->next);
+                    if (dest && src) {
+                        strcat((char *)dest, (const char *)src);
+                    }
+                    return dest;
+                }
+                return 0;
+            }
+            if (strcmp(fname, "memset") == 0) {
+                if (node->body && node->body->next && node->body->next->next) {
+                    int32_t ptr = eval_expr(node->body);
+                    int32_t val = eval_expr(node->body->next);
+                    int32_t num = eval_expr(node->body->next->next);
+                    if (ptr && num > 0) {
+                        memset((void *)ptr, val, (uint32_t)num);
+                    }
+                    return ptr;
+                }
+                return 0;
+            }
+            if (strcmp(fname, "memcpy") == 0) {
+                if (node->body && node->body->next && node->body->next->next) {
+                    int32_t dest = eval_expr(node->body);
+                    int32_t src = eval_expr(node->body->next);
+                    int32_t num = eval_expr(node->body->next->next);
+                    if (dest && src && num > 0) {
+                        memcpy((void *)dest, (const void *)src, (uint32_t)num);
+                    }
+                    return dest;
+                }
+                return 0;
+            }
+            if (strcmp(fname, "rand") == 0) {
+                return (int32_t)rand();
+            }
+            if (strcmp(fname, "srand") == 0) {
+                if (node->body) {
+                    int32_t seed = eval_expr(node->body);
+                    srand((unsigned int)seed);
+                }
+                return 0;
+            }
+            if (strcmp(fname, "isdigit") == 0) {
+                if (node->body) {
+                    int32_t c = eval_expr(node->body);
+                    return (c >= '0' && c <= '9') ? 1 : 0;
+                }
+                return 0;
+            }
+            if (strcmp(fname, "isalpha") == 0) {
+                if (node->body) {
+                    int32_t c = eval_expr(node->body);
+                    return ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) ? 1 : 0;
+                }
+                return 0;
+            }
+            if (strcmp(fname, "toupper") == 0) {
+                if (node->body) {
+                    int32_t c = eval_expr(node->body);
+                    if (c >= 'a' && c <= 'z') return c - 32;
+                    return c;
+                }
+                return 0;
+            }
+            if (strcmp(fname, "tolower") == 0) {
+                if (node->body) {
+                    int32_t c = eval_expr(node->body);
+                    if (c >= 'A' && c <= 'Z') return c + 32;
+                    return c;
+                }
+                return 0;
+            }
+            if (strcmp(fname, "sqrt") == 0) {
+                if (node->body) {
+                    int32_t v = eval_expr(node->body);
+                    if (v <= 0) return 0;
+                    int32_t x = v;
+                    int32_t y = (x + 1) / 2;
+                    while (y < x) { x = y; y = (x + v / x) / 2; }
+                    return x;
+                }
+                return 0;
+            }
+            if (strcmp(fname, "pow") == 0) {
+                if (node->body && node->body->next) {
+                    int32_t base = eval_expr(node->body);
+                    int32_t exp = eval_expr(node->body->next);
+                    int32_t result = 1;
+                    for (int i = 0; i < exp; i++) result *= base;
+                    return result;
+                }
+                return 0;
+            }
+            if (strcmp(fname, "min") == 0) {
+                if (node->body && node->body->next) {
+                    int32_t a = eval_expr(node->body);
+                    int32_t b = eval_expr(node->body->next);
+                    return (a < b) ? a : b;
+                }
+                return 0;
+            }
+            if (strcmp(fname, "max") == 0) {
+                if (node->body && node->body->next) {
+                    int32_t a = eval_expr(node->body);
+                    int32_t b = eval_expr(node->body->next);
+                    return (a > b) ? a : b;
                 }
                 return 0;
             }

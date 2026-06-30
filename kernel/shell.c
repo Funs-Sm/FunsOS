@@ -822,7 +822,7 @@ static void cmd_wc(const char *file);
 static void cmd_diff(const char *f1, const char *f2);
 static void cmd_sort(const char *file);
 static void cmd_uniq(const char *file);
-static void cmd_grep(const char *pattern, const char *file);
+static void cmd_grep(const char *pattern, const char *file, const char *opts);
 static void cmd_replace(const char *old_text, const char *new_text, const char *file);
 static void cmd_chmod(const char *mode_str, const char *file);
 static void cmd_chown(const char *user, const char *file);
@@ -4233,11 +4233,26 @@ static void cmd_uniq(const char *file) {
 }
 
 /* 25. grep - Search for pattern in file */
-static void cmd_grep(const char *pattern, const char *file) {
+static void cmd_grep(const char *pattern, const char *file, const char *opts) {
+    int ignore_case = 0;
+    int show_line_num = 0;
+
+    if (opts && *opts == '-') {
+        const char *p = opts + 1;
+        while (*p) {
+            if (*p == 'i') ignore_case = 1;
+            else if (*p == 'n') show_line_num = 1;
+            p++;
+        }
+    }
+
     if (!pattern || !*pattern || !file || !*file) {
         shell_print("grep: missing operand\n");
-        shell_print("Usage: grep <pattern> <file>\n");
+        shell_print("Usage: grep [-in] <pattern> <file>\n");
         shell_print("Searches for lines containing pattern in the specified file.\n");
+        shell_print("Options:\n");
+        shell_print("  -i  Ignore case distinctions\n");
+        shell_print("  -n  Prefix each line with line number\n");
         last_exit_code = 1;
         return;
     }
@@ -4257,6 +4272,7 @@ static void cmd_grep(const char *pattern, const char *file) {
     int32_t nr;
     int buf_pos = 0;
     int found = 0;
+    int line_num = 0;
     while ((nr = vfs_read(f, buf + buf_pos, 255 - buf_pos)) > 0) {
         buf_pos += nr;
         buf[buf_pos] = '\0';
@@ -4264,7 +4280,28 @@ static void cmd_grep(const char *pattern, const char *file) {
         char *newline;
         while ((newline = strchr(line_start, '\n')) != 0) {
             *newline = '\0';
-            if (strstr(line_start, pattern) != 0) {
+            line_num++;
+            int match = 0;
+            if (ignore_case) {
+                const char *s = line_start;
+                const char *p = pattern;
+                while (*s && *p) {
+                    char cs = *s, cp = *p;
+                    if (cs >= 'A' && cs <= 'Z') cs += 32;
+                    if (cp >= 'A' && cp <= 'Z') cp += 32;
+                    if (cs == cp) { s++; p++; }
+                    else { s = s - (p - pattern) + 1; p = pattern; }
+                }
+                if (!*p) match = 1;
+            } else {
+                if (strstr(line_start, pattern) != 0) match = 1;
+            }
+            if (match) {
+                if (show_line_num) {
+                    char ln_buf[16];
+                    snprintf(ln_buf, sizeof(ln_buf), "%d:", line_num);
+                    shell_print(ln_buf);
+                }
                 shell_print(line_start);
                 shell_print("\n");
                 found++;
@@ -4277,7 +4314,28 @@ static void cmd_grep(const char *pattern, const char *file) {
     }
     if (buf_pos > 0) {
         buf[buf_pos] = '\0';
-        if (strstr(buf, pattern) != 0) {
+        line_num++;
+        int match = 0;
+        if (ignore_case) {
+            const char *s = buf;
+            const char *p = pattern;
+            while (*s && *p) {
+                char cs = *s, cp = *p;
+                if (cs >= 'A' && cs <= 'Z') cs += 32;
+                if (cp >= 'A' && cp <= 'Z') cp += 32;
+                if (cs == cp) { s++; p++; }
+                else { s = s - (p - pattern) + 1; p = pattern; }
+            }
+            if (!*p) match = 1;
+        } else {
+            if (strstr(buf, pattern) != 0) match = 1;
+        }
+        if (match) {
+            if (show_line_num) {
+                char ln_buf[16];
+                snprintf(ln_buf, sizeof(ln_buf), "%d:", line_num);
+                shell_print(ln_buf);
+            }
             shell_print(buf);
             shell_print("\n");
             found++;
@@ -9071,7 +9129,11 @@ static int shell_execute_single(const char *cmd) {
     } else if (strcmp(line, "uniq") == 0) {
         cmd_uniq(arg);
     } else if (strcmp(line, "grep") == 0) {
-        cmd_grep(arg, arg2);
+        if (arg && *arg == '-') {
+            cmd_grep(arg2, arg3, arg);
+        } else {
+            cmd_grep(arg, arg2, 0);
+        }
     } else if (strcmp(line, "replace") == 0) {
         cmd_replace(arg, arg2, arg3);
     } else if (strcmp(line, "chmod") == 0) {
