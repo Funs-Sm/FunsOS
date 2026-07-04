@@ -398,4 +398,172 @@ int  vfs_ext_aio_cancel(uint32_t req_id);
 int  vfs_ext_aio_process_all(void);
 int  vfs_ext_aio_cleanup(void);
 
+/* ================================================================ */
+/*  9) File Snapshots (文件快照)                                     */
+/* ================================================================ */
+
+#define VFS_EXT_SNAPSHOT_MAX        32
+#define VFS_EXT_SNAPSHOT_NAME_MAX   64
+#define VFS_EXT_SNAPSHOT_DATA_MAX   (64 * 1024)
+
+typedef struct vfs_ext_snapshot {
+    uint32_t  snap_id;
+    char      name[VFS_EXT_SNAPSHOT_NAME_MAX];
+    uint32_t  inode;
+    char      path[256];
+    uint32_t  size;
+    uint32_t  created;
+    uint8_t   data[VFS_EXT_SNAPSHOT_DATA_MAX];
+    int       active;
+} vfs_ext_snapshot_t;
+
+int  vfs_ext_snapshot_create(uint32_t inode, const char *name, uint32_t *snap_id);
+int  vfs_ext_snapshot_restore(uint32_t snap_id);
+int  vfs_ext_snapshot_delete(uint32_t snap_id);
+int  vfs_ext_snapshot_list(uint32_t inode, vfs_ext_snapshot_t *buf, uint32_t max_count);
+int  vfs_ext_snapshot_get(uint32_t snap_id, vfs_ext_snapshot_t *snap);
+
+/* ================================================================ */
+/*  10) File Versioning (文件版本控制)                               */
+/* ================================================================ */
+
+#define VFS_EXT_VERSION_MAX         16
+#define VFS_EXT_VERSION_DATA_MAX    (32 * 1024)
+
+typedef struct vfs_ext_version {
+    uint32_t  version;
+    uint32_t  inode;
+    uint32_t  size;
+    uint32_t  modified;
+    char      comment[128];
+    uint8_t   data[VFS_EXT_VERSION_DATA_MAX];
+    int       active;
+} vfs_ext_version_t;
+
+int  vfs_ext_version_save(uint32_t inode, const char *comment, uint32_t *version);
+int  vfs_ext_version_restore(uint32_t inode, uint32_t version);
+int  vfs_ext_version_delete(uint32_t inode, uint32_t version);
+int  vfs_ext_version_list(uint32_t inode, vfs_ext_version_t *buf, uint32_t max_count);
+int  vfs_ext_version_diff(uint32_t inode, uint32_t v1, uint32_t v2, char *diff_buf, uint32_t diff_size);
+
+/* ================================================================ */
+/*  11) Directory Watch (目录监视)                                   */
+/* ================================================================ */
+
+#define VFS_EXT_WATCH_MAX           64
+#define VFS_EXT_WATCH_NAME_MAX      256
+
+#define VFS_EXT_WATCH_EVENT_CREATE  0x01
+#define VFS_EXT_WATCH_EVENT_DELETE  0x02
+#define VFS_EXT_WATCH_EVENT_MODIFY  0x04
+#define VFS_EXT_WATCH_EVENT_RENAME  0x08
+#define VFS_EXT_WATCH_EVENT_ALL     0x0F
+
+typedef struct vfs_ext_watch_event {
+    uint32_t  watch_id;
+    uint32_t  event_type;
+    char      name[VFS_EXT_WATCH_NAME_MAX];
+    char      old_name[VFS_EXT_WATCH_NAME_MAX];
+    uint32_t  timestamp;
+} vfs_ext_watch_event_t;
+
+typedef void (*vfs_ext_watch_callback_t)(vfs_ext_watch_event_t *event, void *user_data);
+
+typedef struct vfs_ext_watch {
+    uint32_t                watch_id;
+    char                    path[256];
+    uint32_t                event_mask;
+    vfs_ext_watch_callback_t callback;
+    void                   *user_data;
+    int                     active;
+} vfs_ext_watch_t;
+
+int  vfs_ext_watch_init(void);
+int  vfs_ext_watch_add(const char *path, uint32_t event_mask,
+                       vfs_ext_watch_callback_t callback, void *user_data,
+                       uint32_t *watch_id);
+int  vfs_ext_watch_remove(uint32_t watch_id);
+int  vfs_ext_watch_poll(uint32_t watch_id, vfs_ext_watch_event_t *events,
+                        uint32_t max_events, uint32_t *event_count);
+int  vfs_ext_watch_notify(const char *path, uint32_t event_type,
+                          const char *name, const char *old_name);
+
+/* ================================================================ */
+/*  12) File Search (文件搜索)                                       */
+/* ================================================================ */
+
+#define VFS_EXT_SEARCH_MAX_RESULTS  128
+#define VFS_EXT_SEARCH_NAME_MAX     256
+
+#define VFS_EXT_SEARCH_BY_NAME      0x01
+#define VFS_EXT_SEARCH_BY_EXT       0x02
+#define VFS_EXT_SEARCH_BY_SIZE      0x04
+#define VFS_EXT_SEARCH_BY_DATE      0x08
+#define VFS_EXT_SEARCH_BY_CONTENT   0x10
+
+typedef struct vfs_ext_search_result {
+    char     path[VFS_EXT_SEARCH_NAME_MAX];
+    uint32_t inode;
+    uint32_t size;
+    uint32_t type;
+    uint32_t modified;
+} vfs_ext_search_result_t;
+
+typedef struct vfs_ext_search_params {
+    char     name_pattern[128];
+    char     ext_pattern[32];
+    uint32_t min_size;
+    uint32_t max_size;
+    uint32_t min_date;
+    uint32_t max_date;
+    char     content_pattern[256];
+    uint32_t search_flags;
+    int      recursive;
+    int      case_sensitive;
+} vfs_ext_search_params_t;
+
+int  vfs_ext_search(const char *base_path, const vfs_ext_search_params_t *params,
+                    vfs_ext_search_result_t *results, uint32_t max_results,
+                    uint32_t *result_count);
+
+/* ================================================================ */
+/*  13) File Hashing (文件哈希)                                      */
+/* ================================================================ */
+
+#define VFS_EXT_HASH_MD5_SIZE       16
+#define VFS_EXT_HASH_SHA1_SIZE      20
+#define VFS_EXT_HASH_SHA256_SIZE    32
+
+#define VFS_EXT_HASH_MD5            1
+#define VFS_EXT_HASH_SHA1           2
+#define VFS_EXT_HASH_SHA256         3
+#define VFS_EXT_HASH_CRC32          4
+
+int  vfs_ext_hash_file(uint32_t inode, uint32_t hash_type,
+                       uint8_t *hash_buf, uint32_t hash_size);
+int  vfs_ext_hash_file_at(const char *path, uint32_t hash_type,
+                          uint8_t *hash_buf, uint32_t hash_size);
+void vfs_ext_hash_to_hex(const uint8_t *hash, uint32_t hash_len,
+                         char *hex_buf, uint32_t hex_size);
+
+/* ================================================================ */
+/*  14) File Compression (文件压缩/解压)                             */
+/* ================================================================ */
+
+#define VFS_EXT_COMPRESS_NONE       0
+#define VFS_EXT_COMPRESS_RLE        1
+#define VFS_EXT_COMPRESS_LZ77       2
+#define VFS_EXT_COMPRESS_HUFFMAN    3
+
+int  vfs_ext_compress_file(uint32_t src_inode, uint32_t dst_inode,
+                           uint32_t algo, uint32_t *compressed_size);
+int  vfs_ext_decompress_file(uint32_t src_inode, uint32_t dst_inode,
+                             uint32_t algo, uint32_t *decompressed_size);
+int  vfs_ext_compress_buffer(const uint8_t *src, uint32_t src_len,
+                             uint8_t *dst, uint32_t dst_size,
+                             uint32_t algo, uint32_t *compressed_len);
+int  vfs_ext_decompress_buffer(const uint8_t *src, uint32_t src_len,
+                               uint8_t *dst, uint32_t dst_size,
+                               uint32_t algo, uint32_t *decompressed_len);
+
 #endif /* VFS_EXT_H */

@@ -22,6 +22,24 @@ static int extended_key = 0;
 
 static sem_t kb_sem;
 
+/* 全局信号标志 - 由键盘 ISR 设置，由 shell 检查 */
+volatile int kb_sigint_pending = 0;
+volatile int kb_sigquit_pending = 0;
+
+int kb_signal_check(void) {
+    if (kb_sigint_pending || kb_sigquit_pending) {
+        kb_sigint_pending = 0;
+        kb_sigquit_pending = 0;
+        return 1;
+    }
+    return 0;
+}
+
+void kb_signal_clear(void) {
+    kb_sigint_pending = 0;
+    kb_sigquit_pending = 0;
+}
+
 void keyboard_init(void) {
     kb_head = 0;
     kb_tail = 0;
@@ -105,6 +123,13 @@ void keyboard_handler(regs_t *regs) {
                 event.ascii += 32;
             }
         }
+        /* Ctrl+C (scancode 0x2E) -> SIGINT, Ctrl+\ (scancode 0x2B) -> SIGQUIT */
+        if (ctrl_pressed && scancode == 0x2E) {
+            kb_sigint_pending = 1;
+        }
+        if (ctrl_pressed && scancode == 0x2B) {
+            kb_sigquit_pending = 1;
+        }
     }
 
     uint32_t next_tail = (kb_tail + 1) % KEYBOARD_BUFFER_SIZE;
@@ -176,6 +201,9 @@ int keyboard_poll(void) {
             if (event.ascii >= 'a' && event.ascii <= 'z') event.ascii -= 32;
             else if (event.ascii >= 'A' && event.ascii <= 'Z') event.ascii += 32;
         }
+        /* Ctrl+C / Ctrl+\ 信号检测 */
+        if (ctrl_pressed && scancode == 0x2E) kb_sigint_pending = 1;
+        if (ctrl_pressed && scancode == 0x2B) kb_sigquit_pending = 1;
     }
 
     uint32_t next_tail = (kb_tail + 1) % KEYBOARD_BUFFER_SIZE;

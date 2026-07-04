@@ -426,6 +426,28 @@ int fs_list_supported_types(char *buf, uint32_t bufsize)
 {
     if (buf == NULL) return -1;
     memset(buf, 0, bufsize);
+
+    static const char *fs_names[] = {
+        "ramfs", "vfat", "ext2", "devtmpfs", "ext4", "proc", "sysfs",
+        "btrfs", "xfs", "tarfs", "fuse",
+        "minix", "reiserfs", "reiser4", "zfs", "ufs", "jfs",
+        "hfs", "hfsplus", "apfs", "ntfs", "exfat",
+        "iso9660", "udf", "squashfs", "cramfs", "jffs2", "yaffs2",
+        "ubifs", "logfs", "nilfs", "ffs", "lustre", "ceph",
+        "gpfs", "ocfs2", "gfs2", "xfs2", "bfs", "sysv",
+        "coherent", "qnx4", "qnx6", "affs", "adfs", "hpfs",
+        "vxfs", "f2fs", "orangefs", "glusterfs"
+    };
+
+    uint32_t offset = 0;
+    for (int i = 0; i < FS_TYPE_COUNT && offset < bufsize - 1; i++) {
+        int len = (int)strlen(fs_names[i]);
+        if (offset + len + 2 >= bufsize) break;
+        memcpy(buf + offset, fs_names[i], len);
+        offset += len;
+        buf[offset++] = ' ';
+    }
+    if (offset > 0) buf[offset - 1] = '\0';
     return 0;
 }
 

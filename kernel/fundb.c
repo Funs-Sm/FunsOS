@@ -7,6 +7,7 @@
 #include "klog.h"
 #include "string.h"
 #include "stdlib.h"
+#include "stdio.h"
 #include "vfs.h"
 
 /* ---- 常量定义 ---- */
@@ -77,6 +78,16 @@ typedef struct {
     uint32_t wal_capacity;
     uint8_t in_transaction;
     uint32_t last_error;
+    fundb_view_t views[FUNDB_MAX_VIEWS];
+    uint32_t view_count;
+    fundb_trigger_t triggers[FUNDB_MAX_TRIGGERS];
+    uint32_t trigger_count;
+    fundb_proc_t procs[FUNDB_MAX_PROCS];
+    uint32_t proc_count;
+    uint64_t query_count;
+    uint64_t transaction_count;
+    uint32_t cache_hits;
+    uint32_t cache_misses;
 } fundb_db_t;
 
 /* ---- 全局数据库列表 ---- */
@@ -1907,4 +1918,1028 @@ const char *fundb_error_string(int error)
     case FUNDB_NO_ROW:     return "No row found";
     default:               return "Unknown error";
     }
+}
+
+/* ================================================================
+ *  视图 (Views)
+ * ================================================================ */
+
+static fundb_view_t *find_view(fundb_db_t *db, const char *name)
+{
+    for (uint32_t i = 0; i < db->view_count; i++) {
+        if (strcmp(db->views[i].name, name) == 0 && db->views[i].active)
+            return &db->views[i];
+    }
+    return NULL;
+}
+
+int fundb_create_view(fundb_handle_t db, const char *name, const char *sql)
+{
+    fundb_db_t *d = (fundb_db_t *)db;
+    if (!d || !name || !sql) return FUNDB_ERROR;
+
+    if (d->view_count >= FUNDB_MAX_VIEWS)
+        return FUNDB_ERROR;
+
+    if (find_view(d, name))
+        return FUNDB_DUP_KEY;
+
+    fundb_view_t *view = &d->views[d->view_count];
+    memset(view, 0, sizeof(fundb_view_t));
+
+    strncpy(view->name, name, FUNDB_VIEW_NAME_MAX - 1);
+    view->name[FUNDB_VIEW_NAME_MAX - 1] = '\0';
+
+    strncpy(view->sql, sql, FUNDB_VIEW_SQL_MAX - 1);
+    view->sql[FUNDB_VIEW_SQL_MAX - 1] = '\0';
+
+    view->col_count = 0;
+    view->active = 1;
+
+    d->view_count++;
+    klog_info("FunDB: Created view: %s", name);
+    return FUNDB_OK;
+}
+
+int fundb_drop_view(fundb_handle_t db, const char *name)
+{
+    fundb_db_t *d = (fundb_db_t *)db;
+    if (!d || !name) return FUNDB_ERROR;
+
+    for (uint32_t i = 0; i < d->view_count; i++) {
+        if (strcmp(d->views[i].name, name) == 0) {
+            for (uint32_t k = i; k < d->view_count - 1; k++)
+                d->views[k] = d->views[k + 1];
+            d->view_count--;
+            memset(&d->views[d->view_count], 0, sizeof(fundb_view_t));
+            klog_info("FunDB: Dropped view: %s", name);
+            return FUNDB_OK;
+        }
+    }
+
+    return FUNDB_ERROR;
+}
+
+int fundb_query_view(fundb_handle_t db, const char *name, fundb_result_t **result)
+{
+    fundb_db_t *d = (fundb_db_t *)db;
+    if (!d || !name || !result) return FUNDB_ERROR;
+
+    fundb_view_t *view = find_view(d, name);
+    if (!view) return FUNDB_ERROR;
+
+    d->query_count++;
+    *result = fundb_query(db, view->sql);
+    return (*result != NULL) ? FUNDB_OK : FUNDB_ERROR;
+}
+
+int fundb_view_exists(fundb_handle_t db, const char *name)
+{
+    fundb_db_t *d = (fundb_db_t *)db;
+    return find_view(d, name) != NULL;
+}
+
+int fundb_list_views(fundb_handle_t db, char *buf, uint32_t bufsize)
+{
+    fundb_db_t *d = (fundb_db_t *)db;
+    if (!d || !buf || bufsize == 0) return FUNDB_ERROR;
+
+    uint32_t offset = 0;
+    buf[0] = '\0';
+
+    for (uint32_t i = 0; i < d->view_count; i++) {
+        if (!d->views[i].active) continue;
+        int len = strlen(d->views[i].name);
+        if (offset + len + 2 >= bufsize) break;
+        if (offset > 0) buf[offset++] = ',';
+        memcpy(buf + offset, d->views[i].name, len);
+        offset += len;
+        buf[offset] = '\0';
+    }
+
+    return FUNDB_OK;
+}
+
+/* ================================================================
+ *  触发器 (Triggers)
+ * ================================================================ */
+
+static fundb_trigger_t *find_trigger(fundb_db_t *db, const char *name)
+{
+    for (uint32_t i = 0; i < db->trigger_count; i++) {
+        if (strcmp(db->triggers[i].name, name) == 0 && db->triggers[i].active)
+            return &db->triggers[i];
+    }
+    return NULL;
+}
+
+static void trigger_fire(fundb_db_t *db, const char *table, int timing, int event,
+                         fundb_row_t *old_row, fundb_row_t *new_row)
+{
+    for (uint32_t i = 0; i < db->trigger_count; i++) {
+        fundb_trigger_t *trig = &db->triggers[i];
+        if (!trig->active) continue;
+        if (strcmp(trig->table_name, table) != 0) continue;
+        if (trig->timing != timing || trig->event != event) continue;
+
+        if (trig->callback) {
+            trig->callback((fundb_handle_t)db, table, event, old_row, new_row);
+        }
+        if (trig->action_sql[0]) {
+            fundb_query((fundb_handle_t)db, trig->action_sql);
+        }
+    }
+}
+
+int fundb_create_trigger(fundb_handle_t db, const char *name,
+                         const char *table, uint32_t timing, uint32_t event,
+                         const char *action_sql)
+{
+    fundb_db_t *d = (fundb_db_t *)db;
+    if (!d || !name || !table) return FUNDB_ERROR;
+
+    if (d->trigger_count >= FUNDB_MAX_TRIGGERS)
+        return FUNDB_ERROR;
+
+    if (find_trigger(d, name))
+        return FUNDB_DUP_KEY;
+
+    fundb_trigger_t *trig = &d->triggers[d->trigger_count];
+    memset(trig, 0, sizeof(fundb_trigger_t));
+
+    strncpy(trig->name, name, FUNDB_TRIG_NAME_MAX - 1);
+    trig->name[FUNDB_TRIG_NAME_MAX - 1] = '\0';
+
+    strncpy(trig->table_name, table, 63);
+    trig->table_name[63] = '\0';
+
+    trig->timing = timing;
+    trig->event = event;
+    trig->callback = NULL;
+    trig->active = 1;
+
+    if (action_sql) {
+        strncpy(trig->action_sql, action_sql, FUNDB_TRIG_SQL_MAX - 1);
+        trig->action_sql[FUNDB_TRIG_SQL_MAX - 1] = '\0';
+    }
+
+    d->trigger_count++;
+    klog_info("FunDB: Created trigger: %s on %s", name, table);
+    return FUNDB_OK;
+}
+
+int fundb_drop_trigger(fundb_handle_t db, const char *name)
+{
+    fundb_db_t *d = (fundb_db_t *)db;
+    if (!d || !name) return FUNDB_ERROR;
+
+    for (uint32_t i = 0; i < d->trigger_count; i++) {
+        if (strcmp(d->triggers[i].name, name) == 0) {
+            for (uint32_t k = i; k < d->trigger_count - 1; k++)
+                d->triggers[k] = d->triggers[k + 1];
+            d->trigger_count--;
+            memset(&d->triggers[d->trigger_count], 0, sizeof(fundb_trigger_t));
+            klog_info("FunDB: Dropped trigger: %s", name);
+            return FUNDB_OK;
+        }
+    }
+
+    return FUNDB_ERROR;
+}
+
+int fundb_list_triggers(fundb_handle_t db, const char *table,
+                        char *buf, uint32_t bufsize)
+{
+    fundb_db_t *d = (fundb_db_t *)db;
+    if (!d || !buf || bufsize == 0) return FUNDB_ERROR;
+
+    uint32_t offset = 0;
+    buf[0] = '\0';
+
+    for (uint32_t i = 0; i < d->trigger_count; i++) {
+        if (!d->triggers[i].active) continue;
+        if (table && table[0] && strcmp(d->triggers[i].table_name, table) != 0)
+            continue;
+        int len = strlen(d->triggers[i].name);
+        if (offset + len + 2 >= bufsize) break;
+        if (offset > 0) buf[offset++] = ',';
+        memcpy(buf + offset, d->triggers[i].name, len);
+        offset += len;
+        buf[offset] = '\0';
+    }
+
+    return FUNDB_OK;
+}
+
+int fundb_trigger_exists(fundb_handle_t db, const char *name)
+{
+    fundb_db_t *d = (fundb_db_t *)db;
+    return find_trigger(d, name) != NULL;
+}
+
+int fundb_set_trigger_callback(fundb_handle_t db, const char *name,
+                               fundb_trigger_callback_t callback)
+{
+    fundb_db_t *d = (fundb_db_t *)db;
+    if (!d || !name) return FUNDB_ERROR;
+
+    fundb_trigger_t *trig = find_trigger(d, name);
+    if (!trig) return FUNDB_ERROR;
+
+    trig->callback = callback;
+    return FUNDB_OK;
+}
+
+/* ================================================================
+ *  聚合函数 (Aggregate Functions)
+ * ================================================================ */
+
+static int get_numeric_value(fundb_row_t *row, uint32_t col_idx, double *out_val)
+{
+    if (!row->values[col_idx]) return 0;
+
+    if (row->types[col_idx] == FUNDB_TYPE_INT) {
+        *out_val = (double)*(int32_t *)row->values[col_idx];
+        return 1;
+    } else if (row->types[col_idx] == FUNDB_TYPE_FLOAT) {
+        *out_val = *(double *)row->values[col_idx];
+        return 1;
+    }
+    return 0;
+}
+
+fundb_result_t *fundb_aggregate(fundb_handle_t db, const char *table,
+                                const char *column, fundb_agg_type_t agg_type,
+                                const char *where_clause)
+{
+    fundb_db_t *d = (fundb_db_t *)db;
+    fundb_table_t *tbl = find_table(d, table);
+    if (!tbl) return NULL;
+
+    d->query_count++;
+
+    int col_idx = -1;
+    if (column && column[0] && strcmp(column, "*") != 0) {
+        col_idx = find_column_index(tbl, column);
+        if (col_idx < 0) return NULL;
+    }
+
+    fundb_result_t *result = (fundb_result_t *)fundb_alloc(sizeof(fundb_result_t));
+    if (!result) return NULL;
+
+    result->col_count = 1;
+    result->columns = (fundb_column_t *)fundb_alloc(sizeof(fundb_column_t));
+    if (!result->columns) { fundb_free_mem(result); return NULL; }
+
+    memset(result->columns, 0, sizeof(fundb_column_t));
+    strncpy(result->columns[0].name, "result", 63);
+    result->columns[0].type = FUNDB_TYPE_FLOAT;
+
+    result->row_count = 1;
+    result->row_capacity = 1;
+    result->rows = (fundb_row_t *)fundb_alloc(sizeof(fundb_row_t));
+    if (!result->rows) { fundb_free_mem(result->columns); fundb_free_mem(result); return NULL; }
+
+    fundb_row_init(&result->rows[0], 1);
+
+    double agg_val = 0;
+    int64_t count_val = 0;
+    int initialized = 0;
+
+    for (uint32_t i = 0; i < tbl->row_count; i++) {
+        if (where_clause && where_clause[0] &&
+            !evaluate_where(tbl, &tbl->rows[i], where_clause))
+            continue;
+
+        switch (agg_type) {
+        case FUNDB_AGG_COUNT:
+            if (column && strcmp(column, "*") == 0) {
+                count_val++;
+            } else if (col_idx >= 0 && tbl->rows[i].values[col_idx]) {
+                count_val++;
+            }
+            break;
+
+        case FUNDB_AGG_SUM:
+        case FUNDB_AGG_AVG: {
+            double val;
+            if (col_idx >= 0 && get_numeric_value(&tbl->rows[i], col_idx, &val)) {
+                agg_val += val;
+                count_val++;
+            }
+            break;
+        }
+
+        case FUNDB_AGG_MIN: {
+            double val;
+            if (col_idx >= 0 && get_numeric_value(&tbl->rows[i], col_idx, &val)) {
+                if (!initialized || val < agg_val) {
+                    agg_val = val;
+                    initialized = 1;
+                }
+            }
+            break;
+        }
+
+        case FUNDB_AGG_MAX: {
+            double val;
+            if (col_idx >= 0 && get_numeric_value(&tbl->rows[i], col_idx, &val)) {
+                if (!initialized || val > agg_val) {
+                    agg_val = val;
+                    initialized = 1;
+                }
+            }
+            break;
+        }
+
+        case FUNDB_AGG_TOTAL:
+            break;
+        }
+    }
+
+    double final_val;
+    if (agg_type == FUNDB_AGG_COUNT) {
+        final_val = (double)count_val;
+    } else if (agg_type == FUNDB_AGG_AVG && count_val > 0) {
+        final_val = agg_val / (double)count_val;
+    } else {
+        final_val = agg_val;
+    }
+
+    result->rows[0].types[0] = FUNDB_TYPE_FLOAT;
+    result->rows[0].sizes[0] = sizeof(double);
+    result->rows[0].values[0] = fundb_alloc(sizeof(double));
+    if (result->rows[0].values[0])
+        *(double *)result->rows[0].values[0] = final_val;
+
+    return result;
+}
+
+int fundb_count(fundb_handle_t db, const char *table,
+                const char *where_clause, int64_t *result)
+{
+    if (!result) return FUNDB_ERROR;
+    fundb_result_t *res = fundb_aggregate(db, table, "*", FUNDB_AGG_COUNT, where_clause);
+    if (!res) return FUNDB_ERROR;
+    if (res->row_count > 0 && res->rows[0].values[0])
+        *result = (int64_t)*(double *)res->rows[0].values[0];
+    else
+        *result = 0;
+    fundb_free_result(res);
+    return FUNDB_OK;
+}
+
+int fundb_sum(fundb_handle_t db, const char *table, const char *column,
+              const char *where_clause, double *result)
+{
+    if (!result) return FUNDB_ERROR;
+    fundb_result_t *res = fundb_aggregate(db, table, column, FUNDB_AGG_SUM, where_clause);
+    if (!res) return FUNDB_ERROR;
+    if (res->row_count > 0 && res->rows[0].values[0])
+        *result = *(double *)res->rows[0].values[0];
+    else
+        *result = 0;
+    fundb_free_result(res);
+    return FUNDB_OK;
+}
+
+int fundb_avg(fundb_handle_t db, const char *table, const char *column,
+              const char *where_clause, double *result)
+{
+    if (!result) return FUNDB_ERROR;
+    fundb_result_t *res = fundb_aggregate(db, table, column, FUNDB_AGG_AVG, where_clause);
+    if (!res) return FUNDB_ERROR;
+    if (res->row_count > 0 && res->rows[0].values[0])
+        *result = *(double *)res->rows[0].values[0];
+    else
+        *result = 0;
+    fundb_free_result(res);
+    return FUNDB_OK;
+}
+
+int fundb_min(fundb_handle_t db, const char *table, const char *column,
+              const char *where_clause, double *result)
+{
+    if (!result) return FUNDB_ERROR;
+    fundb_result_t *res = fundb_aggregate(db, table, column, FUNDB_AGG_MIN, where_clause);
+    if (!res) return FUNDB_ERROR;
+    if (res->row_count > 0 && res->rows[0].values[0])
+        *result = *(double *)res->rows[0].values[0];
+    else
+        *result = 0;
+    fundb_free_result(res);
+    return FUNDB_OK;
+}
+
+int fundb_max(fundb_handle_t db, const char *table, const char *column,
+              const char *where_clause, double *result)
+{
+    if (!result) return FUNDB_ERROR;
+    fundb_result_t *res = fundb_aggregate(db, table, column, FUNDB_AGG_MAX, where_clause);
+    if (!res) return FUNDB_ERROR;
+    if (res->row_count > 0 && res->rows[0].values[0])
+        *result = *(double *)res->rows[0].values[0];
+    else
+        *result = 0;
+    fundb_free_result(res);
+    return FUNDB_OK;
+}
+
+/* ================================================================
+ *  存储过程 (Stored Procedures)
+ * ================================================================ */
+
+static fundb_proc_t *find_proc(fundb_db_t *db, const char *name)
+{
+    for (uint32_t i = 0; i < db->proc_count; i++) {
+        if (strcmp(db->procs[i].name, name) == 0 && db->procs[i].active)
+            return &db->procs[i];
+    }
+    return NULL;
+}
+
+int fundb_create_proc(fundb_handle_t db, const char *name,
+                      const char *body, uint32_t arg_count,
+                      const char **arg_names, const uint32_t *arg_types)
+{
+    fundb_db_t *d = (fundb_db_t *)db;
+    if (!d || !name || !body) return FUNDB_ERROR;
+
+    if (d->proc_count >= FUNDB_MAX_PROCS)
+        return FUNDB_ERROR;
+
+    if (find_proc(d, name))
+        return FUNDB_DUP_KEY;
+
+    fundb_proc_t *proc = &d->procs[d->proc_count];
+    memset(proc, 0, sizeof(fundb_proc_t));
+
+    strncpy(proc->name, name, FUNDB_PROC_NAME_MAX - 1);
+    proc->name[FUNDB_PROC_NAME_MAX - 1] = '\0';
+
+    strncpy(proc->body, body, FUNDB_PROC_BODY_MAX - 1);
+    proc->body[FUNDB_PROC_BODY_MAX - 1] = '\0';
+
+    proc->arg_count = arg_count > FUNDB_PROC_MAX_ARGS ? FUNDB_PROC_MAX_ARGS : arg_count;
+    proc->active = 1;
+
+    if (arg_names && arg_types) {
+        for (uint32_t i = 0; i < proc->arg_count; i++) {
+            strncpy(proc->arg_names[i], arg_names[i], 63);
+            proc->arg_names[i][63] = '\0';
+            proc->arg_types[i] = arg_types[i];
+        }
+    }
+
+    d->proc_count++;
+    klog_info("FunDB: Created stored procedure: %s", name);
+    return FUNDB_OK;
+}
+
+int fundb_drop_proc(fundb_handle_t db, const char *name)
+{
+    fundb_db_t *d = (fundb_db_t *)db;
+    if (!d || !name) return FUNDB_ERROR;
+
+    for (uint32_t i = 0; i < d->proc_count; i++) {
+        if (strcmp(d->procs[i].name, name) == 0) {
+            for (uint32_t k = i; k < d->proc_count - 1; k++)
+                d->procs[k] = d->procs[k + 1];
+            d->proc_count--;
+            memset(&d->procs[d->proc_count], 0, sizeof(fundb_proc_t));
+            klog_info("FunDB: Dropped stored procedure: %s", name);
+            return FUNDB_OK;
+        }
+    }
+
+    return FUNDB_ERROR;
+}
+
+int fundb_call_proc(fundb_handle_t db, const char *name,
+                    fundb_row_t *args, fundb_result_t **result)
+{
+    fundb_db_t *d = (fundb_db_t *)db;
+    if (!d || !name || !result) return FUNDB_ERROR;
+
+    fundb_proc_t *proc = find_proc(d, name);
+    if (!proc) return FUNDB_ERROR;
+
+    d->query_count++;
+
+    if (result)
+        *result = fundb_query(db, proc->body);
+
+    return FUNDB_OK;
+}
+
+int fundb_list_procs(fundb_handle_t db, char *buf, uint32_t bufsize)
+{
+    fundb_db_t *d = (fundb_db_t *)db;
+    if (!d || !buf || bufsize == 0) return FUNDB_ERROR;
+
+    uint32_t offset = 0;
+    buf[0] = '\0';
+
+    for (uint32_t i = 0; i < d->proc_count; i++) {
+        if (!d->procs[i].active) continue;
+        int len = strlen(d->procs[i].name);
+        if (offset + len + 2 >= bufsize) break;
+        if (offset > 0) buf[offset++] = ',';
+        memcpy(buf + offset, d->procs[i].name, len);
+        offset += len;
+        buf[offset] = '\0';
+    }
+
+    return FUNDB_OK;
+}
+
+int fundb_proc_exists(fundb_handle_t db, const char *name)
+{
+    fundb_db_t *d = (fundb_db_t *)db;
+    return find_proc(d, name) != NULL;
+}
+
+/* ================================================================
+ *  备份/导出 (Backup/Export)
+ * ================================================================ */
+
+int fundb_backup(fundb_handle_t db, const char *backup_path)
+{
+    fundb_db_t *d = (fundb_db_t *)db;
+    if (!d || !backup_path) return FUNDB_ERROR;
+
+    vfs_mkdir(backup_path, 0x1FF);
+
+    for (uint32_t i = 0; i < d->table_count; i++) {
+        fundb_table_t *table = &d->tables[i];
+        char path[512];
+        int pos = 0;
+
+        for (int j = 0; backup_path[j] && j < 255; j++)
+            path[pos++] = backup_path[j];
+        if (pos > 0 && path[pos - 1] != '/')
+            path[pos++] = '/';
+
+        for (int j = 0; table->name[j] && j < 58; j++)
+            path[pos++] = table->name[j];
+        path[pos++] = '.';
+        path[pos++] = 't';
+        path[pos++] = 'b';
+        path[pos++] = 'l';
+        path[pos] = '\0';
+
+        file_t *f = NULL;
+        vfs_creat(path, 0x1FF);
+        vfs_open(path, FILE_MODE_WRITE, &f);
+        if (!f) return FUNDB_IO_ERROR;
+
+        vfs_write(f, &table->col_count, sizeof(uint32_t));
+        vfs_write(f, &table->row_count, sizeof(uint32_t));
+        vfs_write(f, table->columns, sizeof(fundb_column_t) * table->col_count);
+
+        for (uint32_t r = 0; r < table->row_count; r++) {
+            for (uint32_t c = 0; c < table->col_count; c++) {
+                vfs_write(f, &table->rows[r].types[c], sizeof(uint32_t));
+                vfs_write(f, &table->rows[r].sizes[c], sizeof(uint32_t));
+                if (table->rows[r].values[c] && table->rows[r].sizes[c] > 0) {
+                    vfs_write(f, table->rows[r].values[c], table->rows[r].sizes[c]);
+                }
+            }
+        }
+
+        vfs_close(f);
+    }
+
+    klog_info("FunDB: Database backed up to: %s", backup_path);
+    return FUNDB_OK;
+}
+
+int fundb_restore(fundb_handle_t db, const char *backup_path)
+{
+    fundb_db_t *d = (fundb_db_t *)db;
+    if (!d || !backup_path) return FUNDB_ERROR;
+
+    file_t *dir = NULL;
+    if (vfs_opendir(backup_path, &dir) != 0 || !dir)
+        return FUNDB_IO_ERROR;
+
+    vfs_dirent_t entry;
+    while (vfs_readdir(dir, &entry) == 0) {
+        if (entry.name[0] == '.') continue;
+
+        int len = strlen(entry.name);
+        if (len < 5) continue;
+        if (entry.name[len - 4] != '.' || entry.name[len - 3] != 't' ||
+            entry.name[len - 2] != 'b' || entry.name[len - 1] != 'l')
+            continue;
+
+        char table_name[64];
+        int name_len = len - 4 > 63 ? 63 : len - 4;
+        strncpy(table_name, entry.name, name_len);
+        table_name[name_len] = '\0';
+
+        char filepath[512];
+        int pos = 0;
+        for (int j = 0; backup_path[j] && j < 255; j++)
+            filepath[pos++] = backup_path[j];
+        if (pos > 0 && filepath[pos - 1] != '/')
+            filepath[pos++] = '/';
+        for (int j = 0; entry.name[j] && j < 255; j++)
+            filepath[pos++] = entry.name[j];
+        filepath[pos] = '\0';
+
+        file_t *f = NULL;
+        vfs_open(filepath, FILE_MODE_READ, &f);
+        if (!f) continue;
+
+        uint32_t col_count = 0, row_count = 0;
+        vfs_read(f, &col_count, sizeof(uint32_t));
+        vfs_read(f, &row_count, sizeof(uint32_t));
+
+        fundb_column_t cols[FUNDB_MAX_COLUMNS];
+        vfs_read(f, cols, sizeof(fundb_column_t) * col_count);
+
+        if (!find_table(d, table_name)) {
+            fundb_create_table(db, table_name, cols, col_count);
+        }
+
+        fundb_table_t *table = find_table(d, table_name);
+        if (table) {
+            for (uint32_t r = 0; r < row_count && r < FUNDB_MAX_ROWS; r++) {
+                fundb_row_t row;
+                fundb_row_init(&row, table->col_count);
+
+                for (uint32_t c = 0; c < table->col_count; c++) {
+                    vfs_read(f, &row.types[c], sizeof(uint32_t));
+                    vfs_read(f, &row.sizes[c], sizeof(uint32_t));
+                    if (row.sizes[c] > 0) {
+                        row.values[c] = fundb_alloc(row.sizes[c]);
+                        if (row.values[c])
+                            vfs_read(f, row.values[c], row.sizes[c]);
+                    }
+                }
+
+                fundb_insert(db, table_name, &row);
+                fundb_row_free(&row, table->col_count);
+            }
+        }
+
+        vfs_close(f);
+    }
+
+    vfs_closedir(dir);
+    klog_info("FunDB: Database restored from: %s", backup_path);
+    return FUNDB_OK;
+}
+
+static void escape_csv_field(const char *src, char *dst, int dst_size)
+{
+    int si = 0, di = 0;
+    dst[di++] = '"';
+    while (src[si] && di < dst_size - 2) {
+        if (src[si] == '"') {
+            dst[di++] = '"';
+            dst[di++] = '"';
+        } else {
+            dst[di++] = src[si];
+        }
+        si++;
+    }
+    dst[di++] = '"';
+    dst[di] = '\0';
+}
+
+static int export_csv(fundb_db_t *db, fundb_table_t *table, const char *path)
+{
+    file_t *f = NULL;
+    vfs_creat(path, 0x1FF);
+    vfs_open(path, FILE_MODE_WRITE, &f);
+    if (!f) return FUNDB_IO_ERROR;
+
+    for (uint32_t c = 0; c < table->col_count; c++) {
+        char escaped[128];
+        escape_csv_field(table->columns[c].name, escaped, sizeof(escaped));
+        vfs_write(f, escaped, strlen(escaped));
+        if (c < table->col_count - 1) vfs_write(f, ",", 1);
+    }
+    vfs_write(f, "\n", 1);
+
+    for (uint32_t r = 0; r < table->row_count; r++) {
+        for (uint32_t c = 0; c < table->col_count; c++) {
+            char buf[512];
+            if (table->rows[r].values[c] && table->rows[r].sizes[c] > 0) {
+                if (table->rows[r].types[c] == FUNDB_TYPE_INT) {
+                    int val = *(int32_t *)table->rows[r].values[c];
+                    snprintf(buf, sizeof(buf), "%d", val);
+                } else if (table->rows[r].types[c] == FUNDB_TYPE_FLOAT) {
+                    double val = *(double *)table->rows[r].values[c];
+                    snprintf(buf, sizeof(buf), "%f", val);
+                } else if (table->rows[r].types[c] == FUNDB_TYPE_BOOL) {
+                    uint8_t val = *(uint8_t *)table->rows[r].values[c];
+                    snprintf(buf, sizeof(buf), "%s", val ? "true" : "false");
+                } else {
+                    char escaped[512];
+                    escape_csv_field((char *)table->rows[r].values[c], escaped, sizeof(escaped));
+                    vfs_write(f, escaped, strlen(escaped));
+                    if (c < table->col_count - 1) vfs_write(f, ",", 1);
+                    goto next_col;
+                }
+                vfs_write(f, buf, strlen(buf));
+            } else {
+                vfs_write(f, "NULL", 4);
+            }
+            if (c < table->col_count - 1) vfs_write(f, ",", 1);
+next_col:;
+        }
+        vfs_write(f, "\n", 1);
+    }
+
+    vfs_close(f);
+    return FUNDB_OK;
+}
+
+static int export_sql(fundb_db_t *db, fundb_table_t *table, const char *path)
+{
+    file_t *f = NULL;
+    vfs_creat(path, 0x1FF);
+    vfs_open(path, FILE_MODE_WRITE, &f);
+    if (!f) return FUNDB_IO_ERROR;
+
+    char buf[1024];
+    int len = snprintf(buf, sizeof(buf), "CREATE TABLE %s (\n", table->name);
+    vfs_write(f, buf, len);
+
+    for (uint32_t c = 0; c < table->col_count; c++) {
+        const char *type_str = "TEXT";
+        switch (table->columns[c].type) {
+        case FUNDB_TYPE_INT: type_str = "INTEGER"; break;
+        case FUNDB_TYPE_FLOAT: type_str = "FLOAT"; break;
+        case FUNDB_TYPE_TEXT: type_str = "TEXT"; break;
+        case FUNDB_TYPE_BLOB: type_str = "BLOB"; break;
+        case FUNDB_TYPE_BOOL: type_str = "BOOLEAN"; break;
+        case FUNDB_TYPE_DATE: type_str = "DATE"; break;
+        }
+        len = snprintf(buf, sizeof(buf), "  %s %s%s%s\n",
+                       table->columns[c].name, type_str,
+                       table->columns[c].primary_key ? " PRIMARY KEY" : "",
+                       c < table->col_count - 1 ? "," : "");
+        vfs_write(f, buf, len);
+    }
+    vfs_write(f, ");\n\n", 3);
+
+    for (uint32_t r = 0; r < table->row_count; r++) {
+        len = snprintf(buf, sizeof(buf), "INSERT INTO %s VALUES (", table->name);
+        vfs_write(f, buf, len);
+
+        for (uint32_t c = 0; c < table->col_count; c++) {
+            if (table->rows[r].values[c] && table->rows[r].sizes[c] > 0) {
+                if (table->rows[r].types[c] == FUNDB_TYPE_INT) {
+                    int val = *(int32_t *)table->rows[r].values[c];
+                    len = snprintf(buf, sizeof(buf), "%d", val);
+                    vfs_write(f, buf, len);
+                } else if (table->rows[r].types[c] == FUNDB_TYPE_FLOAT) {
+                    double val = *(double *)table->rows[r].values[c];
+                    len = snprintf(buf, sizeof(buf), "%f", val);
+                    vfs_write(f, buf, len);
+                } else if (table->rows[r].types[c] == FUNDB_TYPE_BOOL) {
+                    uint8_t val = *(uint8_t *)table->rows[r].values[c];
+                    vfs_write(f, val ? "TRUE" : "FALSE", val ? 4 : 5);
+                } else {
+                    vfs_write(f, "'", 1);
+                    vfs_write(f, table->rows[r].values[c], table->rows[r].sizes[c] - 1);
+                    vfs_write(f, "'", 1);
+                }
+            } else {
+                vfs_write(f, "NULL", 4);
+            }
+            if (c < table->col_count - 1) vfs_write(f, ", ", 2);
+        }
+        vfs_write(f, ");\n", 2);
+    }
+
+    vfs_close(f);
+    return FUNDB_OK;
+}
+
+static int export_json(fundb_db_t *db, fundb_table_t *table, const char *path)
+{
+    file_t *f = NULL;
+    vfs_creat(path, 0x1FF);
+    vfs_open(path, FILE_MODE_WRITE, &f);
+    if (!f) return FUNDB_IO_ERROR;
+
+    char buf[1024];
+    vfs_write(f, "[\n", 2);
+
+    for (uint32_t r = 0; r < table->row_count; r++) {
+        vfs_write(f, "  {", 3);
+        for (uint32_t c = 0; c < table->col_count; c++) {
+            int len = snprintf(buf, sizeof(buf), "\"%s\":", table->columns[c].name);
+            vfs_write(f, buf, len);
+
+            if (table->rows[r].values[c] && table->rows[r].sizes[c] > 0) {
+                if (table->rows[r].types[c] == FUNDB_TYPE_INT) {
+                    int val = *(int32_t *)table->rows[r].values[c];
+                    len = snprintf(buf, sizeof(buf), "%d", val);
+                    vfs_write(f, buf, len);
+                } else if (table->rows[r].types[c] == FUNDB_TYPE_FLOAT) {
+                    double val = *(double *)table->rows[r].values[c];
+                    len = snprintf(buf, sizeof(buf), "%f", val);
+                    vfs_write(f, buf, len);
+                } else if (table->rows[r].types[c] == FUNDB_TYPE_BOOL) {
+                    uint8_t val = *(uint8_t *)table->rows[r].values[c];
+                    vfs_write(f, val ? "true" : "false", val ? 4 : 5);
+                } else {
+                    vfs_write(f, "\"", 1);
+                    vfs_write(f, table->rows[r].values[c], table->rows[r].sizes[c] - 1);
+                    vfs_write(f, "\"", 1);
+                }
+            } else {
+                vfs_write(f, "null", 4);
+            }
+            if (c < table->col_count - 1) vfs_write(f, ",", 1);
+        }
+        if (r < table->row_count - 1)
+            vfs_write(f, "},\n", 3);
+        else
+            vfs_write(f, "}\n", 2);
+    }
+
+    vfs_write(f, "]\n", 2);
+    vfs_close(f);
+    return FUNDB_OK;
+}
+
+int fundb_export_table(fundb_handle_t db, const char *table_name,
+                       const char *path, uint32_t format)
+{
+    fundb_db_t *d = (fundb_db_t *)db;
+    if (!d || !table_name || !path) return FUNDB_ERROR;
+
+    fundb_table_t *table = find_table(d, table_name);
+    if (!table) return FUNDB_NO_TABLE;
+
+    int rc = FUNDB_ERROR;
+    switch (format) {
+    case FUNDB_EXPORT_CSV:
+        rc = export_csv(d, table, path);
+        break;
+    case FUNDB_EXPORT_SQL:
+        rc = export_sql(d, table, path);
+        break;
+    case FUNDB_EXPORT_JSON:
+        rc = export_json(d, table, path);
+        break;
+    default:
+        return FUNDB_ERROR;
+    }
+
+    if (rc == FUNDB_OK)
+        klog_info("FunDB: Exported table %s to %s", table_name, path);
+
+    return rc;
+}
+
+int fundb_import_table(fundb_handle_t db, const char *table_name,
+                       const char *path, uint32_t format)
+{
+    fundb_db_t *d = (fundb_db_t *)db;
+    if (!d || !table_name || !path) return FUNDB_ERROR;
+
+    if (format == FUNDB_EXPORT_SQL) {
+        file_t *f = NULL;
+        vfs_open(path, FILE_MODE_READ, &f);
+        if (!f) return FUNDB_IO_ERROR;
+
+        char sql[4096];
+        int pos = 0;
+        char ch;
+
+        while (vfs_read(f, &ch, 1) == 1 && pos < (int)sizeof(sql) - 1) {
+            if (ch == ';') {
+                sql[pos] = '\0';
+                fundb_query(db, sql);
+                pos = 0;
+            } else {
+                sql[pos++] = ch;
+            }
+        }
+
+        vfs_close(f);
+        klog_info("FunDB: Imported table %s from %s", table_name, path);
+        return FUNDB_OK;
+    }
+
+    klog_err("FunDB: Import format %u not supported", format);
+    return FUNDB_ERROR;
+}
+
+/* ================================================================
+ *  统计信息 (Statistics)
+ * ================================================================ */
+
+int fundb_get_stats(fundb_handle_t db, fundb_stats_t *stats)
+{
+    fundb_db_t *d = (fundb_db_t *)db;
+    if (!d || !stats) return FUNDB_ERROR;
+
+    memset(stats, 0, sizeof(fundb_stats_t));
+
+    stats->total_tables = d->table_count;
+    stats->total_indexes = d->index_count;
+    stats->total_views = d->view_count;
+    stats->total_triggers = d->trigger_count;
+    stats->total_procs = d->proc_count;
+    stats->page_size = FUNDB_PAGE_SIZE;
+    stats->cache_hits = d->cache_hits;
+    stats->cache_misses = d->cache_misses;
+    stats->query_count = d->query_count;
+    stats->transaction_count = d->transaction_count;
+
+    uint64_t total_size = 0;
+    for (uint32_t i = 0; i < d->table_count; i++) {
+        stats->total_rows += d->tables[i].row_count;
+        total_size += sizeof(fundb_table_t);
+        for (uint32_t r = 0; r < d->tables[i].row_count; r++) {
+            for (uint32_t c = 0; c < d->tables[i].col_count; c++) {
+                total_size += d->tables[i].rows[r].sizes[c];
+            }
+        }
+    }
+
+    stats->total_size_bytes = total_size;
+    stats->total_pages = (uint32_t)(total_size / FUNDB_PAGE_SIZE + 1);
+    stats->free_pages = stats->total_pages / 10;
+
+    return FUNDB_OK;
+}
+
+int fundb_analyze_table(fundb_handle_t db, const char *table_name)
+{
+    fundb_db_t *d = (fundb_db_t *)db;
+    if (!d || !table_name) return FUNDB_ERROR;
+
+    fundb_table_t *table = find_table(d, table_name);
+    if (!table) return FUNDB_NO_TABLE;
+
+    for (uint32_t i = 0; i < d->index_count; i++) {
+        if (strcmp(d->indexes[i].table, table_name) == 0) {
+            btree_destroy(d->indexes[i].root);
+            d->indexes[i].root = btree_create_node(1);
+
+            for (uint32_t r = 0; r < table->row_count; r++) {
+                for (uint32_t j = 0; j < table->col_count; j++) {
+                    if (strcmp(table->columns[j].name, d->indexes[i].column) == 0) {
+                        uint32_t key = 0;
+                        if (table->rows[r].types[j] == FUNDB_TYPE_INT &&
+                            table->rows[r].values[j]) {
+                            key = *(uint32_t *)table->rows[r].values[j];
+                        } else {
+                            key = r;
+                        }
+                        btree_insert(&d->indexes[i].root, key, &table->rows[r]);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    klog_info("FunDB: Analyzed table: %s", table_name);
+    return FUNDB_OK;
+}
+
+int fundb_vacuum(fundb_handle_t db)
+{
+    fundb_db_t *d = (fundb_db_t *)db;
+    if (!d) return FUNDB_ERROR;
+
+    for (uint32_t i = 0; i < d->table_count; i++) {
+        fundb_table_t *table = &d->tables[i];
+        if (table->dirty) {
+            fundb_write_table(d, table);
+        }
+    }
+
+    klog_info("FunDB: Vacuum completed");
+    return FUNDB_OK;
+}
+
+int fundb_reindex(fundb_handle_t db, const char *table_name)
+{
+    fundb_db_t *d = (fundb_db_t *)db;
+    if (!d) return FUNDB_ERROR;
+
+    if (table_name && table_name[0]) {
+        fundb_table_t *table = find_table(d, table_name);
+        if (!table) return FUNDB_NO_TABLE;
+        fundb_analyze_table(db, table_name);
+    } else {
+        for (uint32_t i = 0; i < d->table_count; i++) {
+            fundb_analyze_table(db, d->tables[i].name);
+        }
+    }
+
+    klog_info("FunDB: Reindex completed");
+    return FUNDB_OK;
 }

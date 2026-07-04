@@ -41,22 +41,33 @@ static inline void msr_write(uint32_t msr, uint64_t val) {
 /* Check if CPU supports Enhanced SpeedStep */
 static int cpufreq_check_est(void) {
     uint32_t eax, ebx, ecx, edx;
+    uint32_t vendor[4];
+
+    /* CPUID with EAX=0 to get vendor ID and max level */
+    asm volatile("cpuid" : "=a"(eax), "=b"(vendor[0]), "=d"(vendor[1]), "=c"(vendor[2]) : "a"(0));
+    vendor[3] = 0;
+
+    /* Check if CPUID level 1 is supported */
+    if (eax < 1) return 0;
 
     /* CPUID with EAX=1 to get feature flags */
     asm volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(1));
 
-    /* EST is bit 7 of ECX for some CPUs, but for older ones it's in EDX.
-       For Intel, check ECX bit 7 (SpeedStep) or use model-specific detection */
-    /* A simpler approach: try to read IA32_PERF_STATUS and check if it's valid */
-    uint64_t perf_status = msr_read(IA32_PERF_STATUS);
-    uint32_t current_ratio = (uint32_t)(perf_status >> 8) & 0xFF;
-
-    /* If we can read a non-zero ratio, SpeedStep is likely available */
-    if (current_ratio != 0) {
-        return 1;
+    /* For Intel CPUs: check if it's Intel first */
+    if (strcmp((char *)vendor, "GenuineIntel") != 0) {
+        /* Not Intel, no SpeedStep */
+        return 0;
     }
 
-    return 0;
+    /* Check EST bit (bit 7 of ECX) - Enhanced SpeedStep Technology */
+    if (!(ecx & (1 << 7))) {
+        return 0;
+    }
+
+    /* Safely try to read IA32_PERF_STATUS */
+    /* If the MSR doesn't exist, it will cause #GP, so we try a simple check first */
+    /* For now, just return based on CPUID to be safe in virtualized environments */
+    return 1;
 }
 
 /* Detect available P-states from MSR */

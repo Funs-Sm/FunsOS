@@ -142,6 +142,11 @@ void vga_text_set_color(uint8_t fg, uint8_t bg) {
     current_color = (uint8_t)((bg << 4) | fg);
 }
 
+void vga_text_get_color(uint8_t *fg, uint8_t *bg) {
+    if (fg) *fg = current_color & 0x0F;
+    if (bg) *bg = (current_color >> 4) & 0x0F;
+}
+
 void vga_text_clear(void) {
     volatile uint16_t *buf = (volatile uint16_t *)VGA_BUFFER;
     uint16_t blank = make_cell(' ');

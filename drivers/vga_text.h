@@ -29,6 +29,7 @@ void vga_text_init(void);
 void vga_text_putchar(char c);
 void vga_text_print(const char *str);
 void vga_text_set_color(uint8_t fg, uint8_t bg);
+void vga_text_get_color(uint8_t *fg, uint8_t *bg);
 void vga_text_clear(void);
 void vga_text_set_cursor(int row, int col);
 void vga_text_get_cursor(int *row, int *col);

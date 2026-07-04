@@ -28,6 +28,8 @@ extern int32_t ramfs_mount(superblock_t *sb, void *data);
 extern int32_t btrfs_mount(superblock_t *sb, void *data);
 extern int32_t xfs_mount(superblock_t *sb, void *data);
 extern int32_t fuse_mount(superblock_t *sb, void *data);
+extern int32_t procfs_mount(superblock_t *sb, void *data);
+extern int32_t sysfs_mount(superblock_t *sb, void *data);
 extern file_ops_t devfs_file_ops;
 extern file_ops_t ramfs_file_ops;
 extern file_ops_t tarfs_file_ops;
@@ -65,6 +67,13 @@ void vfs_init(void) {
 int32_t vfs_mount(const char *path, uint32_t fs_type, void *data) {
     dentry_t *target = NULL;
 
+    if (!path || path[0] == '\0') {
+        return -EINVAL;
+    }
+    if (fs_type >= FS_TYPE_COUNT) {
+        return -ENODEV;
+    }
+
     spinlock_lock(&vfs_lock);
 
     if (path[0] == '/' && path[1] == '\0') {
@@ -72,14 +81,27 @@ int32_t vfs_mount(const char *path, uint32_t fs_type, void *data) {
     } else {
         if (path_resolve(path, &target) != 0) {
             spinlock_unlock(&vfs_lock);
-            return -1;
+            return -ENOENT;
         }
+    }
+
+    if (!target->inode) {
+        spinlock_unlock(&vfs_lock);
+        return -ENOENT;
+    }
+    if (!(target->inode->mode & FILE_MODE_DIR)) {
+        spinlock_unlock(&vfs_lock);
+        return -ENOTDIR;
+    }
+    if (target->mount_point) {
+        spinlock_unlock(&vfs_lock);
+        return -EBUSY;
     }
 
     mount_t *mnt = (mount_t *)kmalloc(sizeof(mount_t));
     if (!mnt) {
         spinlock_unlock(&vfs_lock);
-        return -1;
+        return -ENOMEM;
     }
     memset(mnt, 0, sizeof(mount_t));
 
@@ -87,12 +109,13 @@ int32_t vfs_mount(const char *path, uint32_t fs_type, void *data) {
     if (!sb) {
         kfree(mnt);
         spinlock_unlock(&vfs_lock);
-        return -1;
+        return -ENOMEM;
     }
     memset(sb, 0, sizeof(superblock_t));
     sb->fs_type = fs_type;
+    sb->block_size = 4096;
 
-    int32_t result = -1;
+    int32_t result = -ENODEV;
     switch (fs_type) {
         case FS_TYPE_RAMFS:
             result = ramfs_mount(sb, data);
@@ -109,6 +132,12 @@ int32_t vfs_mount(const char *path, uint32_t fs_type, void *data) {
         case FS_TYPE_DEVFS:
             result = devfs_mount_internal(sb, data);
             break;
+        case FS_TYPE_PROCFS:
+            result = procfs_mount(sb, data);
+            break;
+        case FS_TYPE_SYSFS:
+            result = sysfs_mount(sb, data);
+            break;
         case FS_TYPE_TARFS:
             result = tarfs_mount(sb, data);
             break;
@@ -121,7 +150,51 @@ int32_t vfs_mount(const char *path, uint32_t fs_type, void *data) {
         case FS_TYPE_FUSE:
             result = fuse_mount(sb, data);
             break;
+        case FS_TYPE_MINIX:
+        case FS_TYPE_REISERFS:
+        case FS_TYPE_REISER4:
+        case FS_TYPE_ZFS:
+        case FS_TYPE_UFS:
+        case FS_TYPE_JFS:
+        case FS_TYPE_HFS:
+        case FS_TYPE_HFSPLUS:
+        case FS_TYPE_APFS:
+        case FS_TYPE_NTFS:
+        case FS_TYPE_EXFAT:
+        case FS_TYPE_ISO9660:
+        case FS_TYPE_UDF:
+        case FS_TYPE_SQUASHFS:
+        case FS_TYPE_CRAMFS:
+        case FS_TYPE_JFFS2:
+        case FS_TYPE_YAFFS2:
+        case FS_TYPE_UBIFS:
+        case FS_TYPE_LOGFS:
+        case FS_TYPE_NILFS:
+        case FS_TYPE_FFS:
+        case FS_TYPE_LUSTRE:
+        case FS_TYPE_CEPH:
+        case FS_TYPE_GPFS:
+        case FS_TYPE_OCFS2:
+        case FS_TYPE_GFS2:
+        case FS_TYPE_XFS2:
+        case FS_TYPE_BFS:
+        case FS_TYPE_SYSV:
+        case FS_TYPE_COHERENT:
+        case FS_TYPE_QNX4:
+        case FS_TYPE_QNX6:
+        case FS_TYPE_AFFS:
+        case FS_TYPE_ADFS:
+        case FS_TYPE_HPFS:
+        case FS_TYPE_VXFS:
+        case FS_TYPE_F2FS:
+        case FS_TYPE_ORANGEFS:
+        case FS_TYPE_GLUSTERFS:
+            klog_warn("vfs_mount: fs type '%s' not yet implemented",
+                     vfs_fs_type_name(fs_type));
+            result = -ENODEV;
+            break;
         default:
+            result = -ENODEV;
             break;
     }
 
@@ -1107,4 +1180,182 @@ out:
 
 const char *vfs_getcwd(void) {
     return cwd_buf;
+}
+
+/* ===== 文件系统类型名称映射 ===== */
+
+static const char *fs_type_names[] = {
+    [FS_TYPE_RAMFS] = "ramfs",
+    [FS_TYPE_FAT32] = "vfat",
+    [FS_TYPE_EXT2] = "ext2",
+    [FS_TYPE_DEVFS] = "devtmpfs",
+    [FS_TYPE_EXT4] = "ext4",
+    [FS_TYPE_PROCFS] = "proc",
+    [FS_TYPE_SYSFS] = "sysfs",
+    [FS_TYPE_BTRFS] = "btrfs",
+    [FS_TYPE_XFS] = "xfs",
+    [FS_TYPE_TARFS] = "tarfs",
+    [FS_TYPE_FUSE] = "fuse",
+    [FS_TYPE_MINIX] = "minix",
+    [FS_TYPE_REISERFS] = "reiserfs",
+    [FS_TYPE_REISER4] = "reiser4",
+    [FS_TYPE_ZFS] = "zfs",
+    [FS_TYPE_UFS] = "ufs",
+    [FS_TYPE_JFS] = "jfs",
+    [FS_TYPE_HFS] = "hfs",
+    [FS_TYPE_HFSPLUS] = "hfsplus",
+    [FS_TYPE_APFS] = "apfs",
+    [FS_TYPE_NTFS] = "ntfs",
+    [FS_TYPE_EXFAT] = "exfat",
+    [FS_TYPE_ISO9660] = "iso9660",
+    [FS_TYPE_UDF] = "udf",
+    [FS_TYPE_SQUASHFS] = "squashfs",
+    [FS_TYPE_CRAMFS] = "cramfs",
+    [FS_TYPE_JFFS2] = "jffs2",
+    [FS_TYPE_YAFFS2] = "yaffs2",
+    [FS_TYPE_UBIFS] = "ubifs",
+    [FS_TYPE_LOGFS] = "logfs",
+    [FS_TYPE_NILFS] = "nilfs",
+    [FS_TYPE_FFS] = "ffs",
+    [FS_TYPE_LUSTRE] = "lustre",
+    [FS_TYPE_CEPH] = "ceph",
+    [FS_TYPE_GPFS] = "gpfs",
+    [FS_TYPE_OCFS2] = "ocfs2",
+    [FS_TYPE_GFS2] = "gfs2",
+    [FS_TYPE_XFS2] = "xfs2",
+    [FS_TYPE_BFS] = "bfs",
+    [FS_TYPE_SYSV] = "sysv",
+    [FS_TYPE_COHERENT] = "coherent",
+    [FS_TYPE_QNX4] = "qnx4",
+    [FS_TYPE_QNX6] = "qnx6",
+    [FS_TYPE_AFFS] = "affs",
+    [FS_TYPE_ADFS] = "adfs",
+    [FS_TYPE_HPFS] = "hpfs",
+    [FS_TYPE_VXFS] = "vxfs",
+    [FS_TYPE_F2FS] = "f2fs",
+    [FS_TYPE_ORANGEFS] = "orangefs",
+    [FS_TYPE_GLUSTERFS] = "glusterfs",
+};
+
+const char *vfs_fs_type_name(uint32_t fs_type) {
+    if (fs_type >= FS_TYPE_COUNT) return "unknown";
+    const char *name = fs_type_names[fs_type];
+    return name ? name : "unknown";
+}
+
+int vfs_fs_type_from_name(const char *name, uint32_t *fs_type) {
+    if (!name || !fs_type) return -EINVAL;
+    for (uint32_t i = 0; i < FS_TYPE_COUNT; i++) {
+        if (fs_type_names[i] && strcmp(fs_type_names[i], name) == 0) {
+            *fs_type = i;
+            return 0;
+        }
+    }
+    return -ENODEV;
+}
+
+/* ===== 挂载点信息查询 ===== */
+
+static void vfs_dentry_path(dentry_t *dentry, char *buf, int bufsize) {
+    char tmp[PATH_MAX];
+    int len = 0;
+    tmp[0] = '\0';
+
+    dentry_t *cur = dentry;
+    while (cur && cur != root_dentry && cur != cur->parent) {
+        int nlen = (int)strlen(cur->name);
+        if (len + nlen + 1 >= PATH_MAX) break;
+        memmove(tmp + nlen + 1, tmp, len);
+        tmp[0] = '/';
+        memcpy(tmp + 1, cur->name, nlen);
+        len += nlen + 1;
+        cur = cur->parent;
+    }
+
+    if (len == 0) {
+        tmp[0] = '/';
+        tmp[1] = '\0';
+        len = 1;
+    }
+
+    strncpy(buf, tmp, bufsize - 1);
+    buf[bufsize - 1] = '\0';
+}
+
+int32_t vfs_get_mount_info(const char *path, vfs_mount_info_t *info) {
+    if (!path || !info) return -EINVAL;
+
+    dentry_t *target = NULL;
+    spinlock_lock(&vfs_lock);
+
+    if (path_resolve(path, &target) != 0) {
+        spinlock_unlock(&vfs_lock);
+        return -ENOENT;
+    }
+
+    mount_t *mnt = mount_list;
+    while (mnt) {
+        if (mnt->mount_point == target ||
+            (target->mount_point && mnt->root_dentry == target)) {
+            memset(info, 0, sizeof(vfs_mount_info_t));
+            vfs_dentry_path(mnt->mount_point, info->mount_point, sizeof(info->mount_point));
+            strncpy(info->fs_type, vfs_fs_type_name(mnt->sb->fs_type), sizeof(info->fs_type) - 1);
+            info->total_blocks = mnt->sb->total_blocks;
+            info->free_blocks = mnt->sb->free_blocks;
+            info->block_size = mnt->sb->block_size;
+            info->read_only = 0;
+            spinlock_unlock(&vfs_lock);
+            return 0;
+        }
+        mnt = mnt->next;
+    }
+
+    spinlock_unlock(&vfs_lock);
+    return -ENOENT;
+}
+
+int32_t vfs_list_mounts(vfs_mount_info_t *mounts, uint32_t max_mounts) {
+    if (!mounts || max_mounts == 0) return -EINVAL;
+
+    spinlock_lock(&vfs_lock);
+    uint32_t count = 0;
+    mount_t *mnt = mount_list;
+
+    while (mnt && count < max_mounts) {
+        memset(&mounts[count], 0, sizeof(vfs_mount_info_t));
+        vfs_dentry_path(mnt->mount_point, mounts[count].mount_point, sizeof(mounts[count].mount_point));
+        strncpy(mounts[count].fs_type, vfs_fs_type_name(mnt->sb->fs_type), sizeof(mounts[count].fs_type) - 1);
+        mounts[count].total_blocks = mnt->sb->total_blocks;
+        mounts[count].free_blocks = mnt->sb->free_blocks;
+        mounts[count].block_size = mnt->sb->block_size;
+        count++;
+        mnt = mnt->next;
+    }
+
+    spinlock_unlock(&vfs_lock);
+    return (int32_t)count;
+}
+
+/* ===== 错误码字符串 ===== */
+
+const char *vfs_strerror(int32_t err) {
+    switch (err) {
+        case 0: return "Success";
+        case -EPERM: return "Operation not permitted";
+        case -ENOENT: return "No such file or directory";
+        case -EIO: return "I/O error";
+        case -EBADF: return "Bad file descriptor";
+        case -ENOMEM: return "Out of memory";
+        case -EBUSY: return "Device or resource busy";
+        case -EEXIST: return "File exists";
+        case -ENODEV: return "No such device";
+        case -ENOTDIR: return "Not a directory";
+        case -EISDIR: return "Is a directory";
+        case -EINVAL: return "Invalid argument";
+        case -ENOTEMPTY: return "Directory not empty";
+        case -ENOSPC: return "No space left on device";
+        case -EROFS: return "Read-only file system";
+        case -ENOSYS: return "Function not implemented";
+        default: return "Unknown error";
+    }
 }

@@ -19,6 +19,10 @@ typedef struct {
     uint8_t flags;
 } keyboard_event_t;
 
+/* 全局中断信号标志 (Ctrl+C / Ctrl+\ 触发) */
+extern volatile int kb_sigint_pending;
+extern volatile int kb_sigquit_pending;
+
 void keyboard_init(void);
 void keyboard_handler(regs_t *regs);
 int keyboard_get_event(keyboard_event_t *event);
@@ -32,5 +36,9 @@ int keyboard_poll(void);
 
 /* Block until a key event is available (uses semaphore from IRQ handler) */
 void keyboard_wait(void);
+
+/* 信号检查与清除 */
+int kb_signal_check(void);
+void kb_signal_clear(void);
 
 #endif

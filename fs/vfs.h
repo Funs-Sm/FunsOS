@@ -15,6 +15,46 @@
 #define FS_TYPE_XFS    8
 #define FS_TYPE_TARFS  9   /* 补充遗漏的 TARFS 类型 */
 #define FS_TYPE_FUSE   10  /* FUSE 用户态文件系统 */
+#define FS_TYPE_MINIX  11  /* MINIX 文件系统 */
+#define FS_TYPE_REISERFS 12 /* ReiserFS 文件系统 */
+#define FS_TYPE_REISER4  13 /* Reiser4 文件系统 */
+#define FS_TYPE_ZFS    14  /* ZFS 文件系统 */
+#define FS_TYPE_UFS    15  /* UFS (Unix File System) */
+#define FS_TYPE_JFS    16  /* JFS (IBM Journaled File System) */
+#define FS_TYPE_HFS    17  /* HFS (Apple Hierarchical File System) */
+#define FS_TYPE_HFSPLUS 18 /* HFS+ 文件系统 */
+#define FS_TYPE_APFS   19  /* APFS (Apple File System) */
+#define FS_TYPE_NTFS   20  /* NTFS 文件系统 */
+#define FS_TYPE_EXFAT  21  /* exFAT 文件系统 */
+#define FS_TYPE_ISO9660 22 /* ISO 9660 (CD-ROM) */
+#define FS_TYPE_UDF    23  /* UDF (DVD) */
+#define FS_TYPE_SQUASHFS 24 /* SquashFS 压缩文件系统 */
+#define FS_TYPE_CRAMFS 25  /* CramFS 压缩文件系统 */
+#define FS_TYPE_JFFS2  26  /* JFFS2 (Flash 文件系统) */
+#define FS_TYPE_YAFFS2 27  /* YAFFS2 (NAND Flash) */
+#define FS_TYPE_UBIFS  28  /* UBIFS (Unsorted Block Image) */
+#define FS_TYPE_LOGFS  29  /* LogFS */
+#define FS_TYPE_NILFS  30  /* NILFS (New Implementation of a Log-structured FS) */
+#define FS_TYPE_FFS    31  /* FFS (Fast File System) */
+#define FS_TYPE_LUSTRE 32  /* Lustre 集群文件系统 */
+#define FS_TYPE_CEPH   33  /* Ceph 分布式文件系统 */
+#define FS_TYPE_GPFS   34  /* GPFS (IBM General Parallel File System) */
+#define FS_TYPE_OCFS2  35  /* OCFS2 (Oracle Cluster File System) */
+#define FS_TYPE_GFS2   36  /* GFS2 (Global File System 2) */
+#define FS_TYPE_XFS2   37  /* XFS v2 */
+#define FS_TYPE_BFS    38  /* BFS (Be File System) */
+#define FS_TYPE_SYSV   39  /* System V 文件系统 */
+#define FS_TYPE_COHERENT 40 /* Coherent 文件系统 */
+#define FS_TYPE_QNX4   41  /* QNX4 文件系统 */
+#define FS_TYPE_QNX6   42  /* QNX6 文件系统 */
+#define FS_TYPE_AFFS   43  /* Amiga Fast File System */
+#define FS_TYPE_ADFS   44  /* Acorn Disc Filing System */
+#define FS_TYPE_HPFS   45  /* HPFS (High Performance File System) */
+#define FS_TYPE_VXFS   46  /* VxFS (Veritas File System) */
+#define FS_TYPE_F2FS   47  /* F2FS (Flash-Friendly File System) */
+#define FS_TYPE_ORANGEFS 48 /* OrangeFS (PVFS) */
+#define FS_TYPE_GLUSTERFS 49 /* GlusterFS */
+#define FS_TYPE_COUNT  50  /* 文件系统类型总数 */
 
 #define FILE_MODE_READ   0x01
 #define FILE_MODE_WRITE  0x02
@@ -185,5 +225,25 @@ int32_t vfs_closedir(file_t *dir);
 /* Per-process (or global for now) working directory */
 int32_t vfs_chdir(const char *path);
 const char *vfs_getcwd(void);
+
+/* 文件系统类型信息 */
+const char *vfs_fs_type_name(uint32_t fs_type);
+int vfs_fs_type_from_name(const char *name, uint32_t *fs_type);
+
+/* 挂载点信息 */
+typedef struct {
+    char mount_point[256];
+    char fs_type[32];
+    uint64_t total_blocks;
+    uint64_t free_blocks;
+    uint32_t block_size;
+    uint8_t  read_only;
+} vfs_mount_info_t;
+
+int32_t vfs_get_mount_info(const char *path, vfs_mount_info_t *info);
+int32_t vfs_list_mounts(vfs_mount_info_t *mounts, uint32_t max_mounts);
+
+/* 错误码辅助 */
+const char *vfs_strerror(int32_t err);
 
 #endif

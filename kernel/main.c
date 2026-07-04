@@ -53,6 +53,8 @@
 #include "kdebug.h"
 #include "kmodule.h"
 #include "perf.h"
+#include "notifier.h"
+#include "health.h"
 #include "sound.h"
 #include "e1000e.h"
 #include "ixgbe.h"
@@ -73,6 +75,9 @@
 #include "service_registry.h"
 #include "splash.h"
 #include "app_registry.h"
+#include "path.h"
+#include "dentry.h"
+#include "string.h"
 
 static inline void sti(void) {
     asm volatile("sti");
@@ -80,6 +85,418 @@ static inline void sti(void) {
 
 static inline void hlt(void) {
     asm volatile("hlt");
+}
+
+static void init_create_file(const char *path, const char *content) {
+    dentry_t *dir_dentry = NULL;
+    char dir_path[512], name[256];
+    strncpy(dir_path, path, 511); dir_path[511] = '\0';
+    char *slash = strrchr(dir_path, '/');
+    if (!slash) return;
+    strncpy(name, slash + 1, 255); name[255] = '\0';
+    if (slash == dir_path) {
+        dir_path[1] = '\0';
+    } else {
+        *slash = '\0';
+    }
+    if (path_resolve(dir_path, &dir_dentry) != 0 || !dir_dentry ||
+        !dir_dentry->inode || !dir_dentry->inode->ops ||
+        !dir_dentry->inode->ops->create) {
+        return;
+    }
+    dir_dentry->inode->ops->create(dir_dentry, name, FILE_MODE_READ | FILE_MODE_WRITE);
+    if (!content || !*content) return;
+    file_t *f = NULL;
+    if (vfs_open(path, FILE_MODE_READ | FILE_MODE_WRITE, &f) != 0 || !f) return;
+    vfs_write(f, content, (uint32_t)strlen(content));
+    vfs_close(f);
+}
+
+static void init_mkdir(const char *path) {
+    char parent_path[512], name[256];
+    strncpy(parent_path, path, 511); parent_path[511] = '\0';
+    char *slash = strrchr(parent_path, '/');
+    if (!slash) return;
+    strncpy(name, slash + 1, 255); name[255] = '\0';
+    if (slash == parent_path) {
+        parent_path[1] = '\0';
+    } else {
+        *slash = '\0';
+    }
+    dentry_t *dir_dentry = NULL;
+    if (path_resolve(parent_path, &dir_dentry) != 0 || !dir_dentry ||
+        !dir_dentry->inode || !dir_dentry->inode->ops ||
+        !dir_dentry->inode->ops->mkdir) {
+        return;
+    }
+    dir_dentry->inode->ops->mkdir(dir_dentry, name, FILE_MODE_READ | FILE_MODE_WRITE | FILE_MODE_DIR);
+}
+
+static void init_root_files(void) {
+    init_mkdir("/home");
+    init_mkdir("/home/user");
+    init_mkdir("/docs");
+    init_mkdir("/tmp");
+    init_mkdir("/etc");
+
+    init_create_file("/welcome.txt",
+        "====================================================\n"
+        "  Welcome to FunsOS v0.5\n"
+        "====================================================\n"
+        "\n"
+        "  This is a hobby operating system written in C.\n"
+        "  Features:\n"
+        "    - Full TCP/IP network stack\n"
+        "    - RAMFS root file system\n"
+        "    - Multiple file system support (EXT2/3/4, FAT32, etc.)\n"
+        "    - Command-line shell with 60+ built-in commands\n"
+        "    - FunRender graphics engine\n"
+        "\n"
+        "  Quick commands:\n"
+        "    help     - Show all commands\n"
+        "    ls       - List directory contents\n"
+        "    cat      - Show file contents\n"
+        "    ifconfig - Show network interfaces\n"
+        "    ping     - Test network connectivity\n"
+        "\n"
+        "  Have fun!\n"
+        "====================================================\n");
+
+    init_create_file("/README.txt",
+        "FunsOS - Fun Operating System\n"
+        "=============================\n"
+        "\n"
+        "About\n"
+        "-----\n"
+        "FunsOS is a 32-bit x86 hobby OS written from scratch in C.\n"
+        "It boots via GRUB-compatible bootloader and runs in protected mode.\n"
+        "\n"
+        "Directory Structure\n"
+        "-------------------\n"
+        "  /boot/    - Boot files\n"
+        "  /etc/     - System configuration\n"
+        "  /home/    - User directories\n"
+        "  /docs/    - Documentation\n"
+        "  /tmp/     - Temporary files\n"
+        "  /dev/     - Device files (devfs)\n"
+        "\n"
+        "Network Commands\n"
+        "----------------\n"
+        "  ifconfig   - Display network interfaces\n"
+        "  ping <ip>  - Send ICMP echo requests\n"
+        "  route      - Show routing table\n"
+        "  dns <host> - DNS lookup\n"
+        "  wget <url> - Download file via HTTP\n"
+        "  netstat    - Show network statistics\n"
+        "  arp        - Show ARP table\n"
+        "\n"
+        "File System Commands\n"
+        "--------------------\n"
+        "  ls / dir   - List files\n"
+        "  cd / go    - Change directory\n"
+        "  pwd / where- Print working directory\n"
+        "  cat / type - Display file contents\n"
+        "  touch      - Create empty file\n"
+        "  mkdir      - Create directory\n"
+        "  cp / copy  - Copy files\n"
+        "  rm / del   - Delete files\n"
+        "  mv / ren   - Move/rename files\n"
+        "\n");
+
+    init_create_file("/docs/network.txt",
+        "FunsOS Networking Guide\n"
+        "========================\n"
+        "\n"
+        "Supported Network Drivers\n"
+        "-------------------------\n"
+        "  - Intel E1000 / E1000e (i219, i225)\n"
+        "  - Realtek RTL8139 / RTL8169\n"
+        "  - AMD PCnet32 (pcnet)\n"
+        "  - NE2000 compatible (ne2k_pci)\n"
+        "  - VirtIO net (virtio-net)\n"
+        "  - Mellanox ConnectX-3 (cx3)\n"
+        "  - Broadcom BCM57xx (b57)\n"
+        "  - Davicom DM9000\n"
+        "\n"
+        "Protocol Stack\n"
+        "--------------\n"
+        "  - Ethernet / ARP\n"
+        "  - IPv4 / IPv6\n"
+        "  - ICMP / IGMP\n"
+        "  - TCP / UDP / UDP-Lite\n"
+        "  - DNS / DHCP / NTP\n"
+        "  - HTTP client/server\n"
+        "  - FTP server / Telnet / TFTP\n"
+        "  - TCP congestion control\n"
+        "  - Netfilter / Firewall / NAT\n"
+        "\n"
+        "Loopback Test\n"
+        "-------------\n"
+        "The loopback interface (lo, 127.0.0.1) is always available.\n"
+        "Test it with: ping 127.0.0.1\n"
+        "\n");
+
+    init_create_file("/docs/commands.txt",
+        "FunsOS Shell Command Reference\n"
+        "===============================\n"
+        "\n"
+        "Navigation:\n"
+        "  ls, dir, pt   List directory contents\n"
+        "  cd, go        Change directory\n"
+        "  pwd, where    Print working directory\n"
+        "  tree          Show directory tree\n"
+        "\n"
+        "File Operations:\n"
+        "  cat, type     Display file contents\n"
+        "  touch         Create empty file\n"
+        "  mkdir         Create directory\n"
+        "  cp, copy      Copy files\n"
+        "  rm, del       Delete files\n"
+        "  mv, ren       Move/rename files\n"
+        "  append        Append text to file\n"
+        "  head          Show first lines of file\n"
+        "  tail          Show last lines of file\n"
+        "  wc            Word/line/character count\n"
+        "  grep          Search text in file\n"
+        "  sort          Sort file lines\n"
+        "  uniq          Remove duplicate lines\n"
+        "  diff          Compare two files\n"
+        "  stat          Show file status\n"
+        "  chmod         Change file mode\n"
+        "  chown         Change file owner\n"
+        "  ln, ln_s      Create links\n"
+        "\n"
+        "System:\n"
+        "  ver           Show OS version\n"
+        "  sysinfo       System information\n"
+        "  mem / free    Memory usage\n"
+        "  ps            Process list\n"
+        "  top           System monitor\n"
+        "  uptime        System uptime\n"
+        "  dev           Device list\n"
+        "  dmesg         Kernel messages\n"
+        "  date / time   Date and time\n"
+        "  reboot / halt Restart / shutdown\n"
+        "\n"
+        "Network:\n"
+        "  ifconfig      Network interfaces\n"
+        "  ping          ICMP echo\n"
+        "  route         Routing table\n"
+        "  dns           DNS lookup\n"
+        "  wget          HTTP download\n"
+        "  netstat       Network stats\n"
+        "  arp           ARP table\n"
+        "  traceroute    Trace route\n"
+        "\n");
+
+    init_create_file("/etc/hostname", "funsos\n");
+    init_create_file("/etc/hosts",
+        "127.0.0.1   localhost funsos\n"
+        "::1         localhost\n");
+
+    init_create_file("/home/user/notes.txt",
+        "User Notes\n"
+        "==========\n"
+        "\n"
+        "Welcome to your home directory!\n"
+        "This is a great place to store your files.\n"
+        "\n"
+        "Things to try:\n"
+        "  1. echo \"Hello World\" > hello.txt\n"
+        "  2. cat hello.txt\n"
+        "  3. ls -la /\n"
+        "  4. ping 127.0.0.1\n"
+        "\n");
+
+    init_create_file("/tmp/readme.txt",
+        "Temporary directory\n"
+        "===================\n"
+        "\n"
+        "Files in this directory may be deleted on reboot.\n");
+
+    /* ---- Code examples ---- */
+    init_mkdir("/src");
+    init_create_file("/src/hello.c",
+        "#include <stdio.h>\n"
+        "\n"
+        "int main(void) {\n"
+        "    printf(\"Hello, World!\\n\");\n"
+        "    return 0;\n"
+        "}\n");
+
+    init_create_file("/src/hello.h",
+        "#ifndef HELLO_H\n"
+        "#define HELLO_H\n"
+        "\n"
+        "void say_hello(void);\n"
+        "\n"
+        "#endif\n");
+
+    init_create_file("/src/main.py",
+        "#!/usr/bin/env python3\n"
+        "\n"
+        "def main():\n"
+        "    print(\"Hello from Python!\")\n"
+        "    for i in range(5):\n"
+        "        print(f\"Count: {i}\")\n"
+        "\n"
+        "if __name__ == \"__main__\":\n"
+        "    main()\n");
+
+    init_create_file("/src/boot.asm",
+        "; Simple boot sector example\n"
+        "org 0x7c00\n"
+        "\n"
+        "start:\n"
+        "    mov ah, 0x0e\n"
+        "    mov al, 'H'\n"
+        "    int 0x10\n"
+        "    jmp $\n"
+        "\n"
+        "times 510-($-$$) db 0\n"
+        "dw 0xaa55\n");
+
+    init_create_file("/src/Makefile",
+        "CC = gcc\n"
+        "CFLAGS = -Wall -Wextra -O2\n"
+        "\n"
+        "all: hello\n"
+        "\n"
+        "hello: hello.c\n"
+        "\t$(CC) $(CFLAGS) -o $@ $<\n"
+        "\n"
+        "clean:\n"
+        "\trm -f hello\n"
+        "\n"
+        ".PHONY: all clean\n");
+
+    /* ---- Web examples ---- */
+    init_mkdir("/web");
+    init_create_file("/web/index.html",
+        "<!DOCTYPE html>\n"
+        "<html>\n"
+        "<head>\n"
+        "    <title>Welcome to FunsOS</title>\n"
+        "    <link rel=\"stylesheet\" href=\"style.css\">\n"
+        "</head>\n"
+        "<body>\n"
+        "    <h1>Hello from FunsOS!</h1>\n"
+        "    <p>This is a sample HTML page.</p>\n"
+        "    <script src=\"app.js\"></script>\n"
+        "</body>\n"
+        "</html>\n");
+
+    init_create_file("/web/style.css",
+        "body {\n"
+        "    font-family: sans-serif;\n"
+        "    background: #f0f0f0;\n"
+        "    color: #333;\n"
+        "    margin: 40px;\n"
+        "}\n"
+        "\n"
+        "h1 {\n"
+        "    color: #0066cc;\n"
+        "}\n");
+
+    init_create_file("/web/app.js",
+        "// Sample JavaScript\n"
+        "document.addEventListener('DOMContentLoaded', function() {\n"
+        "    console.log('FunsOS web app loaded');\n"
+        "    alert('Welcome to FunsOS!');\n"
+        "});\n");
+
+    init_create_file("/web/config.json",
+        "{\n"
+        "  \"title\": \"FunsOS Web\",\n"
+        "  \"version\": \"0.5.0\",\n"
+        "  \"features\": [\"network\", \"filesystem\", \"multitasking\"],\n"
+        "  \"debug\": true\n"
+        "}\n");
+
+    /* ---- Config examples ---- */
+    init_create_file("/etc/config.ini",
+        "[system]\n"
+        "name = FunsOS\n"
+        "version = 0.5\n"
+        "\n"
+        "[network]\n"
+        "hostname = funsos\n"
+        "dns = 8.8.8.8\n"
+        "\n"
+        "[gui]\n"
+        "theme = default\n"
+        "resolution = 1024x768\n");
+
+    init_create_file("/etc/network.conf",
+        "# Network configuration\n"
+        "interface eth0\n"
+        "{\n"
+        "    ip = 192.168.1.100\n"
+        "    netmask = 255.255.255.0\n"
+        "    gateway = 192.168.1.1\n"
+        "    dns = 8.8.8.8\n"
+        "}\n");
+
+    /* ---- Documents ---- */
+    init_create_file("/docs/readme.md",
+        "# FunsOS Documentation\n"
+        "\n"
+        "## Overview\n"
+        "\n"
+        "FunsOS is a hobby operating system written in C.\n"
+        "\n"
+        "## Features\n"
+        "\n"
+        "- **Preemptive multitasking**\n"
+        "- **Virtual memory management**\n"
+        "- **TCP/IP network stack**\n"
+        "- **Multiple file systems**\n"
+        "\n"
+        "## Quick Start\n"
+        "\n"
+        "```bash\n"
+        "make && make run\n"
+        "```\n");
+
+    /* ---- Data files ---- */
+    init_mkdir("/data");
+    init_create_file("/data/users.csv",
+        "id,username,email,created_at\n"
+        "1,admin,admin@funsos.local,2024-01-01\n"
+        "2,user,user@funsos.local,2024-01-15\n"
+        "3,guest,guest@funsos.local,2024-02-01\n");
+
+    init_create_file("/data/settings.xml",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<settings>\n"
+        "  <appearance>\n"
+        "    <theme>dark</theme>\n"
+        "    <font-size>12</font-size>\n"
+        "  </appearance>\n"
+        "  <behavior>\n"
+        "    <autosave>true</autosave>\n"
+        "    <notifications>true</notifications>\n"
+        "  </behavior>\n"
+        "</settings>\n");
+
+    /* ---- Log files ---- */
+    init_mkdir("/var");
+    init_mkdir("/var/log");
+    init_create_file("/var/log/system.log",
+        "[00:00:01] SYSTEM: FunsOS v0.5 booting...\n"
+        "[00:00:02] SYSTEM: Memory initialized (128MB total)\n"
+        "[00:00:03] VFS: Root filesystem mounted (ramfs)\n"
+        "[00:00:04] NET: Loopback interface up\n"
+        "[00:00:05] SYSTEM: Shell started\n");
+
+    /* ---- Archive placeholders (just metadata) ---- */
+    init_create_file("/backup.tar.gz",
+        "This is a placeholder for a tar.gz archive.\n"
+        "In a real system this would be binary compressed data.\n");
+
+    init_create_file("/image.bmp",
+        "BMP image placeholder.\n"
+        "This would contain binary pixel data in a real system.\n");
 }
 
 void kernel_main(void) {
@@ -171,6 +588,14 @@ void kernel_main(void) {
     perf_init();
     klog_info("Performance monitoring initialized");
 
+    /* 通知链子系统 */
+    notifier_init();
+    klog_info("Notifier chain subsystem initialized");
+
+    /* 系统健康监控 */
+    health_init();
+    klog_info("System health monitor initialized");
+
     /* 音频子系统及驱动 */
     sound_init();
     klog_info("Audio subsystem initialized");
@@ -217,6 +642,7 @@ void kernel_main(void) {
     devfs_init();
     initrd_init(0, 0);
     tarfs_init();
+    init_root_files();
     klog_info("VFS, initrd and tarfs initialized");
 
     keyboard_init();
@@ -231,21 +657,29 @@ void kernel_main(void) {
     klog_info("User management initialized");
 
     /* Initialize ACPI sleep/wake, CPU frequency scaling, battery */
+    klog_info("init: cpufreq...");
     cpufreq_init();
+    klog_info("init: battery...");
     battery_init();
 
-    /* Initialize DRM/KMS and GPU drivers */
+    /* Initialize DRM/KMS core */
+    klog_info("init: drm...");
     drm_init();
-    i915_init();
 
-
-    /* PCI 总线扫描和驱动注册 */
+    /* PCI bus scan and driver registration */
+    klog_info("init: pci bus...");
     pci_bus_init();
     klog_info("PCI bus initialized");
     pci_bus_scan();
     klog_info("PCI bus scan complete");
 
-    /* AMD GPU 驱动 */
+    /* GPU drivers (after PCI init) */
+    klog_info("init: i915...");
+    i915_init();
+    klog_info("Intel GPU driver initialized");
+
+    /* AMD GPU driver */
+    klog_info("init: amdgpu...");
     amdgpu_init();
     klog_info("AMD GPU driver initialized");
 

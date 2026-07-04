@@ -2,6 +2,7 @@
 #include "vfs_ext.h"
 #include "kheap.h"
 #include "string.h"
+#include "stdio.h"
 #include "klog.h"
 
 /* ================================================================ */
@@ -2224,4 +2225,1242 @@ int vfs_ext_aio_cleanup(void)
         }
     }
     return cleaned;
+}
+
+/* ================================================================ */
+/*  9) File Snapshots (文件快照)                                     */
+/* ================================================================ */
+
+static vfs_ext_snapshot_t g_snapshots[VFS_EXT_SNAPSHOT_MAX];
+static uint32_t g_snapshot_next_id = 1;
+static int g_snapshot_initialized = 0;
+
+static void snapshot_init(void)
+{
+    if (g_snapshot_initialized) return;
+    memset(g_snapshots, 0, sizeof(g_snapshots));
+    g_snapshot_next_id = 1;
+    g_snapshot_initialized = 1;
+}
+
+static int snapshot_find_by_id(uint32_t snap_id)
+{
+    uint32_t i;
+    for (i = 0; i < VFS_EXT_SNAPSHOT_MAX; i++) {
+        if (g_snapshots[i].active && g_snapshots[i].snap_id == snap_id) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static int snapshot_alloc_slot(void)
+{
+    uint32_t i;
+    for (i = 0; i < VFS_EXT_SNAPSHOT_MAX; i++) {
+        if (!g_snapshots[i].active) {
+            memset(&g_snapshots[i], 0, sizeof(g_snapshots[i]));
+            g_snapshots[i].active = 1;
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+int vfs_ext_snapshot_create(uint32_t inode, const char *name, uint32_t *snap_id)
+{
+    vfs_ext_node_t *node;
+    int slot;
+    uint32_t copy_size;
+
+    snapshot_init();
+    if (!snap_id) return -22;
+
+    node = g_root;
+    {
+        vfs_ext_node_t *cur = g_root;
+        vfs_ext_node_t *found = NULL;
+        vfs_ext_node_t *stack[1024];
+        int depth = 0;
+        stack[depth++] = cur;
+        while (depth > 0) {
+            cur = stack[--depth];
+            if (cur->inode == inode) {
+                found = cur;
+                break;
+            }
+            cur = cur->children;
+            while (cur) {
+                if (depth < 1024) {
+                    stack[depth++] = cur;
+                }
+                cur = cur->next;
+            }
+        }
+        node = found;
+    }
+
+    if (!node) {
+        klog_err("vfs_ext: snapshot create - inode %u not found", inode);
+        return -2;
+    }
+    if (node->type != VFS_EXT_TYPE_FILE) {
+        klog_err("vfs_ext: snapshot create - inode %u is not a file", inode);
+        return -22;
+    }
+    if (node->size > VFS_EXT_SNAPSHOT_DATA_MAX) {
+        klog_err("vfs_ext: snapshot create - file too large (%u bytes)", node->size);
+        return -12;
+    }
+
+    slot = snapshot_alloc_slot();
+    if (slot < 0) {
+        klog_err("vfs_ext: snapshot table full");
+        return -12;
+    }
+
+    g_snapshots[slot].snap_id = g_snapshot_next_id++;
+    g_snapshots[slot].inode = inode;
+    g_snapshots[slot].size = node->size;
+    g_snapshots[slot].created = 0;
+    g_snapshots[slot].active = 1;
+
+    if (name) {
+        strncpy(g_snapshots[slot].name, name, VFS_EXT_SNAPSHOT_NAME_MAX - 1);
+    }
+    strncpy(g_snapshots[slot].path, node->path, sizeof(g_snapshots[slot].path) - 1);
+
+    copy_size = node->size;
+    if (copy_size > VFS_EXT_SNAPSHOT_DATA_MAX) {
+        copy_size = VFS_EXT_SNAPSHOT_DATA_MAX;
+    }
+    if (node->fs_data && copy_size > 0) {
+        memcpy(g_snapshots[slot].data, node->fs_data, copy_size);
+    }
+
+    *snap_id = g_snapshots[slot].snap_id;
+    klog_info("vfs_ext: snapshot created id=%u inode=%u size=%u",
+        g_snapshots[slot].snap_id, inode, copy_size);
+    return 0;
+}
+
+int vfs_ext_snapshot_restore(uint32_t snap_id)
+{
+    vfs_ext_node_t *node;
+    int slot;
+    void *new_data;
+
+    snapshot_init();
+
+    slot = snapshot_find_by_id(snap_id);
+    if (slot < 0) {
+        klog_err("vfs_ext: snapshot restore - snapshot %u not found", snap_id);
+        return -2;
+    }
+
+    {
+        vfs_ext_node_t *cur = g_root;
+        vfs_ext_node_t *found = NULL;
+        vfs_ext_node_t *stack[1024];
+        int depth = 0;
+        stack[depth++] = cur;
+        while (depth > 0) {
+            cur = stack[--depth];
+            if (cur->inode == g_snapshots[slot].inode) {
+                found = cur;
+                break;
+            }
+            cur = cur->children;
+            while (cur) {
+                if (depth < 1024) {
+                    stack[depth++] = cur;
+                }
+                cur = cur->next;
+            }
+        }
+        node = found;
+    }
+
+    if (!node) {
+        klog_err("vfs_ext: snapshot restore - inode %u not found", g_snapshots[slot].inode);
+        return -2;
+    }
+
+    new_data = kmalloc(g_snapshots[slot].size);
+    if (!new_data && g_snapshots[slot].size > 0) {
+        klog_err("vfs_ext: snapshot restore - memory allocation failed");
+        return -12;
+    }
+
+    if (node->fs_data) {
+        kfree(node->fs_data);
+    }
+
+    if (g_snapshots[slot].size > 0) {
+        memcpy(new_data, g_snapshots[slot].data, g_snapshots[slot].size);
+    }
+    node->fs_data = new_data;
+    node->size = g_snapshots[slot].size;
+
+    klog_info("vfs_ext: snapshot restored id=%u inode=%u size=%u",
+        snap_id, g_snapshots[slot].inode, g_snapshots[slot].size);
+    return 0;
+}
+
+int vfs_ext_snapshot_delete(uint32_t snap_id)
+{
+    int slot;
+
+    snapshot_init();
+
+    slot = snapshot_find_by_id(snap_id);
+    if (slot < 0) {
+        klog_err("vfs_ext: snapshot delete - snapshot %u not found", snap_id);
+        return -2;
+    }
+
+    g_snapshots[slot].active = 0;
+    klog_info("vfs_ext: snapshot deleted id=%u", snap_id);
+    return 0;
+}
+
+int vfs_ext_snapshot_list(uint32_t inode, vfs_ext_snapshot_t *buf, uint32_t max_count)
+{
+    uint32_t i;
+    int count = 0;
+
+    snapshot_init();
+    if (!buf || max_count == 0) return -22;
+
+    for (i = 0; i < VFS_EXT_SNAPSHOT_MAX; i++) {
+        if (g_snapshots[i].active && g_snapshots[i].inode == inode) {
+            if ((uint32_t)count >= max_count) break;
+            memcpy(&buf[count], &g_snapshots[i], sizeof(vfs_ext_snapshot_t));
+            count++;
+        }
+    }
+    return count;
+}
+
+int vfs_ext_snapshot_get(uint32_t snap_id, vfs_ext_snapshot_t *snap)
+{
+    int slot;
+
+    snapshot_init();
+    if (!snap) return -22;
+
+    slot = snapshot_find_by_id(snap_id);
+    if (slot < 0) {
+        klog_err("vfs_ext: snapshot get - snapshot %u not found", snap_id);
+        return -2;
+    }
+
+    memcpy(snap, &g_snapshots[slot], sizeof(vfs_ext_snapshot_t));
+    return 0;
+}
+
+/* ================================================================ */
+/*  10) File Versioning (文件版本控制)                               */
+/* ================================================================ */
+
+static vfs_ext_version_t g_versions[VFS_EXT_VERSION_MAX];
+static uint32_t g_version_next = 1;
+static int g_version_initialized = 0;
+
+static void version_init(void)
+{
+    if (g_version_initialized) return;
+    memset(g_versions, 0, sizeof(g_versions));
+    g_version_next = 1;
+    g_version_initialized = 1;
+}
+
+static int version_find(uint32_t inode, uint32_t version)
+{
+    uint32_t i;
+    for (i = 0; i < VFS_EXT_VERSION_MAX; i++) {
+        if (g_versions[i].active && g_versions[i].inode == inode && g_versions[i].version == version) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static int version_alloc_slot(void)
+{
+    uint32_t i;
+    for (i = 0; i < VFS_EXT_VERSION_MAX; i++) {
+        if (!g_versions[i].active) {
+            memset(&g_versions[i], 0, sizeof(g_versions[i]));
+            g_versions[i].active = 1;
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static vfs_ext_node_t *find_node_by_inode(uint32_t inode)
+{
+    vfs_ext_node_t *cur = g_root;
+    vfs_ext_node_t *stack[1024];
+    int depth = 0;
+
+    if (!g_root) return NULL;
+    stack[depth++] = cur;
+    while (depth > 0) {
+        cur = stack[--depth];
+        if (cur->inode == inode) {
+            return cur;
+        }
+        cur = cur->children;
+        while (cur) {
+            if (depth < 1024) {
+                stack[depth++] = cur;
+            }
+            cur = cur->next;
+        }
+    }
+    return NULL;
+}
+
+int vfs_ext_version_save(uint32_t inode, const char *comment, uint32_t *version)
+{
+    vfs_ext_node_t *node;
+    int slot;
+    uint32_t copy_size;
+
+    version_init();
+    if (!version) return -22;
+
+    node = find_node_by_inode(inode);
+    if (!node) {
+        klog_err("vfs_ext: version save - inode %u not found", inode);
+        return -2;
+    }
+    if (node->type != VFS_EXT_TYPE_FILE) {
+        klog_err("vfs_ext: version save - inode %u is not a file", inode);
+        return -22;
+    }
+    if (node->size > VFS_EXT_VERSION_DATA_MAX) {
+        klog_err("vfs_ext: version save - file too large (%u bytes)", node->size);
+        return -12;
+    }
+
+    slot = version_alloc_slot();
+    if (slot < 0) {
+        klog_err("vfs_ext: version table full");
+        return -12;
+    }
+
+    g_versions[slot].version = g_version_next++;
+    g_versions[slot].inode = inode;
+    g_versions[slot].size = node->size;
+    g_versions[slot].modified = 0;
+    g_versions[slot].active = 1;
+
+    if (comment) {
+        strncpy(g_versions[slot].comment, comment, sizeof(g_versions[slot].comment) - 1);
+    }
+
+    copy_size = node->size;
+    if (copy_size > VFS_EXT_VERSION_DATA_MAX) {
+        copy_size = VFS_EXT_VERSION_DATA_MAX;
+    }
+    if (node->fs_data && copy_size > 0) {
+        memcpy(g_versions[slot].data, node->fs_data, copy_size);
+    }
+
+    *version = g_versions[slot].version;
+    klog_info("vfs_ext: version saved v%u inode=%u size=%u",
+        g_versions[slot].version, inode, copy_size);
+    return 0;
+}
+
+int vfs_ext_version_restore(uint32_t inode, uint32_t version)
+{
+    vfs_ext_node_t *node;
+    int slot;
+    void *new_data;
+
+    version_init();
+
+    slot = version_find(inode, version);
+    if (slot < 0) {
+        klog_err("vfs_ext: version restore - version %u not found", version);
+        return -2;
+    }
+
+    node = find_node_by_inode(inode);
+    if (!node) {
+        klog_err("vfs_ext: version restore - inode %u not found", inode);
+        return -2;
+    }
+
+    new_data = kmalloc(g_versions[slot].size);
+    if (!new_data && g_versions[slot].size > 0) {
+        klog_err("vfs_ext: version restore - memory allocation failed");
+        return -12;
+    }
+
+    if (node->fs_data) {
+        kfree(node->fs_data);
+    }
+
+    if (g_versions[slot].size > 0) {
+        memcpy(new_data, g_versions[slot].data, g_versions[slot].size);
+    }
+    node->fs_data = new_data;
+    node->size = g_versions[slot].size;
+
+    klog_info("vfs_ext: version restored v%u inode=%u size=%u",
+        version, inode, g_versions[slot].size);
+    return 0;
+}
+
+int vfs_ext_version_delete(uint32_t inode, uint32_t version)
+{
+    int slot;
+
+    version_init();
+
+    slot = version_find(inode, version);
+    if (slot < 0) {
+        klog_err("vfs_ext: version delete - version %u not found", version);
+        return -2;
+    }
+
+    g_versions[slot].active = 0;
+    klog_info("vfs_ext: version deleted v%u inode=%u", version, inode);
+    return 0;
+}
+
+int vfs_ext_version_list(uint32_t inode, vfs_ext_version_t *buf, uint32_t max_count)
+{
+    uint32_t i;
+    int count = 0;
+
+    version_init();
+    if (!buf || max_count == 0) return -22;
+
+    for (i = 0; i < VFS_EXT_VERSION_MAX; i++) {
+        if (g_versions[i].active && g_versions[i].inode == inode) {
+            if ((uint32_t)count >= max_count) break;
+            memcpy(&buf[count], &g_versions[i], sizeof(vfs_ext_version_t));
+            count++;
+        }
+    }
+    return count;
+}
+
+int vfs_ext_version_diff(uint32_t inode, uint32_t v1, uint32_t v2, char *diff_buf, uint32_t diff_size)
+{
+    int slot1, slot2;
+    uint32_t i;
+    uint32_t diff_count = 0;
+    uint32_t min_size;
+    uint32_t offset = 0;
+    char line[128];
+    int line_len;
+
+    version_init();
+    if (!diff_buf || diff_size == 0) return -22;
+
+    slot1 = version_find(inode, v1);
+    slot2 = version_find(inode, v2);
+    if (slot1 < 0 || slot2 < 0) {
+        klog_err("vfs_ext: version diff - version not found");
+        return -2;
+    }
+
+    diff_buf[0] = '\0';
+
+    if (g_versions[slot1].size != g_versions[slot2].size) {
+        line_len = snprintf(line, sizeof(line), "size diff: %u vs %u\n",
+            g_versions[slot1].size, g_versions[slot2].size);
+        if (offset + (uint32_t)line_len < diff_size) {
+            memcpy(diff_buf + offset, line, (uint32_t)line_len);
+            offset += (uint32_t)line_len;
+        }
+    }
+
+    min_size = g_versions[slot1].size;
+    if (g_versions[slot2].size < min_size) {
+        min_size = g_versions[slot2].size;
+    }
+
+    for (i = 0; i < min_size && diff_count < 100; i++) {
+        if (g_versions[slot1].data[i] != g_versions[slot2].data[i]) {
+            diff_count++;
+            line_len = snprintf(line, sizeof(line), "  byte %u: 0x%02x vs 0x%02x\n",
+                i, g_versions[slot1].data[i], g_versions[slot2].data[i]);
+            if (offset + (uint32_t)line_len < diff_size) {
+                memcpy(diff_buf + offset, line, (uint32_t)line_len);
+                offset += (uint32_t)line_len;
+            }
+        }
+    }
+
+    if (diff_count >= 100) {
+        line_len = snprintf(line, sizeof(line), "... and more differences\n");
+        if (offset + (uint32_t)line_len < diff_size) {
+            memcpy(diff_buf + offset, line, (uint32_t)line_len);
+            offset += (uint32_t)line_len;
+        }
+    }
+
+    line_len = snprintf(line, sizeof(line), "total differences: %u\n", diff_count);
+    if (offset + (uint32_t)line_len < diff_size) {
+        memcpy(diff_buf + offset, line, (uint32_t)line_len);
+        offset += (uint32_t)line_len;
+    }
+
+    diff_buf[offset] = '\0';
+    return (int)diff_count;
+}
+
+/* ================================================================ */
+/*  11) Directory Watch (目录监视)                                   */
+/* ================================================================ */
+
+static vfs_ext_watch_t g_watches[VFS_EXT_WATCH_MAX];
+static uint32_t g_watch_next_id = 1;
+static int g_watch_initialized = 0;
+
+int vfs_ext_watch_init(void)
+{
+    memset(g_watches, 0, sizeof(g_watches));
+    g_watch_next_id = 1;
+    g_watch_initialized = 1;
+    klog_info("vfs_ext: directory watch system initialized");
+    return 0;
+}
+
+static int watch_find_by_id(uint32_t watch_id)
+{
+    uint32_t i;
+    for (i = 0; i < VFS_EXT_WATCH_MAX; i++) {
+        if (g_watches[i].active && g_watches[i].watch_id == watch_id) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+int vfs_ext_watch_add(const char *path, uint32_t event_mask,
+                       vfs_ext_watch_callback_t callback, void *user_data,
+                       uint32_t *watch_id)
+{
+    vfs_ext_node_t *node;
+    uint32_t i;
+
+    if (!g_watch_initialized) vfs_ext_watch_init();
+    if (!path || !watch_id) return -22;
+
+    node = vfs_ext_resolve(path);
+    if (!node) {
+        klog_err("vfs_ext: watch add - path %s not found", path);
+        return -2;
+    }
+    if (node->type != VFS_EXT_TYPE_DIR) {
+        klog_err("vfs_ext: watch add - %s is not a directory", path);
+        return -22;
+    }
+
+    for (i = 0; i < VFS_EXT_WATCH_MAX; i++) {
+        if (!g_watches[i].active) {
+            memset(&g_watches[i], 0, sizeof(g_watches[i]));
+            g_watches[i].watch_id = g_watch_next_id++;
+            strncpy(g_watches[i].path, path, sizeof(g_watches[i].path) - 1);
+            g_watches[i].event_mask = event_mask;
+            g_watches[i].callback = callback;
+            g_watches[i].user_data = user_data;
+            g_watches[i].active = 1;
+            *watch_id = g_watches[i].watch_id;
+            klog_info("vfs_ext: watch added id=%u path=%s mask=0x%x",
+                g_watches[i].watch_id, path, event_mask);
+            return 0;
+        }
+    }
+
+    klog_err("vfs_ext: watch table full");
+    return -12;
+}
+
+int vfs_ext_watch_remove(uint32_t watch_id)
+{
+    int slot;
+
+    if (!g_watch_initialized) return -22;
+
+    slot = watch_find_by_id(watch_id);
+    if (slot < 0) {
+        klog_err("vfs_ext: watch remove - watch %u not found", watch_id);
+        return -2;
+    }
+
+    g_watches[slot].active = 0;
+    klog_info("vfs_ext: watch removed id=%u", watch_id);
+    return 0;
+}
+
+int vfs_ext_watch_poll(uint32_t watch_id, vfs_ext_watch_event_t *events,
+                        uint32_t max_events, uint32_t *event_count)
+{
+    if (!g_watch_initialized) return -22;
+    if (!events || !event_count) return -22;
+
+    if (watch_find_by_id(watch_id) < 0) {
+        klog_err("vfs_ext: watch poll - watch %u not found", watch_id);
+        return -2;
+    }
+
+    *event_count = 0;
+    return 0;
+}
+
+int vfs_ext_watch_notify(const char *path, uint32_t event_type,
+                          const char *name, const char *old_name)
+{
+    uint32_t i;
+    vfs_ext_watch_event_t event;
+    int path_len;
+
+    if (!g_watch_initialized || !path || !name) return -22;
+
+    path_len = strlen(path);
+
+    for (i = 0; i < VFS_EXT_WATCH_MAX; i++) {
+        if (!g_watches[i].active) continue;
+        if (!(g_watches[i].event_mask & event_type)) continue;
+
+        if (strncmp(g_watches[i].path, path, path_len) == 0 &&
+            (path[path_len] == '\0' || path[path_len] == '/')) {
+            memset(&event, 0, sizeof(event));
+            event.watch_id = g_watches[i].watch_id;
+            event.event_type = event_type;
+            strncpy(event.name, name, sizeof(event.name) - 1);
+            if (old_name) {
+                strncpy(event.old_name, old_name, sizeof(event.old_name) - 1);
+            }
+            event.timestamp = 0;
+
+            if (g_watches[i].callback) {
+                g_watches[i].callback(&event, g_watches[i].user_data);
+            }
+        }
+    }
+    return 0;
+}
+
+/* ================================================================ */
+/*  12) File Search (文件搜索)                                       */
+/* ================================================================ */
+
+static int wildcard_match(const char *pattern, const char *str, int case_sensitive)
+{
+    const char *p = pattern;
+    const char *s = str;
+    const char *star = NULL;
+    const char *s_save = NULL;
+
+    while (*s) {
+        if (*p == '*') {
+            if (!*++p) return 1;
+            star = p;
+            s_save = s;
+        } else {
+            char c1 = *p;
+            char c2 = *s;
+            if (!case_sensitive) {
+                if (c1 >= 'A' && c1 <= 'Z') c1 += 32;
+                if (c2 >= 'A' && c2 <= 'Z') c2 += 32;
+            }
+            if (c1 == c2 || *p == '?') {
+                p++;
+                s++;
+            } else if (star) {
+                p = star;
+                s = ++s_save;
+            } else {
+                return 0;
+            }
+        }
+    }
+    while (*p == '*') p++;
+    return (*p == '\0') ? 1 : 0;
+}
+
+static int search_match_file(vfs_ext_node_t *node, const vfs_ext_search_params_t *params)
+{
+    const char *name;
+    const char *ext;
+
+    name = node->path;
+
+    if (params->search_flags & VFS_EXT_SEARCH_BY_NAME) {
+        if (!wildcard_match(params->name_pattern, name, params->case_sensitive)) {
+            return 0;
+        }
+    }
+
+    if (params->search_flags & VFS_EXT_SEARCH_BY_EXT) {
+        ext = strrchr(name, '.');
+        if (ext) {
+            ext++;
+        }
+        if (!ext || !wildcard_match(params->ext_pattern, ext, params->case_sensitive)) {
+            return 0;
+        }
+    }
+
+    if (params->search_flags & VFS_EXT_SEARCH_BY_SIZE) {
+        if (node->size < params->min_size || node->size > params->max_size) {
+            return 0;
+        }
+    }
+
+    if (params->search_flags & VFS_EXT_SEARCH_BY_DATE) {
+        if (node->modified < params->min_date || node->modified > params->max_date) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+static void search_build_full_path(vfs_ext_node_t *node, char *buf, int buf_size)
+{
+    vfs_ext_node_t *stack[256];
+    int depth = 0;
+    int offset = 0;
+    int i;
+
+    while (node && depth < 256) {
+        stack[depth++] = node;
+        node = node->parent;
+    }
+
+    buf[0] = '\0';
+    for (i = depth - 1; i >= 0; i--) {
+        if (i == depth - 1 && strcmp(stack[i]->path, "/") == 0) {
+            strncpy(buf, "/", buf_size - 1);
+            offset = 1;
+        } else {
+            if (offset > 0 && buf[offset - 1] != '/') {
+                if (offset < buf_size - 1) {
+                    buf[offset++] = '/';
+                    buf[offset] = '\0';
+                }
+            }
+            strncat(buf, stack[i]->path, buf_size - offset - 1);
+            offset = strlen(buf);
+        }
+    }
+}
+
+static int search_recursive(vfs_ext_node_t *dir, const vfs_ext_search_params_t *params,
+                             vfs_ext_search_result_t *results, uint32_t max_results,
+                             uint32_t *result_count)
+{
+    vfs_ext_node_t *child;
+    char full_path[VFS_EXT_SEARCH_NAME_MAX];
+
+    if (!dir || !results || !result_count) return -22;
+
+    child = dir->children;
+    while (child) {
+        if (child->type == VFS_EXT_TYPE_DIR) {
+            if (params->recursive) {
+                search_recursive(child, params, results, max_results, result_count);
+            }
+        } else if (child->type == VFS_EXT_TYPE_FILE) {
+            if (search_match_file(child, params)) {
+                if (*result_count < max_results) {
+                    search_build_full_path(child, full_path, sizeof(full_path));
+                    strncpy(results[*result_count].path, full_path, sizeof(results[0].path) - 1);
+                    results[*result_count].inode = child->inode;
+                    results[*result_count].size = child->size;
+                    results[*result_count].type = child->type;
+                    results[*result_count].modified = child->modified;
+                    (*result_count)++;
+                }
+            }
+        }
+        child = child->next;
+    }
+    return 0;
+}
+
+int vfs_ext_search(const char *base_path, const vfs_ext_search_params_t *params,
+                    vfs_ext_search_result_t *results, uint32_t max_results,
+                    uint32_t *result_count)
+{
+    vfs_ext_node_t *base_dir;
+
+    if (!base_path || !params || !results || !result_count) return -22;
+    if (max_results == 0) return -22;
+    if (max_results > VFS_EXT_SEARCH_MAX_RESULTS) {
+        max_results = VFS_EXT_SEARCH_MAX_RESULTS;
+    }
+
+    base_dir = vfs_ext_resolve(base_path);
+    if (!base_dir) {
+        klog_err("vfs_ext: search - base path %s not found", base_path);
+        return -2;
+    }
+    if (base_dir->type != VFS_EXT_TYPE_DIR) {
+        klog_err("vfs_ext: search - %s is not a directory", base_path);
+        return -22;
+    }
+
+    *result_count = 0;
+    search_recursive(base_dir, params, results, max_results, result_count);
+
+    klog_info("vfs_ext: search completed - %u results", *result_count);
+    return 0;
+}
+
+/* ================================================================ */
+/*  13) File Hashing (文件哈希)                                      */
+/* ================================================================ */
+
+static const uint32_t g_crc32_table[256] = {
+    0x00000000, 0x77073096, 0xEE0E612C, 0x990951BA, 0x076DC419, 0x706AF48F,
+    0xE963A535, 0x9E6495A3, 0x0EDB8832, 0x79DCB8A4, 0xE0D5E91E, 0x97D2D988,
+    0x09B64C2B, 0x7EB17CBD, 0xE7B82D07, 0x90BF1D91, 0x1DB71064, 0x6AB020F2,
+    0xF3B97148, 0x84BE41DE, 0x1ADAD47D, 0x6DDDE4EB, 0xF4D4B551, 0x83D385C7,
+    0x136C9856, 0x646BA8C0, 0xFD62F97A, 0x8A65C9EC, 0x14015C4F, 0x63066CD9,
+    0xFA0F3D63, 0x8D080DF5, 0x3B6E20C8, 0x4C69105E, 0xD56041E4, 0xA2677172,
+    0x3C03E4D1, 0x4B04D447, 0xD20D85FD, 0xA50AB56B, 0x35B5A8FA, 0x42B2986C,
+    0xDBBBC9D6, 0xACBCF940, 0x32D86CE3, 0x45DF5C75, 0xDCD60DCF, 0xABD13D59,
+    0x26D930AC, 0x51DE003A, 0xC8D75180, 0xBFD06116, 0x21B4F4B5, 0x56B3C423,
+    0xCFBA9599, 0xB8BDA50F, 0x2802B89E, 0x5F058808, 0xC60CD9B2, 0xB10BE924,
+    0x2F6F7C87, 0x58684C11, 0xC1611DAB, 0xB6662D3D, 0x76DC4190, 0x01DB7106,
+    0x98D220BC, 0xEFD5102A, 0x71B18589, 0x06B6B51F, 0x9FBFE4A5, 0xE8B8D433,
+    0x7807C9A2, 0x0F00F934, 0x9609A88E, 0xE10E9818, 0x7F6A0DBB, 0x086D3D2D,
+    0x91646C97, 0xE6635C01, 0x6B6B51F4, 0x1C6C6162, 0x856530D8, 0xF262004E,
+    0x6C0695ED, 0x1B01A57B, 0x8208F4C1, 0xF50FC457, 0x65B0D9C6, 0x12B7E950,
+    0x8BBEB8EA, 0xFCB9887C, 0x62DD1DDF, 0x15DA2D49, 0x8CD37CF3, 0xFBD44C65,
+    0x4DB26158, 0x3AB551CE, 0xA3BC0074, 0xD4BB30E2, 0x4ADFA541, 0x3DD895D7,
+    0xA4D1C46D, 0xD3D6F4FB, 0x4369E96A, 0x346ED9FC, 0xAD678846, 0xDA60B8D0,
+    0x44042D73, 0x33031DE5, 0xAA0A4C5F, 0xDD0D7CC9, 0x5005713C, 0x270241AA,
+    0xBE0B1010, 0xC90C2086, 0x5768B525, 0x206F85B3, 0xB966D409, 0xCE61E49F,
+    0x5EDEF90E, 0x29D9C998, 0xB0D09822, 0xC7D7A8B4, 0x59B33D17, 0x2EB40D81,
+    0xB7BD5C3B, 0xC0BA6CAD, 0xEDB88320, 0x9ABFB3B6, 0x03B6E20C, 0x74B1D29A,
+    0xEAD54739, 0x9DD277AF, 0x04DB2615, 0x73DC1683, 0xE3630B12, 0x94643B84,
+    0x0D6D6A3E, 0x7A6A5AA8, 0xE40ECF0B, 0x9309FF9D, 0x0A00AE27, 0x7D079EB1,
+    0xF00F9344, 0x8708A3D2, 0x1E01F268, 0x6906C2FE, 0xF762575D, 0x806567CB,
+    0x196C3671, 0x6E6B06E7, 0xFED41B76, 0x89D32BE0, 0x10DA7A5A, 0x67DD4ACC,
+    0xF9B9DF6F, 0x8EBEEFF9, 0x17B7BE43, 0x60B08ED5, 0xD6D6A3E8, 0xA1D1937E,
+    0x38D8C2C4, 0x4FDFF252, 0xD1BB67F1, 0xA6BC5767, 0x3FB506DD, 0x48B2364B,
+    0xD80D2BDA, 0xAF0A1B4C, 0x36034AF6, 0x41047A60, 0xDF60EFC3, 0xA867DF55,
+    0x316E8EEF, 0x4669BE79, 0xCB61B38C, 0xBC66831A, 0x256FD2A0, 0x5268E236,
+    0xCC0C7795, 0xBB0B4703, 0x220216B9, 0x5505262F, 0xC5BA3BBE, 0xB2BD0B28,
+    0x2BB45A92, 0x5CB36A04, 0xC2D7FFA7, 0xB5D0CF31, 0x2CD99E8B, 0x5BDEAE1D,
+    0x9B64C2B0, 0xEC63F226, 0x756AA39C, 0x026D930A, 0x9C0906A9, 0xEB0E363F,
+    0x72076785, 0x05005713, 0x95BF4A82, 0xE2B87A14, 0x7BB12BAE, 0x0CB61B38,
+    0x92D28E9B, 0xE5D5BE0D, 0x7CDCEFB7, 0x0BDBDF21, 0x86D3D2D4, 0xF1D4E242,
+    0x68DDB3F8, 0x1FDA836E, 0x81BE16CD, 0xF6B9265B, 0x6FB077E1, 0x18B74777,
+    0x88085AE6, 0xFF0F6A70, 0x66063BCA, 0x11010B5C, 0x8F659EFF, 0xF862AE69,
+    0x616BFFD3, 0x166CCF45, 0xA00AE278, 0xD70DD2EE, 0x4E048354, 0x3903B3C2,
+    0xA7672661, 0xD06016F7, 0x4969474D, 0x3E6E77DB, 0xAED16A4A, 0xD9D65ADC,
+    0x40DF0B66, 0x37D83BF0, 0xA9BCAE53, 0xDEBB9EC5, 0x47B2CF7F, 0x30B5FFE9,
+    0xBDBDF21C, 0xCABAC28A, 0x53B39330, 0x24B4A3A6, 0xBAD03605, 0xCDD70693,
+    0x54DE5729, 0x23D967BF, 0xB3667A2E, 0xC4614AB8, 0x5D681B02, 0x2A6F2B94,
+    0xB40BBE37, 0xC30C8EA1, 0x5A05DF1B, 0x2D02EF8D
+};
+
+static uint32_t crc32_calculate(const uint8_t *data, uint32_t len)
+{
+    uint32_t crc = 0xFFFFFFFF;
+    uint32_t i;
+
+    if (!data || len == 0) return 0;
+
+    for (i = 0; i < len; i++) {
+        crc = (crc >> 8) ^ g_crc32_table[(crc ^ data[i]) & 0xFF];
+    }
+    return crc ^ 0xFFFFFFFF;
+}
+
+static void md5_simulate(const uint8_t *data, uint32_t len, uint8_t *hash)
+{
+    uint32_t a, b, c, d;
+    uint32_t i;
+
+    a = 0x67452301;
+    b = 0xEFCDAB89;
+    c = 0x98BADCFE;
+    d = 0x10325476;
+
+    for (i = 0; i < len; i++) {
+        uint32_t val = data[i];
+        a = a ^ (val + 0x5A827999);
+        b = b ^ ((val << 3) | (val >> 5));
+        c = c + (val * 0x9E3779B9);
+        d = d ^ ((val << 7) | (val >> 1));
+        a = (a << 5) | (a >> 27);
+        b = (b << 3) | (b >> 29);
+        c = (c << 7) | (c >> 25);
+        d = (d << 11) | (d >> 21);
+    }
+
+    hash[0] = (uint8_t)(a & 0xFF);
+    hash[1] = (uint8_t)((a >> 8) & 0xFF);
+    hash[2] = (uint8_t)((a >> 16) & 0xFF);
+    hash[3] = (uint8_t)((a >> 24) & 0xFF);
+    hash[4] = (uint8_t)(b & 0xFF);
+    hash[5] = (uint8_t)((b >> 8) & 0xFF);
+    hash[6] = (uint8_t)((b >> 16) & 0xFF);
+    hash[7] = (uint8_t)((b >> 24) & 0xFF);
+    hash[8] = (uint8_t)(c & 0xFF);
+    hash[9] = (uint8_t)((c >> 8) & 0xFF);
+    hash[10] = (uint8_t)((c >> 16) & 0xFF);
+    hash[11] = (uint8_t)((c >> 24) & 0xFF);
+    hash[12] = (uint8_t)(d & 0xFF);
+    hash[13] = (uint8_t)((d >> 8) & 0xFF);
+    hash[14] = (uint8_t)((d >> 16) & 0xFF);
+    hash[15] = (uint8_t)((d >> 24) & 0xFF);
+}
+
+static void sha1_simulate(const uint8_t *data, uint32_t len, uint8_t *hash)
+{
+    uint32_t h0, h1, h2, h3, h4;
+    uint32_t i;
+
+    h0 = 0x67452301;
+    h1 = 0xEFCDAB89;
+    h2 = 0x98BADCFE;
+    h3 = 0x10325476;
+    h4 = 0xC3D2E1F0;
+
+    for (i = 0; i < len; i++) {
+        uint32_t val = data[i];
+        h0 = h0 + (val ^ 0xA5);
+        h1 = h1 ^ (val + h0);
+        h2 = h2 + ((h1 << 5) | (h1 >> 27));
+        h3 = h3 ^ (h2 + val);
+        h4 = h4 + ((h3 << 3) | (h3 >> 29));
+    }
+
+    hash[0] = (uint8_t)((h0 >> 24) & 0xFF);
+    hash[1] = (uint8_t)((h0 >> 16) & 0xFF);
+    hash[2] = (uint8_t)((h0 >> 8) & 0xFF);
+    hash[3] = (uint8_t)(h0 & 0xFF);
+    hash[4] = (uint8_t)((h1 >> 24) & 0xFF);
+    hash[5] = (uint8_t)((h1 >> 16) & 0xFF);
+    hash[6] = (uint8_t)((h1 >> 8) & 0xFF);
+    hash[7] = (uint8_t)(h1 & 0xFF);
+    hash[8] = (uint8_t)((h2 >> 24) & 0xFF);
+    hash[9] = (uint8_t)((h2 >> 16) & 0xFF);
+    hash[10] = (uint8_t)((h2 >> 8) & 0xFF);
+    hash[11] = (uint8_t)(h2 & 0xFF);
+    hash[12] = (uint8_t)((h3 >> 24) & 0xFF);
+    hash[13] = (uint8_t)((h3 >> 16) & 0xFF);
+    hash[14] = (uint8_t)((h3 >> 8) & 0xFF);
+    hash[15] = (uint8_t)(h3 & 0xFF);
+    hash[16] = (uint8_t)((h4 >> 24) & 0xFF);
+    hash[17] = (uint8_t)((h4 >> 16) & 0xFF);
+    hash[18] = (uint8_t)((h4 >> 8) & 0xFF);
+    hash[19] = (uint8_t)(h4 & 0xFF);
+}
+
+int vfs_ext_hash_file(uint32_t inode, uint32_t hash_type,
+                       uint8_t *hash_buf, uint32_t hash_size)
+{
+    vfs_ext_node_t *node;
+    uint32_t crc;
+
+    if (!hash_buf) return -22;
+
+    node = find_node_by_inode(inode);
+    if (!node) {
+        klog_err("vfs_ext: hash file - inode %u not found", inode);
+        return -2;
+    }
+    if (node->type != VFS_EXT_TYPE_FILE) {
+        klog_err("vfs_ext: hash file - inode %u is not a file", inode);
+        return -22;
+    }
+
+    switch (hash_type) {
+    case VFS_EXT_HASH_CRC32:
+        if (hash_size < 4) return -22;
+        crc = crc32_calculate((const uint8_t *)node->fs_data, node->size);
+        hash_buf[0] = (uint8_t)((crc >> 24) & 0xFF);
+        hash_buf[1] = (uint8_t)((crc >> 16) & 0xFF);
+        hash_buf[2] = (uint8_t)((crc >> 8) & 0xFF);
+        hash_buf[3] = (uint8_t)(crc & 0xFF);
+        return 4;
+
+    case VFS_EXT_HASH_MD5:
+        if (hash_size < VFS_EXT_HASH_MD5_SIZE) return -22;
+        md5_simulate((const uint8_t *)node->fs_data, node->size, hash_buf);
+        return VFS_EXT_HASH_MD5_SIZE;
+
+    case VFS_EXT_HASH_SHA1:
+        if (hash_size < VFS_EXT_HASH_SHA1_SIZE) return -22;
+        sha1_simulate((const uint8_t *)node->fs_data, node->size, hash_buf);
+        return VFS_EXT_HASH_SHA1_SIZE;
+
+    default:
+        klog_err("vfs_ext: hash file - unsupported hash type %u", hash_type);
+        return -22;
+    }
+}
+
+int vfs_ext_hash_file_at(const char *path, uint32_t hash_type,
+                          uint8_t *hash_buf, uint32_t hash_size)
+{
+    vfs_ext_node_t *node;
+
+    if (!path || !hash_buf) return -22;
+
+    node = vfs_ext_resolve(path);
+    if (!node) {
+        klog_err("vfs_ext: hash file at - %s not found", path);
+        return -2;
+    }
+
+    return vfs_ext_hash_file(node->inode, hash_type, hash_buf, hash_size);
+}
+
+void vfs_ext_hash_to_hex(const uint8_t *hash, uint32_t hash_len,
+                          char *hex_buf, uint32_t hex_size)
+{
+    static const char hex_chars[] = "0123456789abcdef";
+    uint32_t i;
+
+    if (!hash || !hex_buf || hex_size == 0) return;
+
+    for (i = 0; i < hash_len && i * 2 + 1 < hex_size; i++) {
+        hex_buf[i * 2] = hex_chars[(hash[i] >> 4) & 0x0F];
+        hex_buf[i * 2 + 1] = hex_chars[hash[i] & 0x0F];
+    }
+    if (i * 2 < hex_size) {
+        hex_buf[i * 2] = '\0';
+    } else {
+        hex_buf[hex_size - 1] = '\0';
+    }
+}
+
+/* ================================================================ */
+/*  14) File Compression (文件压缩/解压)                             */
+/* ================================================================ */
+
+static int rle_compress(const uint8_t *src, uint32_t src_len,
+                         uint8_t *dst, uint32_t dst_size,
+                         uint32_t *compressed_len)
+{
+    uint32_t i = 0;
+    uint32_t out = 0;
+
+    if (!src || !dst || !compressed_len) return -22;
+    *compressed_len = 0;
+
+    while (i < src_len) {
+        uint8_t current = src[i];
+        uint32_t count = 1;
+
+        while (i + count < src_len && src[i + count] == current && count < 255) {
+            count++;
+        }
+
+        if (out + 2 > dst_size) return -12;
+
+        dst[out++] = (uint8_t)count;
+        dst[out++] = current;
+        i += count;
+    }
+
+    *compressed_len = out;
+    return 0;
+}
+
+static int rle_decompress(const uint8_t *src, uint32_t src_len,
+                           uint8_t *dst, uint32_t dst_size,
+                           uint32_t *decompressed_len)
+{
+    uint32_t i = 0;
+    uint32_t out = 0;
+
+    if (!src || !dst || !decompressed_len) return -22;
+    *decompressed_len = 0;
+
+    while (i + 1 < src_len) {
+        uint32_t count = src[i];
+        uint8_t value = src[i + 1];
+        uint32_t j;
+
+        if (out + count > dst_size) return -12;
+
+        for (j = 0; j < count; j++) {
+            dst[out++] = value;
+        }
+        i += 2;
+    }
+
+    *decompressed_len = out;
+    return 0;
+}
+
+int vfs_ext_compress_buffer(const uint8_t *src, uint32_t src_len,
+                             uint8_t *dst, uint32_t dst_size,
+                             uint32_t algo, uint32_t *compressed_len)
+{
+    if (!src || !dst || !compressed_len) return -22;
+    if (src_len == 0) {
+        *compressed_len = 0;
+        return 0;
+    }
+
+    switch (algo) {
+    case VFS_EXT_COMPRESS_RLE:
+        return rle_compress(src, src_len, dst, dst_size, compressed_len);
+    case VFS_EXT_COMPRESS_NONE:
+        if (src_len > dst_size) return -12;
+        memcpy(dst, src, src_len);
+        *compressed_len = src_len;
+        return 0;
+    default:
+        klog_err("vfs_ext: compress buffer - unsupported algorithm %u", algo);
+        return -22;
+    }
+}
+
+int vfs_ext_decompress_buffer(const uint8_t *src, uint32_t src_len,
+                               uint8_t *dst, uint32_t dst_size,
+                               uint32_t algo, uint32_t *decompressed_len)
+{
+    if (!src || !dst || !decompressed_len) return -22;
+    if (src_len == 0) {
+        *decompressed_len = 0;
+        return 0;
+    }
+
+    switch (algo) {
+    case VFS_EXT_COMPRESS_RLE:
+        return rle_decompress(src, src_len, dst, dst_size, decompressed_len);
+    case VFS_EXT_COMPRESS_NONE:
+        if (src_len > dst_size) return -12;
+        memcpy(dst, src, src_len);
+        *decompressed_len = src_len;
+        return 0;
+    default:
+        klog_err("vfs_ext: decompress buffer - unsupported algorithm %u", algo);
+        return -22;
+    }
+}
+
+int vfs_ext_compress_file(uint32_t src_inode, uint32_t dst_inode,
+                           uint32_t algo, uint32_t *compressed_size)
+{
+    vfs_ext_node_t *src_node;
+    vfs_ext_node_t *dst_node;
+    uint8_t *compressed_buf;
+    uint32_t comp_len;
+    int ret;
+
+    if (!compressed_size) return -22;
+
+    src_node = find_node_by_inode(src_inode);
+    dst_node = find_node_by_inode(dst_inode);
+    if (!src_node || !dst_node) {
+        klog_err("vfs_ext: compress file - inode not found");
+        return -2;
+    }
+    if (src_node->type != VFS_EXT_TYPE_FILE || dst_node->type != VFS_EXT_TYPE_FILE) {
+        klog_err("vfs_ext: compress file - not a file");
+        return -22;
+    }
+
+    compressed_buf = (uint8_t *)kmalloc(src_node->size * 2 + 1024);
+    if (!compressed_buf) {
+        klog_err("vfs_ext: compress file - memory allocation failed");
+        return -12;
+    }
+
+    ret = vfs_ext_compress_buffer((const uint8_t *)src_node->fs_data, src_node->size,
+                                   compressed_buf, src_node->size * 2 + 1024,
+                                   algo, &comp_len);
+    if (ret != 0) {
+        kfree(compressed_buf);
+        return ret;
+    }
+
+    if (dst_node->fs_data) {
+        kfree(dst_node->fs_data);
+    }
+    dst_node->fs_data = kmalloc(comp_len);
+    if (!dst_node->fs_data && comp_len > 0) {
+        kfree(compressed_buf);
+        return -12;
+    }
+    if (comp_len > 0) {
+        memcpy(dst_node->fs_data, compressed_buf, comp_len);
+    }
+    dst_node->size = comp_len;
+
+    kfree(compressed_buf);
+    *compressed_size = comp_len;
+    klog_info("vfs_ext: file compressed %u -> %u bytes (ratio=%.1f%%)",
+        src_node->size, comp_len,
+        src_node->size > 0 ? (float)comp_len / (float)src_node->size * 100.0f : 0.0f);
+    return 0;
+}
+
+int vfs_ext_decompress_file(uint32_t src_inode, uint32_t dst_inode,
+                             uint32_t algo, uint32_t *decompressed_size)
+{
+    vfs_ext_node_t *src_node;
+    vfs_ext_node_t *dst_node;
+    uint8_t *decomp_buf;
+    uint32_t decomp_len;
+    int ret;
+
+    if (!decompressed_size) return -22;
+
+    src_node = find_node_by_inode(src_inode);
+    dst_node = find_node_by_inode(dst_inode);
+    if (!src_node || !dst_node) {
+        klog_err("vfs_ext: decompress file - inode not found");
+        return -2;
+    }
+    if (src_node->type != VFS_EXT_TYPE_FILE || dst_node->type != VFS_EXT_TYPE_FILE) {
+        klog_err("vfs_ext: decompress file - not a file");
+        return -22;
+    }
+
+    decomp_buf = (uint8_t *)kmalloc(src_node->size * 10 + 1024);
+    if (!decomp_buf) {
+        klog_err("vfs_ext: decompress file - memory allocation failed");
+        return -12;
+    }
+
+    ret = vfs_ext_decompress_buffer((const uint8_t *)src_node->fs_data, src_node->size,
+                                     decomp_buf, src_node->size * 10 + 1024,
+                                     algo, &decomp_len);
+    if (ret != 0) {
+        kfree(decomp_buf);
+        return ret;
+    }
+
+    if (dst_node->fs_data) {
+        kfree(dst_node->fs_data);
+    }
+    dst_node->fs_data = kmalloc(decomp_len);
+    if (!dst_node->fs_data && decomp_len > 0) {
+        kfree(decomp_buf);
+        return -12;
+    }
+    if (decomp_len > 0) {
+        memcpy(dst_node->fs_data, decomp_buf, decomp_len);
+    }
+    dst_node->size = decomp_len;
+
+    kfree(decomp_buf);
+    *decompressed_size = decomp_len;
+    klog_info("vfs_ext: file decompressed %u -> %u bytes",
+        src_node->size, decomp_len);
+    return 0;
 }
