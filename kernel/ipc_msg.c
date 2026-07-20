@@ -158,3 +158,31 @@ void msg_destroy(int qid) {
 
     mutex_unlock(&msg_lock);
 }
+
+uint32_t msg_list(msg_queue_info_t *out, uint32_t max_count) {
+    if (!out || max_count == 0) return 0;
+
+    mutex_lock(&msg_lock);
+
+    uint32_t count = 0;
+    for (int i = 0; i < MSG_MAX_QUEUES && count < max_count; i++) {
+        if (queues[i]) {
+            msg_queue_t *q = queues[i];
+            mutex_lock(&q->lock);
+            out[count].key = q->key;
+            out[count].count = q->count;
+            uint32_t used = 0;
+            msg_node_t *node = q->head;
+            while (node) {
+                used += node->size;
+                node = node->next;
+            }
+            out[count].used_bytes = used;
+            mutex_unlock(&q->lock);
+            count++;
+        }
+    }
+
+    mutex_unlock(&msg_lock);
+    return count;
+}

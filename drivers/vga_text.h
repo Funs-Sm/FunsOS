@@ -45,4 +45,9 @@ void vga_text_scroll_home(void);
 void vga_text_scroll_end(void);
 int vga_text_in_scrollback(void);
 
+/* Capture current VGA framebuffer into history buffer.
+ * Used after direct framebuffer writes (e.g. games) to sync
+ * vga_text internal state with the actual screen content. */
+void vga_text_snapshot(void);
+
 #endif

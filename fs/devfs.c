@@ -8,6 +8,7 @@
 #include "rtc.h"
 #include "klog.h"
 #include "sound.h"
+#include "disk_manager.h"
 
 static devfs_device_t *device_list = NULL;
 
@@ -510,27 +511,119 @@ static file_ops_t urandom_ops = {
     .ioctl = NULL
 };
 
-/* /dev/sda, /dev/sda1, etc. - Disk device stubs */
-static int32_t disk_read(file_t *file, void *buf, uint32_t count) {
-    (void)file;
-    (void)buf;
-    (void)count;
-    return 0;
+/* /dev/sda, /dev/sda1, etc. - Disk device operations */
+#define DISK_SECTOR_SIZE 512
+
+static int32_t devfs_disk_read(file_t *file, void *buf, uint32_t count) {
+    if (!file || !buf || count == 0) return 0;
+    devfs_device_t *dev = (devfs_device_t *)file->private_data;
+    if (!dev) return -1;
+
+    uint64_t start_sector = file->offset / DISK_SECTOR_SIZE;
+    uint32_t sector_offset = file->offset % DISK_SECTOR_SIZE;
+    uint32_t sectors_needed = (sector_offset + count + DISK_SECTOR_SIZE - 1) / DISK_SECTOR_SIZE;
+
+    if (sectors_needed == 0) return 0;
+
+    uint8_t *tmp_buf = (uint8_t *)kmalloc(sectors_needed * DISK_SECTOR_SIZE);
+    if (!tmp_buf) return -1;
+
+    int rc = disk_read(dev->name, start_sector, sectors_needed, tmp_buf);
+    if (rc != 0) {
+        kfree(tmp_buf);
+        return -1;
+    }
+
+    memcpy(buf, tmp_buf + sector_offset, count);
+    kfree(tmp_buf);
+
+    file->offset += count;
+    return (int32_t)count;
 }
 
-static int32_t disk_write(file_t *file, const void *buf, uint32_t count) {
-    (void)file;
-    (void)buf;
+static int32_t devfs_disk_write(file_t *file, const void *buf, uint32_t count) {
+    if (!file || !buf || count == 0) return 0;
+    devfs_device_t *dev = (devfs_device_t *)file->private_data;
+    if (!dev) return -1;
+
+    uint64_t start_sector = file->offset / DISK_SECTOR_SIZE;
+    uint32_t sector_offset = file->offset % DISK_SECTOR_SIZE;
+    uint32_t sectors_needed = (sector_offset + count + DISK_SECTOR_SIZE - 1) / DISK_SECTOR_SIZE;
+
+    if (sectors_needed == 0) return 0;
+
+    uint8_t *tmp_buf = NULL;
+    if (sector_offset != 0 || (count % DISK_SECTOR_SIZE) != 0) {
+        tmp_buf = (uint8_t *)kmalloc(sectors_needed * DISK_SECTOR_SIZE);
+        if (!tmp_buf) return -1;
+
+        if (disk_read(dev->name, start_sector, sectors_needed, tmp_buf) != 0) {
+            kfree(tmp_buf);
+            return -1;
+        }
+        memcpy(tmp_buf + sector_offset, buf, count);
+
+        int rc = disk_write(dev->name, start_sector, sectors_needed, tmp_buf);
+        kfree(tmp_buf);
+        if (rc != 0) return -1;
+    } else {
+        int rc = disk_write(dev->name, start_sector, sectors_needed, buf);
+        if (rc != 0) return -1;
+    }
+
+    file->offset += count;
     return (int32_t)count;
+}
+
+static int32_t devfs_disk_seek(file_t *file, int32_t offset, int32_t whence) {
+    if (!file) return -1;
+    int32_t new_pos = 0;
+
+    switch (whence) {
+        case 0: /* SEEK_SET */
+            new_pos = offset;
+            break;
+        case 1: /* SEEK_CUR */
+            new_pos = file->offset + offset;
+            break;
+        case 2: /* SEEK_END */ {
+            devfs_device_t *dev = (devfs_device_t *)file->private_data;
+            if (!dev) return -1;
+            disk_info_t *disk = disk_find_by_name(dev->name);
+            if (!disk) return -1;
+            new_pos = (int32_t)(disk->sector_count * disk->sector_size) + offset;
+            break;
+        }
+        default:
+            return -1;
+    }
+
+    if (new_pos < 0) new_pos = 0;
+    file->offset = new_pos;
+    return new_pos;
+}
+
+static int32_t devfs_disk_ioctl(file_t *file, uint32_t cmd, void *arg) {
+    if (!file) return -1;
+    devfs_device_t *dev = (devfs_device_t *)file->private_data;
+    if (!dev) return -1;
+
+    disk_info_t *disk = disk_find_by_name(dev->name);
+    if (!disk) return -1;
+
+    if (disk->ioctl) {
+        return disk->ioctl(disk, cmd, arg);
+    }
+    return -1;
 }
 
 static file_ops_t disk_ops = {
     .open = NULL,
-    .read = disk_read,
-    .write = disk_write,
+    .read = devfs_disk_read,
+    .write = devfs_disk_write,
     .close = NULL,
-    .seek = NULL,
-    .ioctl = NULL
+    .seek = devfs_disk_seek,
+    .ioctl = devfs_disk_ioctl
 };
 
 /* /dev/dsp - Digital Signal Processor (audio playback) */

@@ -21,6 +21,8 @@ static int32_t tmpfs_rename_op(dentry_t *old_dir, const char *old_name,
                                 dentry_t *new_dir, const char *new_name);
 static int32_t tmpfs_symlink_op(dentry_t *dir, const char *name, const char *target);
 static int32_t tmpfs_readlink_op(dentry_t *dentry, char *buf, uint32_t size);
+static int32_t tmpfs_link_op(dentry_t *old_dir, const char *old_name,
+                               dentry_t *new_dir, const char *new_name);
 
 static int32_t tmpfs_file_open(inode_t *inode, file_t *file);
 static int32_t tmpfs_file_read(file_t *file, void *buf, uint32_t count);
@@ -38,6 +40,7 @@ static inode_ops_t tmpfs_inode_ops = {
     .rename  = tmpfs_rename_op,
     .readlink = tmpfs_readlink_op,
     .symlink  = tmpfs_symlink_op,
+    .link     = tmpfs_link_op,
 };
 
 file_ops_t tmpfs_file_ops = {
@@ -304,7 +307,12 @@ static int32_t tmpfs_remove_node(tmpfs_node_t *parent, tmpfs_node_t *node) {
         if (parent->nlinks > 0) parent->nlinks--;
     }
     tmpfs_unlink_from_parent(node);
-    tmpfs_free_node(node);
+    if (node->nlinks > 0) {
+        node->nlinks--;
+    }
+    if (node->nlinks == 0) {
+        tmpfs_free_node(node);
+    }
     return 0;
 }
 
@@ -422,6 +430,59 @@ static int32_t tmpfs_readlink_op(dentry_t *dentry, char *buf, uint32_t size) {
     buf[link_len] = '\0';
 
     return (int32_t)link_len;
+}
+
+static int32_t tmpfs_link_op(dentry_t *old_dir, const char *old_name,
+                               dentry_t *new_dir, const char *new_name) {
+    if (!old_dir || !old_dir->inode || !old_name || !new_dir || !new_dir->inode || !new_name) {
+        return -EINVAL;
+    }
+
+    tmpfs_node_t *od = (tmpfs_node_t *)old_dir->inode->private_data;
+    tmpfs_node_t *nd = (tmpfs_node_t *)new_dir->inode->private_data;
+    if (!od || !nd) return -EINVAL;
+
+    tmpfs_node_t *target = tmpfs_find_child(od, old_name);
+    if (!target) return -ENOENT;
+
+    if (target->mode & FILE_MODE_DIR) return -EPERM;
+
+    if (tmpfs_find_child(nd, new_name)) return -EEXIST;
+
+    if (tmpfs_check_space(sizeof(tmpfs_node_t)) != 0) {
+        return -ENOMEM;
+    }
+
+    tmpfs_node_t *new_node = (tmpfs_node_t *)kmalloc(sizeof(tmpfs_node_t));
+    if (!new_node) return -ENOMEM;
+    memcpy(new_node, target, sizeof(tmpfs_node_t));
+
+    strncpy(new_node->name, new_name, TMPFS_MAX_NAME);
+    new_node->name[TMPFS_MAX_NAME] = '\0';
+    new_node->parent = nd;
+    new_node->next_sibling = nd->child;
+    nd->child = new_node;
+
+    target->nlinks++;
+    new_node->nlinks = target->nlinks;
+
+    tmpfs_add_used(sizeof(tmpfs_node_t));
+    if (tmpfs_sb_info) {
+        tmpfs_sb_info->inode_count++;
+    }
+
+    if (!tmpfs_build_dentry(new_dir, target, new_name)) {
+        nd->child = new_node->next_sibling;
+        kfree(new_node);
+        tmpfs_sub_used(sizeof(tmpfs_node_t));
+        if (tmpfs_sb_info && tmpfs_sb_info->inode_count > 0) {
+            tmpfs_sb_info->inode_count--;
+        }
+        target->nlinks--;
+        return -ENOMEM;
+    }
+
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -557,7 +618,7 @@ int32_t tmpfs_mount(superblock_t *sb, void *data) {
     root_inode->ops   = &tmpfs_inode_ops;
     root_inode->private_data = root;
 
-    sb->fs_type     = FS_TYPE_RAMFS;
+    sb->fs_type     = FS_TYPE_TMPFS;
     sb->fs_data     = tmpfs_sb_info;
     sb->block_size  = 4096;
     sb->total_blocks = tmpfs_sb_info->max_size / 4096;
@@ -569,7 +630,7 @@ int32_t tmpfs_mount(superblock_t *sb, void *data) {
 }
 
 int32_t tmpfs_init(void) {
-    return vfs_mount("/tmp", FS_TYPE_RAMFS, NULL);
+    return vfs_mount("/tmp", FS_TYPE_TMPFS, NULL);
 }
 
 /* ------------------------------------------------------------------ */

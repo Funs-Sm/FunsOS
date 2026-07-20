@@ -54,7 +54,8 @@
 #define FS_TYPE_F2FS   47  /* F2FS (Flash-Friendly File System) */
 #define FS_TYPE_ORANGEFS 48 /* OrangeFS (PVFS) */
 #define FS_TYPE_GLUSTERFS 49 /* GlusterFS */
-#define FS_TYPE_COUNT  50  /* 文件系统类型总数 */
+#define FS_TYPE_TMPFS  50  /* TMPFS (in-memory filesystem) */
+#define FS_TYPE_COUNT  51  /* 文件系统类型总数 */
 
 #define FILE_MODE_READ   0x01
 #define FILE_MODE_WRITE  0x02
@@ -120,9 +121,25 @@ struct superblock_t {
     uint32_t block_size;
     uint32_t total_blocks;
     uint32_t free_blocks;
+    uint32_t total_inodes;
+    uint32_t free_inodes;
+    uint32_t mount_flags;
     inode_t *root;
     superblock_ops_t *ops;
 };
+
+/* 挂载标志 */
+#define MS_RDONLY     0x0001  /* 只读挂载 */
+#define MS_NOSUID     0x0002  /* 不允许 setuid/setgid */
+#define MS_NODEV      0x0004  /* 不允许访问设备文件 */
+#define MS_NOEXEC     0x0008  /* 不允许执行程序 */
+#define MS_NOATIME    0x0010  /* 不更新 atime */
+#define MS_NODIRATIME 0x0020  /* 不更新目录 atime */
+#define MS_REMOUNT    0x0040  /* 重新挂载 */
+#define MS_BIND       0x0080  /* bind 挂载 */
+#define MS_DIRSYNC    0x0100  /* 目录同步写入 */
+#define MS_SYNCHRONOUS 0x0200 /* 同步写入 */
+#define MS_MANDLOCK   0x0400  /* 强制锁 */
 
 typedef struct {
     int32_t (*open)(inode_t *inode, file_t *file);
@@ -178,6 +195,7 @@ struct dentry_t {
     dentry_t *next_sibling;
     inode_t *inode;
     uint32_t mount_point;
+    uint32_t d_refcount;       /* dentry 引用计数 */
     /* Dentry cache LRU list pointers (separate from tree links). */
     dentry_t *cache_prev;
     dentry_t *cache_next;
@@ -192,7 +210,15 @@ typedef struct mount_t {
 
 void vfs_init(void);
 int32_t vfs_mount(const char *path, uint32_t fs_type, void *data);
+int32_t vfs_mount2(const char *path, uint32_t fs_type, void *data, uint32_t flags);
 int32_t vfs_umount(const char *path);
+int32_t vfs_remount(const char *path, uint32_t flags);
+
+/* 检查文件系统是否只读 */
+int vfs_is_readonly(const char *path);
+
+/* 获取挂载标志 */
+uint32_t vfs_get_mount_flags(const char *path);
 int32_t vfs_open(const char *path, uint32_t flags, file_t **file);
 int32_t vfs_close(file_t *file);
 int32_t vfs_read(file_t *file, void *buf, uint32_t count);
@@ -215,6 +241,8 @@ int32_t vfs_link(const char *oldpath, const char *newpath);
 int32_t vfs_utimes(const char *path, uint32_t atime, uint32_t mtime);
 int32_t vfs_sync(void);
 int32_t vfs_fsync(file_t *file);
+int32_t vfs_fdatasync(file_t *file);
+int32_t vfs_syncfs(const char *path);
 int32_t vfs_mknod(const char *path, uint32_t mode, uint32_t dev);
 
 /* Directory iteration */
@@ -236,7 +264,10 @@ typedef struct {
     char fs_type[32];
     uint64_t total_blocks;
     uint64_t free_blocks;
+    uint64_t total_inodes;
+    uint64_t free_inodes;
     uint32_t block_size;
+    uint32_t mount_flags;
     uint8_t  read_only;
 } vfs_mount_info_t;
 

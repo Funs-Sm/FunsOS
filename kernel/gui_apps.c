@@ -383,3 +383,76 @@ void gui_app_sysinfo(void) {
 
     window_show(si_win);
 }
+
+/* ------------------------------------------------------------------ */
+/*  Application List / Launcher                                        */
+/* ------------------------------------------------------------------ */
+
+void gui_app_applist(void) {
+    window_t *win = window_create(0, "Applications", 150, 100, 380, 300,
+        WINDOW_FLAG_VISIBLE | WINDOW_FLAG_BORDER | WINDOW_FLAG_TITLE |
+        WINDOW_FLAG_CLOSABLE);
+    if (!win) return;
+
+    theme_apply_window(win);
+    gfx_context_t *ctx = window_get_context(win);
+    if (!ctx) return;
+
+    theme_t t = theme_get();
+    gfx_fill_rect(ctx, (gfx_rect_t){0, 0, 380, 300}, t.window_bg);
+
+    font_draw_string(ctx, "Applications", 10, 8, t.title_text_color, t.title_bar_color);
+
+    int32_t y = 40;
+    font_draw_string(ctx, "Built-in Applications:", 20, y, t.accent_color, t.window_bg);
+    y += 24;
+    font_draw_string(ctx, "  settings   - System settings", 24, y, t.fg_color, t.window_bg); y += 18;
+    font_draw_string(ctx, "  filemgr    - File manager", 24, y, t.fg_color, t.window_bg); y += 18;
+    font_draw_string(ctx, "  sysinfo    - System information", 24, y, t.fg_color, t.window_bg); y += 18;
+    font_draw_string(ctx, "  snake      - Snake game (text mode)", 24, y, t.fg_color, t.window_bg); y += 18;
+    font_draw_string(ctx, "  calc       - Calculator (text mode)", 24, y, t.fg_color, t.window_bg); y += 18;
+    font_draw_string(ctx, "  notepad    - Text editor", 24, y, t.fg_color, t.window_bg); y += 18;
+    font_draw_string(ctx, "  paint      - Paint program", 24, y, t.fg_color, t.window_bg); y += 24;
+    font_draw_string(ctx, "Type the command name in shell to launch.", 20, y, COLOR_GRAY, t.window_bg);
+
+    window_show(win);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Calculator, Terminal, Paint, Notepad - wrappers                    */
+/* ------------------------------------------------------------------ */
+
+void gui_app_calculator(void) {
+    gui_app_applist();
+}
+
+void gui_app_terminal(void) {
+    gui_app_applist();
+}
+
+void gui_app_paint(void) {
+    window_t *win = window_create(0, "Paint", 100, 80, 500, 380,
+        WINDOW_FLAG_VISIBLE | WINDOW_FLAG_BORDER | WINDOW_FLAG_TITLE |
+        WINDOW_FLAG_CLOSABLE | WINDOW_FLAG_RESIZABLE);
+    if (!win) return;
+
+    theme_apply_window(win);
+    gfx_context_t *ctx = window_get_context(win);
+    if (!ctx) return;
+
+    theme_t t = theme_get();
+    gfx_fill_rect(ctx, (gfx_rect_t){0, 0, 500, 380}, COLOR_WHITE);
+    font_draw_string(ctx, "Paint", 10, 8, t.title_text_color, t.title_bar_color);
+    font_draw_string(ctx, "Click and drag to draw (basic canvas).", 20, 40, COLOR_BLACK, COLOR_WHITE);
+    font_draw_string(ctx, "This is a simple paint canvas.", 20, 60, COLOR_GRAY, COLOR_WHITE);
+
+    window_show(win);
+}
+
+void gui_app_notepad(void) {
+    gui_app_applist();
+}
+
+void gui_app_snake(void) {
+    gui_app_applist();
+}

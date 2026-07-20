@@ -6,6 +6,10 @@
 #include "keyboard.h"
 #include "fb_console.h"
 #include "vga_text.h"
+#include "timer.h"
+#include "vfs.h"
+#include "registry.h"
+#include "rtc.h"
 
 /* ============================================================
  *  Lexer
@@ -1143,6 +1147,20 @@ static void scope_pop(void) {
 static int32_t eval_expr(ast_node_t *node);
 static void exec_stmt(ast_node_t *node);
 
+/* Helper: write integer to buffer, return chars written */
+static int sprintf_int(char *buf, int32_t val) {
+    char tmp[16];
+    int i = 0;
+    uint32_t u;
+    if (val < 0) { *buf++ = '-'; u = (uint32_t)(-val); }
+    else u = (uint32_t)val;
+    if (u == 0) { tmp[i++] = '0'; }
+    while (u) { tmp[i++] = '0' + (u % 10); u /= 10; }
+    for (int j = i - 1; j >= 0; j--) *buf++ = tmp[j];
+    *buf = '\0';
+    return i + (val < 0 ? 1 : 0);
+}
+
 /* Built-in printf implementation */
 static void ci_printf(ast_node_t *args) {
     if (!args) return;
@@ -1558,6 +1576,270 @@ static int32_t eval_expr(ast_node_t *node) {
                     return (a > b) ? a : b;
                 }
                 return 0;
+            }
+
+            /* ---- File I/O functions ---- */
+            if (strcmp(fname, "fopen") == 0) {
+                if (node->body && node->body->next) {
+                    int32_t path = eval_expr(node->body);
+                    int32_t mode = eval_expr(node->body->next);
+                    if (path && mode) {
+                        FILE *f = fopen((const char *)path, (const char *)mode);
+                        return (int32_t)f;
+                    }
+                }
+                return 0;
+            }
+            if (strcmp(fname, "fclose") == 0) {
+                if (node->body) {
+                    int32_t fp = eval_expr(node->body);
+                    if (fp) return fclose((FILE *)fp);
+                }
+                return EOF;
+            }
+            if (strcmp(fname, "fgetc") == 0) {
+                if (node->body) {
+                    int32_t fp = eval_expr(node->body);
+                    if (fp) return fgetc((FILE *)fp);
+                }
+                return EOF;
+            }
+            if (strcmp(fname, "fputc") == 0) {
+                if (node->body && node->body->next) {
+                    int32_t c = eval_expr(node->body);
+                    int32_t fp = eval_expr(node->body->next);
+                    if (fp) return fputc(c, (FILE *)fp);
+                }
+                return EOF;
+            }
+            if (strcmp(fname, "fgets") == 0) {
+                if (node->body && node->body->next && node->body->next->next) {
+                    int32_t buf = eval_expr(node->body);
+                    int32_t n = eval_expr(node->body->next);
+                    int32_t fp = eval_expr(node->body->next->next);
+                    if (buf && fp && n > 0) {
+                        char *r = fgets((char *)buf, n, (FILE *)fp);
+                        return (int32_t)r;
+                    }
+                }
+                return 0;
+            }
+            if (strcmp(fname, "fputs") == 0) {
+                if (node->body && node->body->next) {
+                    int32_t s = eval_expr(node->body);
+                    int32_t fp = eval_expr(node->body->next);
+                    if (s && fp) return fputs((const char *)s, (FILE *)fp);
+                }
+                return EOF;
+            }
+            if (strcmp(fname, "fprintf") == 0) {
+                /* Simple fprintf: fputs to file (format string only, no varargs support) */
+                if (node->body && node->body->next) {
+                    int32_t fp = eval_expr(node->body);
+                    int32_t s = eval_expr(node->body->next);
+                    if (s && fp) return fputs((const char *)s, (FILE *)fp);
+                }
+                return 0;
+            }
+            if (strcmp(fname, "feof") == 0) {
+                if (node->body) {
+                    int32_t fp = eval_expr(node->body);
+                    if (fp) return feof((FILE *)fp);
+                }
+                return 1;
+            }
+            if (strcmp(fname, "remove") == 0) {
+                if (node->body) {
+                    int32_t path = eval_expr(node->body);
+                    if (path) return vfs_unlink((const char *)path);
+                }
+                return -1;
+            }
+            if (strcmp(fname, "rename") == 0) {
+                if (node->body && node->body->next) {
+                    int32_t oldp = eval_expr(node->body);
+                    int32_t newp = eval_expr(node->body->next);
+                    if (oldp && newp) return vfs_rename((const char *)oldp, (const char *)newp);
+                }
+                return -1;
+            }
+            if (strcmp(fname, "mkdir") == 0) {
+                if (node->body) {
+                    int32_t path = eval_expr(node->body);
+                    if (path) return vfs_mkdir((const char *)path, 0755);
+                }
+                return -1;
+            }
+
+            /* ---- System / time functions ---- */
+            if (strcmp(fname, "getchar") == 0) {
+                keyboard_event_t ev;
+                while (1) {
+                    keyboard_poll();
+                    if (keyboard_get_event(&ev)) {
+                        if (ev.flags & KEY_PRESSED) return ev.ascii ? ev.ascii : 0;
+                    }
+                    for (volatile int _i = 0; _i < 10000; _i++) asm volatile("pause");
+                }
+            }
+            if (strcmp(fname, "kbhit") == 0) {
+                keyboard_poll();
+                return keyboard_has_data();
+            }
+            if (strcmp(fname, "sleep_ms") == 0 || strcmp(fname, "delay") == 0) {
+                if (node->body) {
+                    int32_t ms = eval_expr(node->body);
+                    uint32_t start = timer_get_ticks();
+                    uint32_t wait_ticks = (ms + 9) / 10;
+                    while ((timer_get_ticks() - start) < wait_ticks) {
+                        asm volatile("pause");
+                    }
+                }
+                return 0;
+            }
+            if (strcmp(fname, "ticks") == 0) {
+                return (int32_t)timer_get_ticks();
+            }
+            if (strcmp(fname, "exit") == 0) {
+                ci_interp.returning = 1;
+                if (node->body) ci_interp.return_val = eval_expr(node->body);
+                return ci_interp.return_val;
+            }
+            if (strcmp(fname, "gettime") == 0) {
+                return (int32_t)timer_get_ticks() * 10;
+            }
+            if (strcmp(fname, "strerror") == 0) {
+                if (node->body) {
+                    int32_t err = eval_expr(node->body);
+                    return (int32_t)strerror(err);
+                }
+                return 0;
+            }
+            if (strcmp(fname, "sprintf") == 0) {
+                /* sprintf(buf, fmt, val) - supports %d %s %c %% only */
+                if (node->body && node->body->next) {
+                    int32_t buf = eval_expr(node->body);
+                    int32_t fmt = eval_expr(node->body->next);
+                    int32_t arg = node->body->next->next ? eval_expr(node->body->next->next) : 0;
+                    if (buf && fmt) {
+                        const char *f = (const char *)fmt;
+                        char *b = (char *)buf;
+                        while (*f) {
+                            if (*f == '%' && *(f+1)) {
+                                f++;
+                                if (*f == 'd') { b += sprintf_int(b, arg); f++; }
+                                else if (*f == 's' && arg) { const char *s=(const char*)arg; while(*s)*b++=*s++; f++; }
+                                else if (*f == 'c') { *b++ = (char)arg; f++; }
+                                else if (*f == '%') { *b++ = '%'; f++; }
+                                else { *b++ = '%'; *b++ = *f++; }
+                            } else { *b++ = *f++; }
+                        }
+                        *b = '\0';
+                        return (int32_t)(b - (char *)buf);
+                    }
+                }
+                return 0;
+            }
+            if (strcmp(fname, "snprintf") == 0) {
+                /* Same as sprintf, ignores size for simplicity */
+                if (node->body && node->body->next && node->body->next->next) {
+                    int32_t buf = eval_expr(node->body);
+                    /* int32_t sz = eval_expr(node->body->next); */
+                    int32_t fmt = eval_expr(node->body->next->next);
+                    int32_t arg = node->body->next->next->next ? eval_expr(node->body->next->next->next) : 0;
+                    if (buf && fmt) {
+                        const char *f = (const char *)fmt;
+                        char *b = (char *)buf;
+                        while (*f) {
+                            if (*f == '%' && *(f+1)) {
+                                f++;
+                                if (*f == 'd') { b += sprintf_int(b, arg); f++; }
+                                else if (*f == 's' && arg) { const char *s=(const char*)arg; while(*s)*b++=*s++; f++; }
+                                else if (*f == 'c') { *b++ = (char)arg; f++; }
+                                else if (*f == '%') { *b++ = '%'; f++; }
+                                else { *b++ = '%'; *b++ = *f++; }
+                            } else { *b++ = *f++; }
+                        }
+                        *b = '\0';
+                        return (int32_t)(b - (char *)buf);
+                    }
+                }
+                return 0;
+            }
+
+            /* ---- Screen functions ---- */
+            if (strcmp(fname, "cls") == 0) {
+                vga_text_clear();
+                return 0;
+            }
+            if (strcmp(fname, "gotoxy") == 0) {
+                if (node->body && node->body->next) {
+                    int32_t x = eval_expr(node->body);
+                    int32_t y = eval_expr(node->body->next);
+                    if (x >= 0 && x < 80 && y >= 0 && y < 25) {
+                        vga_text_set_cursor(y, x);
+                    }
+                }
+                return 0;
+            }
+            if (strcmp(fname, "setcolor") == 0) {
+                if (node->body && node->body->next) {
+                    int32_t fg = eval_expr(node->body);
+                    int32_t bg = eval_expr(node->body->next);
+                    vga_text_set_color(fg & 0xF, bg & 0xF);
+                }
+                return 0;
+            }
+
+            /* ---- Registry functions ---- */
+            if (strcmp(fname, "reg_get_str") == 0) {
+                if (node->body && node->body->next) {
+                    int32_t path = eval_expr(node->body);
+                    int32_t name = eval_expr(node->body->next);
+                    if (path && name) {
+                        reg_handle_t h = reg_open_path((const char *)path);
+                        if (h) {
+                            const char *v = reg_get_string(h, (const char *)name, "");
+                            return (int32_t)v;
+                        }
+                    }
+                }
+                return (int32_t)"";
+            }
+            if (strcmp(fname, "reg_get_int") == 0) {
+                if (node->body && node->body->next) {
+                    int32_t path = eval_expr(node->body);
+                    int32_t name = eval_expr(node->body->next);
+                    if (path && name) {
+                        reg_handle_t h = reg_open_path((const char *)path);
+                        if (h) return (int32_t)reg_get_dword(h, (const char *)name, 0);
+                    }
+                }
+                return 0;
+            }
+            if (strcmp(fname, "reg_set_str") == 0) {
+                if (node->body && node->body->next && node->body->next->next) {
+                    int32_t path = eval_expr(node->body);
+                    int32_t name = eval_expr(node->body->next);
+                    int32_t val = eval_expr(node->body->next->next);
+                    if (path && name && val) {
+                        reg_handle_t h = reg_create_path((const char *)path);
+                        if (h) return reg_set_string(h, (const char *)name, (const char *)val);
+                    }
+                }
+                return -1;
+            }
+            if (strcmp(fname, "reg_set_int") == 0) {
+                if (node->body && node->body->next && node->body->next->next) {
+                    int32_t path = eval_expr(node->body);
+                    int32_t name = eval_expr(node->body->next);
+                    int32_t val = eval_expr(node->body->next->next);
+                    if (path && name) {
+                        reg_handle_t h = reg_create_path((const char *)path);
+                        if (h) return reg_set_dword(h, (const char *)name, (uint32_t)val);
+                    }
+                }
+                return -1;
             }
 
             /* User-defined function */

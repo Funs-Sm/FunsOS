@@ -246,6 +246,61 @@
 #define ETAPE          298    /* Tape error */
 #define ECDROM         299    /* CDROM error */
 
+/* ============================================================
+ * 应用/SDK/C解释器 错误码 (300-399)
+ * ============================================================ */
+
+#define EINTERP        300    /* Interpreter error */
+#define EPARSE         301    /* Parse error */
+#define ETOK           302    /* Tokenizer error */
+#define EUNDEF_IDENT   303    /* Undefined identifier */
+#define EREDEF         304    /* Redefinition of symbol */
+#define ETYPE          305    /* Type mismatch */
+#define EEXPECT        306    /* Unexpected token */
+#define ENORET         307    /* Missing return */
+#define EBREAK         308    /* Break outside loop */
+#define ECONTINUE      309    /* Continue outside loop */
+#define ECALL          310    /* Invalid function call */
+#define EARGC          311    /* Wrong argument count */
+#define EINITRD        312    /* Initrd error */
+#define EREG_CORRUPT   313    /* Registry corrupt */
+#define EREG_TYPE      314    /* Registry type mismatch */
+#define EREG_LOCKED    315    /* Registry key locked */
+#define ESCRIPT        316    /* Script error */
+#define EELF_NOEXEC    317    /* Not a valid ELF executable */
+#define EELF_ARCH      318    /* ELF architecture mismatch */
+#define EELF_OSABI     319    /* ELF OS/ABI mismatch */
+#define ESDK_VER       320    /* SDK version mismatch */
+#define EPKG_CORRUPT   321    /* Package corrupt */
+#define EPKG_SIG       322    /* Package signature invalid */
+#define EPKG_DEP       323    /* Package dependency missing */
+#define EPKG_CONFLICT  324    /* Package conflict */
+#define EGUI           325    /* GUI subsystem error */
+#define EWINDOW        326    /* Window error */
+#define EWIDGET        327    /* Widget error */
+#define EFONT          328    /* Font error */
+#define EIMAGE         329    /* Image format error */
+#define EAUDIO_FMT     330    /* Audio format error */
+#define ERENDER        331    /* Renderer error */
+#define ESHADER        332    /* Shader error */
+#define ETEXTURE       333    /* Texture error */
+#define EFIFO          334    /* FIFO/pipe error */
+#define ESEEK          335    /* Seek error */
+#define EEOF           336    /* End of file reached */
+#define EBADPATH       337    /* Malformed path */
+#define ELOCKED        338    /* Resource locked */
+#define ETIMEOUT_OP    339    /* Operation timed out */
+#define EABORTED       340    /* Operation aborted by user */
+#define ENOTINIT       341    /* Subsystem not initialized */
+#define EALREADY       342    /* Already initialized/exists */
+#define EUNSUPPORTED   343    /* Unsupported operation */
+#define EBADMAGIC      344    /* Bad magic number */
+#define EVERSION       345    /* Version mismatch */
+#define EINTERNAL      346    /* Internal error */
+#define ECBUF          347    /* Circular buffer overrun */
+#define EOVERRUN       348    /* Buffer overrun */
+#define EUNDERRUN      349    /* Buffer underrun */
+
 #define MAX_ERRNO     4096   /* Maximum errno value */
 
 /* ============================================================

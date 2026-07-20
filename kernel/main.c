@@ -24,8 +24,18 @@
 #include "version.h"
 #include "fpu.h"
 #include "vfs.h"
+#include "quota.h"
 #include "ramfs.h"
+#include "krng.h"
+#include "iosched.h"
+#include "softirq.h"
+#include "sysrq.h"
+#include "oom_killer.h"
+#include "sysctl.h"
 #include "devfs.h"
+#include "procfs.h"
+#include "sysfs.h"
+#include "tmpfs.h"
 #include "initrd.h"
 #include "vesa.h"
 #include "fb_console.h"
@@ -40,6 +50,21 @@
 #include "i915.h"
 #include "acpi_sleep.h"
 #include "cpufreq.h"
+#include "cpuidle.h"
+#include "regmap.h"
+#include "hwmon.h"
+#include "ftrace.h"
+#include "dmabuf.h"
+#include "iio.h"
+#include "pwm.h"
+#include "led.h"
+#include "pinctrl.h"
+#include "gpio.h"
+#include "dmaengine.h"
+#include "clk.h"
+#include "i2c.h"
+#include "spi.h"
+#include "mfd.h"
 #include "battery.h"
 #include "klog.h"
 #include "syslog.h"
@@ -53,8 +78,24 @@
 #include "kdebug.h"
 #include "kmodule.h"
 #include "perf.h"
-#include "notifier.h"
+#include "knotifier.h"
 #include "health.h"
+#include "ktrace.h"
+#include "kwork.h"
+#include "registry.h"
+#include "cron.h"
+#include "evlog.h"
+#include "fim.h"
+#include "appexec.h"
+#include "netmon.h"
+#include "sysacct.h"
+#include "svcmgr.h"
+#include "taskmgr.h"
+#include "crashdump.h"
+#include "ipc_sem.h"
+#include "signal_diag.h"
+#include "quota_db.h"
+#include "logrotate_ext.h"
 #include "sound.h"
 #include "e1000e.h"
 #include "ixgbe.h"
@@ -69,6 +110,40 @@
 #include "fun_format.h"
 #include "vfs_ext.h"
 #include "user_ext.h"
+#include "env.h"
+#include "rlimit.h"
+#include "page_replace.h"
+#include "workqueue.h"
+#include "rcu.h"
+#include "hrtimer.h"
+#include "slab.h"
+#include "watchdog.h"
+#include "knotifier.h"
+#include "crypto.h"
+#include "vmalloc.h"
+#include "percpu.h"
+#include "kfence.h"
+#include "debugobjects.h"
+#include "lockdep.h"
+#include "irqdomain.h"
+
+#include "devtmpfs.h"
+#include "ksysfs.h"
+#include "netns.h"
+#include "knetfilter.h"
+#include "seccomp.h"
+#include "apparmor.h"
+#include "keyring.h"
+#include "audit.h"
+
+#include "namespace.h"
+#include "tracepoint.h"
+#include "uprobe.h"
+#include "kmod.h"
+#include "firmware.h"
+#include "remoteproc.h"
+#include "rpmsg.h"
+#include "virtio.h"
 
 #include "vga_text.h"
 #include "serial.h"
@@ -519,9 +594,120 @@ void kernel_main(void) {
     fpu_init();
     init_timer();
 
+    /* Initialize kernel RNG early - needed for ASLR, PID allocation, etc */
+    krng_init();
+    klog_info("Kernel random number generator (xorshift128+) initialized");
+
+    /* Initialize softirq/tasklet subsystem */
+    softirq_init();
+
+    /* Initialize I/O scheduler framework */
+    iosched_init();
+
+    /* Initialize SysRq magic key system */
+    sysrq_init();
+
+    /* Initialize sysctl interface */
+    sysctl_init();
+
+    /* Initialize OOM killer */
+    oom_init();
+
+    /* Initialize notifier chains */
+    knotifier_chain_init();
+
+    /* Initialize RCU */
+    rcu_init();
+
+    /* Initialize workqueue */
+    workqueue_init();
+
+    /* Initialize high-resolution timers */
+    hrtimer_init();
+
+    /* Initialize slab allocator */
+    slab_init();
+
+    /* Initialize watchdog */
+    watchdog_init();
+
+    /* Initialize crypto API */
+    crypto_init();
+
     /* Initialize kernel log ring buffer early */
     klog_init();
     klog_info("Kernel log initialized");
+
+    /* Initialize extended kernel subsystems */
+    vmalloc_init();
+    percpu_init();
+    kfence_init();
+    debug_objects_init();
+    lockdep_init();
+    irqdomain_init();
+    cpufreq_init();
+    cpuidle_init();
+    regmap_init();
+    hwmon_init();
+    ftrace_init();
+    dmabuf_init();
+    iio_init();
+    pwm_init();
+    led_init();
+    pinctrl_init();
+    gpio_init();
+    dmaengine_init();
+    clk_init();
+    i2c_init();
+    spi_init();
+    mfd_init();
+    klog_info("Extended kernel subsystems initialized");
+
+    devtmpfs_init();
+    ksysfs_init();
+    netns_init();
+    knetfilter_init();
+    seccomp_init();
+    apparmor_init();
+    keyring_init();
+    audit_init();
+    klog_info("Filesystem, network and security subsystems initialized");
+
+    /* Namespace isolation subsystem */
+    namespace_init();
+    klog_info("Namespace isolation initialized");
+
+    /* Static tracepoints */
+    tracepoint_init();
+    klog_info("Static tracepoints initialized");
+
+    /* User-space probes */
+    uprobe_init();
+    klog_info("User-space probes initialized");
+
+    /* Kernel module loader */
+    kmod_init();
+    klog_info("Kernel module loader initialized");
+
+    /* Firmware loader */
+    firmware_init();
+    klog_info("Firmware loader initialized");
+
+    /* Remote processor framework */
+    remoteproc_init();
+    klog_info("Remote processor framework initialized");
+
+    /* Remote processor messaging */
+    rpmsg_init();
+    klog_info("Remote processor messaging initialized");
+
+    /* VirtIO framework */
+    virtio_init();
+    klog_info("VirtIO framework initialized");
+
+    /* Initialize system environment variables */
+    sysenv_init();
+    klog_info("Environment variables initialized");
 
     init_pmm(NULL);  /* NULL => detect from 0x700 boot_info if available */
     /* Try to use bootloader memory info for accurate PMM init.
@@ -588,13 +774,78 @@ void kernel_main(void) {
     perf_init();
     klog_info("Performance monitoring initialized");
 
-    /* 通知链子系统 */
-    notifier_init();
-    klog_info("Notifier chain subsystem initialized");
-
     /* 系统健康监控 */
     health_init();
     klog_info("System health monitor initialized");
+
+    /* 内核跟踪子系统（结构化事件 ring buffer） */
+    ktrace_init();
+    klog_info("Kernel tracing subsystem initialized");
+
+    /* 内核工作队列子系统（延迟执行） */
+    kwork_init();
+    klog_info("Kernel workqueue subsystem initialized");
+
+    /* 系统注册表（基于 FunDB 的层次化配置存储） */
+    registry_init();
+    klog_info("System registry initialized");
+
+    /* 定时任务调度子系统（基于 kwork + FunDB） */
+    cron_init();
+    klog_info("Cron scheduler initialized");
+
+    /* 系统事件日志子系统（持久化结构化事件日志，基于 FunDB） */
+    evlog_init();
+    klog_info("Event log subsystem initialized");
+    evlog_info("System", 1, "Event log started, retention=%u",
+               EVLOG_DEFAULT_RETENTION);
+
+    /* 文件完整性监视子系统 */
+    fim_init();
+    klog_info("File integrity monitor initialized");
+
+    /* 应用执行服务 */
+    appexec_init();
+    klog_info("App execution service initialized");
+
+    /* 网络监视子系统（基于 kwork 周期采样） */
+    netmon_init();
+    klog_info("Network monitor initialized");
+
+    /* 系统账户审计桥接（SAM：合并 user_ext 审计/锁定/会话到 evlog） */
+    sysacct_init();
+    klog_info("System accountant (SAM) initialized");
+
+    /* 服务管理器（运行时常驻服务生命周期，FunDB 持久化） */
+    svcmgr_init();
+    klog_info("Service manager initialized");
+
+    /* 任务管理器（进程统计 + top-N + 审计 kill） */
+    taskmgr_init();
+    klog_info("Task manager initialized");
+
+    /* 崩溃转储子系统（在 panic 时持久化上下文） */
+    crashdump_init();
+    klog_info("Crash dump subsystem initialized");
+
+    /* IPC 信号量子系统（补全 System V IPC：msg + shm + sem） */
+    ipc_sem_init();
+    klog_info("IPC semaphore subsystem initialized");
+
+    /* 信号诊断子系统（统计 + evlog + FunDB 持久化） */
+    sigdiag_init();
+    klog_info("Signal diagnostics initialized");
+
+    /* 配额持久化子系统（FunDB 持久化 quota.c 的内存表） */
+    quota_db_init();
+    quota_db_load_all();
+    klog_info("Quota persistence initialized and loaded");
+
+    /* 日志轮转扩展（基于 kwork 的自动轮转 + evlog） */
+    logrotate_ext_init();
+    logrotate_ext_start_auto(LOGROTATE_EXT_DEFAULT_INTERVAL_MS);
+    klog_info("Log rotate extension initialized (auto every %u ms)",
+              LOGROTATE_EXT_DEFAULT_INTERVAL_MS);
 
     /* 音频子系统及驱动 */
     sound_init();
@@ -639,7 +890,37 @@ void kernel_main(void) {
 
     vfs_init();
     ramfs_init();
+    quota_init();
+    klog_info("Root filesystem (ramfs) mounted");
+
+    vfs_mkdir("/bin", 0755);
+    vfs_mkdir("/sbin", 0755);
+    vfs_mkdir("/etc", 0755);
+    vfs_mkdir("/home", 0755);
+    vfs_mkdir("/root", 0700);
+    vfs_mkdir("/var", 0755);
+    vfs_mkdir("/usr", 0755);
+    vfs_mkdir("/mnt", 0755);
+    vfs_mkdir("/opt", 0755);
+    klog_info("Standard directories created");
+
     devfs_init();
+    klog_info("devfs mounted on /dev");
+
+    vfs_mkdir("/tmp", 01777);
+    tmpfs_init();
+    klog_info("tmpfs mounted on /tmp");
+
+    vfs_mkdir("/proc", 0555);
+    vfs_mount("/proc", FS_TYPE_PROCFS, NULL);
+    procfs_init();
+    klog_info("procfs mounted on /proc");
+
+    vfs_mkdir("/sys", 0555);
+    vfs_mount("/sys", FS_TYPE_SYSFS, NULL);
+    sysfs_init();
+    klog_info("sysfs mounted on /sys");
+
     initrd_init(0, 0);
     tarfs_init();
     init_root_files();
@@ -656,9 +937,7 @@ void kernel_main(void) {
     user_init();
     klog_info("User management initialized");
 
-    /* Initialize ACPI sleep/wake, CPU frequency scaling, battery */
-    klog_info("init: cpufreq...");
-    cpufreq_init();
+    /* Initialize ACPI sleep/wake, battery */
     klog_info("init: battery...");
     battery_init();
 

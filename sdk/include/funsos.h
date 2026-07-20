@@ -6,27 +6,27 @@
 
 /*
  * FUNSOS SDK 总头文件
- * 包含所有子模块头文件，开发者只需 #include "funsos.h" 即可使用全部 API�?
+ * 包含所有子模块头文件，开发者只需 #include "funsos.h" 即可使用全部 API
  */
 
 /* SDK 版本 */
 #define FUNSOS_SDK_VERSION_MAJOR  1
 #define FUNSOS_SDK_VERSION_MINOR  3
-#define FUNSOS_SDK_VERSION_PATCH  0
-#define FUNSOS_SDK_VERSION "1.3.0"
+#define FUNSOS_SDK_VERSION_PATCH  1
+#define FUNSOS_SDK_VERSION "1.3.1"
 
 /* 版本检查 - 用于编译期检查 SDK 版本兼容性 */
 #define FUNSOS_VERSION_CODE(major, minor, patch) (((major) << 16) | ((minor) << 8) | (patch))
-#define FUNSOS_SDK_VERSION_CODE  FUNSOS_VERSION_CODE(1, 3, 0)
+#define FUNSOS_SDK_VERSION_CODE  FUNSOS_VERSION_CODE(1, 3, 1)
 
 /* 操作系统信息（与内核 version.h 保持一致） */
 #define FUNSOS_OS_NAME    "FUNSOS"
 #define FUNSOS_KERNEL_NAME "FunsCore"
-#define FUNSOS_KERNEL_VERSION "0.7"
+#define FUNSOS_KERNEL_VERSION "0.8"
 
 /* ---- 功能特性宏 ----
- * 用于在编译时检测当�?SDK/内核支持的功能�?
- * 应用程序可通过 #ifdef 来有条件地使用高级功能�?
+ * 用于在编译时检测当 SDK/内核支持的功能
+ * 应用程序可通过 #ifdef 来有条件地使用高级功能
  */
 
 /* 核心功能（始终可用） */
@@ -41,90 +41,92 @@
 #define FUNSOS_HAS_SYSINFO    1   /* 系统信息查询 */
 
 /* 扩展功能（需要对应内核模块支持） */
-#define FUNSOS_HAS_KVM        1   /* KVM 虚拟化支�?*/
-#define FUNSOS_HAS_DB         1   /* 内嵌数据库支�?*/
-#define FUNSOS_HAS_FUSE       1   /* FUSE 用户态文件系�?*/
-#define FUNSOS_HAS_3D_RENDER  1   /* 3D 硬件加速渲�?*/
-#define funsos_render         1   /* 渲染器后端支�?*/
+#define FUNSOS_HAS_KVM        1   /* KVM 虚拟化支持 */
+#define FUNSOS_HAS_DB         1   /* 内嵌数据库支持?*/
+#define FUNSOS_HAS_FUSE       1   /* FUSE 用户态文件系统 */
+#define FUNSOS_HAS_3D_RENDER  1   /* 3D 硬件加速渲染 */
+#define funsos_render         1   /* 渲染器后端支持 */
 #define FUNSOS_HAS_SHADER     1   /* 着色器效果模拟 */
-#define FUNSOS_HAS_PACKAGE    1   /* 软件包管�?*/
-#define FUNSOS_HAS_CLIPBOARD  1   /* 剪贴板操�?*/
+#define FUNSOS_HAS_PACKAGE    1   /* 软件包管理 */
+#define FUNSOS_HAS_CLIPBOARD  1   /* 剪贴板操作 */
 #define FUNSOS_HAS_DRAGDROP   1   /* 拖放操作 */
 #define FUNSOS_HAS_HOTKEY     1   /* 全局热键注册 */
-#define FUNSOS_HAS_DIALOG     1   /* 对话�?消息�?*/
-#define FUNSOS_HAS_TIMER_EXT  1   /* 扩展定时�?API */
+#define FUNSOS_HAS_DIALOG     1   /* 对话消息 */
+#define FUNSOS_HAS_TIMER_EXT  1   /* 扩展定时API */
 #define FUNSOS_HAS_VFS        1   /* 虚拟文件系统 */
 #define FUNSOS_HAS_IPC        1   /* 进程间通信扩展 */
 #define FUNSOS_HAS_NOTIFY     1   /* 系统通知 */
-#define FUNSOS_HAS_SCHED      1   /* 调度器控�?*/
+#define FUNSOS_HAS_SCHED      1   /* 调度器控制 */
+#define FUNSOS_HAS_REGISTRY   1   /* 系统注册表（基于 FunDB） */
+#define FUNSOS_HAS_APPS       1   /* 内置应用查询 */
 
-/* ---- 错误码枚�?----
- * 所�?FUNSOS API 函数的统一错误码定义�?
- * 正数或零表示成功，负数表示各种错误�?
+/* ---- 错误码枚 ?----
+ * 所 ?FUNSOS API 函数的统一错误码定义 ?
+ * 正数或零表示成功，负数表示各种错误 ?
  */
 typedef enum {
-    /* 通用错误�?*/
+    /* 通用错误 ?*/
     FUNSOS_OK              = 0,    /* 操作成功 */
     FUNSOS_ERROR           = -1,   /* 通用错误 */
     FUNSOS_ERR_NOMEM       = -2,   /* 内存不足 */
     FUNSOS_ERR_INVAL       = -3,   /* 无效参数 */
     FUNSOS_ERR_PERM        = -4,   /* 权限不足 */
-    FUNSOS_ERR_NOENT       = -5,   /* 文件/对象不存�?*/
-    FUNSOS_ERR_EXIST       = -6,   /* 对象已存�?*/
-    FUNSOS_ERR_BUSY        = -7,   /* 设备/资源�?*/
+    FUNSOS_ERR_NOENT       = -5,   /* 文件/对象不存 ?*/
+    FUNSOS_ERR_EXIST       = -6,   /* 对象已存 ?*/
+    FUNSOS_ERR_BUSY        = -7,   /* 设备/资源 ?*/
     FUNSOS_ERR_TIMEDOUT    = -8,   /* 操作超时 */
-    FUNSOS_ERR_OVERFLOW    = -9,   /* 数值溢�?*/
+    FUNSOS_ERR_OVERFLOW    = -9,   /* 数值溢 ?*/
     FUNSOS_ERR_UNSUPPORTED = -10,  /* 不支持的操作 */
 
-    /* 文件系统错误�?*/
+    /* 文件系统错误 ?*/
     FUNSOS_ERR_NOTDIR      = -20,  /* 不是目录 */
-    FUNSOS_ERR_ISDIR       = -21,  /* 是目录（期望文件�?*/
-    FUNSOS_ERR_NOSPC       = -22,  /* 设备无剩余空�?*/
+    FUNSOS_ERR_ISDIR       = -21,  /* 是目录（期望文件 ?*/
+    FUNSOS_ERR_NOSPC       = -22,  /* 设备无剩余空 ?*/
     FUNSOS_ERR_BIG         = -23,  /* 文件过大 */
 
-    /* 网络错误�?*/
-    FUNSOS_ERR_NETDOWN     = -30,  /* 网络不可�?*/
-    FUNSOS_ERR_CONNREFUSED = -31,  /* 连接被拒�?*/
-    FUNSOS_ERR_CONNRESET   = -32,  /* 连接被重�?*/
+    /* 网络错误 ?*/
+    FUNSOS_ERR_NETDOWN     = -30,  /* 网络不可 ?*/
+    FUNSOS_ERR_CONNREFUSED = -31,  /* 连接被拒 ?*/
+    FUNSOS_ERR_CONNRESET   = -32,  /* 连接被重 ?*/
     FUNSOS_ERR_ADDRINUSE   = -33,  /* 地址已被使用 */
-    FUNSOS_ERR_NOTCONN     = -34,  /* 未连接到套接�?*/
+    FUNSOS_ERR_NOTCONN     = -34,  /* 未连接到套接 ?*/
 
-    /* 进程错误�?*/
-    FUNSOS_ERR_CHILD       = -40,  /* 子进程异�?*/
+    /* 进程错误 ?*/
+    FUNSOS_ERR_CHILD       = -40,  /* 子进程异 ?*/
     FUNSOS_ERR_SIGNAL      = -41,  /* 信号处理错误 */
 
-    /* 窗口/图形错误�?*/
+    /* 窗口/图形错误 ?*/
     FUNSOS_ERR_NOCONTEXT   = -50,  /* 无图形上下文 */
     FUNSOS_ERR_BADWIN      = -51,  /* 无效窗口句柄 */
 
-    /* 音频错误�?*/
-    FUNSOS_ERR_NODEV       = -60,  /* 音频设备不存�?*/
-    FUNSOS_ERR_AUDIOBUSY   = -61,  /* 音频设备�?*/
+    /* 音频错误 ?*/
+    FUNSOS_ERR_NODEV       = -60,  /* 音频设备不存 ?*/
+    FUNSOS_ERR_AUDIOBUSY   = -61,  /* 音频设备 ?*/
 } funsos_error_t;
 
 /* ---- 应用程序初始化配置结构体 ----
- * 传递给 funs_app_init() 用于配置应用启动参数�?
+ * 传递给 funs_app_init() 用于配置应用启动参数 ?
  */
 typedef struct {
     const char *app_name;          /* 应用程序名称 */
-    const char *version;           /* 应用版本字符�?*/
-    uint32_t    flags;             /* 启动标志�?*/
-    uint32_t    min_memory_kb;     /* 最小内存需�?(KB), 0=默认 */
+    const char *version;           /* 应用版本字符 ?*/
+    uint32_t    flags;             /* 启动标志 ?*/
+    uint32_t    min_memory_kb;     /* 最小内存需 ?(KB), 0=默认 */
     int         window_x;          /* 初始窗口 X 坐标, -1=自动 */
     int         window_y;          /* 初始窗口 Y 坐标, -1=自动 */
     int         window_w;          /* 初始窗口宽度, 0=默认(640) */
     int         window_h;          /* 初始窗口高度, 0=默认(480) */
 } funsos_app_config_t;
 
-/* 启动标志位常�?*/
-#define FUNSOS_APP_FLAG_CONSOLE   0x01   /* 控制台模式（�?GUI�?*/
+/* 启动标志位常 ?*/
+#define FUNSOS_APP_FLAG_CONSOLE   0x01   /* 控制台模式（ ?GUI ?*/
 #define FUNSOS_APP_FLAG_FULLSCREEN 0x02  /* 全屏模式 */
-#define FUNSOS_APP_FLAG_NOAUDIO   0x04   /* 禁用音频子系�?*/
-#define FUNSOS_APP_FLAG_NONETWORK 0x08   /* 禁用网络子系�?*/
+#define FUNSOS_APP_FLAG_NOAUDIO   0x04   /* 禁用音频子系 ?*/
+#define FUNSOS_APP_FLAG_NONETWORK 0x08   /* 禁用网络子系 ?*/
 #define FUNSOS_APP_FLAG_DEBUG     0x10   /* 调试模式（输出额外日志） */
 
 /*
- * 初始化应用程序（可选，用于带配置的启动�?
+ * 初始化应用程序（可选，用于带配置的启动 ?
  * 参数: config - 应用配置结构体指针，NULL 使用默认配置
  * 返回: FUNSOS_OK 成功, 其他值见 funsos_error_t
  */
@@ -141,7 +143,7 @@ int funs_app_cleanup(void);
  * 参数: info - 接收信息的结构体指针
  * 返回: FUNSOS_OK 成功, 错误码见 funsos_error_t
  */
-/* 包含所有子头文�?*/
+/* 包含所有子头文 ?*/
 #include "funsos_event.h"
 #include "funsos_window.h"
 #include "funsos_audio.h"
@@ -155,6 +157,7 @@ int funs_app_cleanup(void);
 #include "funsos_power.h"
 #include "funsos_clipboard.h"
 #include "funsos_database.h"
+#include "funsos_registry.h"
 #include "funsos_time.h"
 #include "funsos_ipc.h"
 #include "funsos_libc.h"
@@ -354,24 +357,14 @@ int funsos_sem_destroy(void *sem);
 
 /*
  * 信号量等待 (P操作)
- * 参数: sem - 信号量指针
- * 返回: 0 成功, -1 失败
+ * Note: funsos_sem_wait() is declared in funsos_ipc.h (named semaphores)
+ * For unnamed semaphores, use the IPC semaphore API.
  */
-int funsos_sem_wait(void *sem);
-
-/*
- * 信号量尝试等待
- * 参数: sem - 信号量指针
- * 返回: 0 成功, -1 失败
- */
-int funsos_sem_trywait(void *sem);
 
 /*
  * 信号量发布 (V操作)
- * 参数: sem - 信号量指针
- * 返回: 0 成功, -1 失败
+ * Note: funsos_sem_post() is declared in funsos_ipc.h
  */
-int funsos_sem_post(void *sem);
 
 /*
  * 共享内存创建/打开

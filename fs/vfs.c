@@ -7,12 +7,14 @@
 #include "string.h"
 #include "stddef.h"
 #include "ramfs.h"
+#include "tmpfs.h"
 #include "tarfs.h"
 #include "btrfs.h"
 #include "xfs.h"
 #include "../kernel/permission.h"
 #include "../kernel/user.h"
 #include "../kernel/klog.h"
+#include "fs_stat.h"
 
 dentry_t *root_dentry;
 mount_t *mount_list;
@@ -30,12 +32,14 @@ extern int32_t xfs_mount(superblock_t *sb, void *data);
 extern int32_t fuse_mount(superblock_t *sb, void *data);
 extern int32_t procfs_mount(superblock_t *sb, void *data);
 extern int32_t sysfs_mount(superblock_t *sb, void *data);
+extern int32_t tmpfs_mount(superblock_t *sb, void *data);
 extern file_ops_t devfs_file_ops;
 extern file_ops_t ramfs_file_ops;
 extern file_ops_t tarfs_file_ops;
 extern file_ops_t btrfs_file_ops;
 extern file_ops_t xfs_file_ops;
 extern file_ops_t fuse_file_ops;
+extern file_ops_t tmpfs_file_ops;
 
 void vfs_init(void) {
     spinlock_init(&vfs_lock);
@@ -62,9 +66,36 @@ void vfs_init(void) {
     /* Initialize advanced VFS features */
     extern void vfs_advanced_init(void);
     vfs_advanced_init();
+
+    /* Initialize dcache */
+    extern void dcache_init(void);
+    dcache_init();
+
+    /* Initialize fs sync subsystem */
+    extern void fs_sync_init(void);
+    fs_sync_init();
+
+    /* Initialize inode cache */
+    extern void icache_init(void);
+    icache_init();
+
+    /* Initialize page cache */
+    extern void page_cache_init(void);
+    page_cache_init();
+
+    /* Initialize readahead */
+    extern void readahead_init(void);
+    readahead_init();
+
+    /* Initialize filesystem statistics */
+    fs_stat_init();
 }
 
 int32_t vfs_mount(const char *path, uint32_t fs_type, void *data) {
+    return vfs_mount2(path, fs_type, data, 0);
+}
+
+int32_t vfs_mount2(const char *path, uint32_t fs_type, void *data, uint32_t flags) {
     dentry_t *target = NULL;
 
     if (!path || path[0] == '\0') {
@@ -114,6 +145,7 @@ int32_t vfs_mount(const char *path, uint32_t fs_type, void *data) {
     memset(sb, 0, sizeof(superblock_t));
     sb->fs_type = fs_type;
     sb->block_size = 4096;
+    sb->mount_flags = flags;
 
     int32_t result = -ENODEV;
     switch (fs_type) {
@@ -137,6 +169,9 @@ int32_t vfs_mount(const char *path, uint32_t fs_type, void *data) {
             break;
         case FS_TYPE_SYSFS:
             result = sysfs_mount(sb, data);
+            break;
+        case FS_TYPE_TMPFS:
+            result = tmpfs_mount(sb, data);
             break;
         case FS_TYPE_TARFS:
             result = tarfs_mount(sb, data);
@@ -227,6 +262,7 @@ int32_t vfs_mount(const char *path, uint32_t fs_type, void *data) {
     mount_list = mnt;
 
     spinlock_unlock(&vfs_lock);
+    fs_stat_mount();
     return 0;
 }
 
@@ -258,6 +294,7 @@ int32_t vfs_umount(const char *path) {
             }
             kfree(curr);
             spinlock_unlock(&vfs_lock);
+            fs_stat_umount();
             return 0;
         }
         prev = curr;
@@ -383,6 +420,8 @@ int32_t vfs_open(const char *path, uint32_t flags, file_t **file) {
         f->ops = &xfs_file_ops;
     } else if (dentry->inode->sb && dentry->inode->sb->fs_type == FS_TYPE_FUSE) {
         f->ops = &fuse_file_ops;
+    } else if (dentry->inode->sb && dentry->inode->sb->fs_type == FS_TYPE_TMPFS) {
+        f->ops = &tmpfs_file_ops;
     }
 
     if (f->ops && f->ops->open) {
@@ -394,11 +433,12 @@ int32_t vfs_open(const char *path, uint32_t flags, file_t **file) {
     }
 
     *file = f;
+    fs_stat_open();
     return 0;
 }
 
 int32_t vfs_close(file_t *file) {
-    if (!file) return -1;
+    if (!file) return -EBADF;
 
     spinlock_lock(&vfs_lock);
 
@@ -412,18 +452,29 @@ int32_t vfs_close(file_t *file) {
     }
 
     spinlock_unlock(&vfs_lock);
+    fs_stat_close();
     return 0;
 }
 
 int32_t vfs_read(file_t *file, void *buf, uint32_t count) {
-    if (!file || !file->ops || !file->ops->read) return -1;
-    if (!(file->flags & FILE_MODE_READ)) return -1;
-    return file->ops->read(file, buf, count);
+    if (!file || !buf) return -EINVAL;
+    if (!file->ops || !file->ops->read) return -EBADF;
+    if (!(file->flags & FILE_MODE_READ)) return -EBADF;
+
+    int32_t ret = file->ops->read(file, buf, count);
+    if (ret > 0) {
+        fs_stat_read((uint32_t)ret, 0);
+    } else if (ret < 0) {
+        fs_stat_read(0, 1);
+        fs_stat_error(-ret);
+    }
+    return ret;
 }
 
 int32_t vfs_write(file_t *file, const void *buf, uint32_t count) {
-    if (!file || !file->ops || !file->ops->write) return -1;
-    if (!(file->flags & FILE_MODE_WRITE)) return -1;
+    if (!file || !buf) return -EINVAL;
+    if (!file->ops || !file->ops->write) return -EBADF;
+    if (!(file->flags & FILE_MODE_WRITE)) return -EBADF;
 
     /* 权限检查: 写入文件需要写入权限 */
     if (file->inode) {
@@ -436,11 +487,18 @@ int32_t vfs_write(file_t *file, const void *buf, uint32_t count) {
                                 (uint16_t)file->inode->mode,
                                 file->inode->acl, proc_uid, proc_gid,
                                 PERM_WRITE) != 0) {
-            return -1;
+            return -EPERM;
         }
     }
 
-    return file->ops->write(file, buf, count);
+    int32_t ret = file->ops->write(file, buf, count);
+    if (ret > 0) {
+        fs_stat_write((uint32_t)ret, 0);
+    } else if (ret < 0) {
+        fs_stat_write(0, 1);
+        fs_stat_error(-ret);
+    }
+    return ret;
 }
 
 int32_t vfs_seek(file_t *file, int32_t offset, int32_t whence) {
@@ -544,6 +602,7 @@ int32_t vfs_mkdir(const char *path, uint32_t mode) {
 
     int32_t ret = parent->inode->ops->mkdir(parent, name, mode);
     spinlock_unlock(&vfs_lock);
+    if (ret == 0) fs_stat_mkdir();
     return ret;
 }
 
@@ -640,6 +699,7 @@ int32_t vfs_unlink(const char *path) {
 
     int32_t ret = parent->inode->ops->unlink(parent, name);
     spinlock_unlock(&vfs_lock);
+    if (ret == 0) fs_stat_delete();
     return ret;
 }
 
@@ -743,28 +803,36 @@ int32_t vfs_access(const char *path, uint32_t mode) {
 }
 
 int32_t vfs_sync(void) {
-    /* No-op for ramfs; other filesystems can be flushed here in the future. */
-    return 0;
+    extern int32_t fs_sync_all(void);
+    return fs_sync_all();
 }
 
 int32_t vfs_fsync(file_t *file) {
-    if (!file || !file->inode) return -1;
+    extern int32_t fs_sync_fsync(file_t *file);
+    return fs_sync_fsync(file);
+}
 
-    /* For disk-based filesystems, flush dirty data to disk */
-    if (file->inode->sb) {
-        if (file->inode->sb->fs_type == FS_TYPE_EXT2) {
-            extern int32_t ext2_fsync(uint32_t ino);
-            return ext2_fsync(file->inode->ino);
-        } else if (file->inode->sb->fs_type == FS_TYPE_EXT4) {
-            extern int32_t ext4_fsync(uint32_t ino);
-            return ext4_fsync(file->inode->ino);
-        } else if (file->inode->sb->fs_type == FS_TYPE_FAT32) {
-            /* FAT32: FAT cache is always in sync with disk writes */
-            return 0;
-        }
+int32_t vfs_fdatasync(file_t *file) {
+    extern int32_t fs_sync_fdatasync(file_t *file);
+    return fs_sync_fdatasync(file);
+}
+
+int32_t vfs_syncfs(const char *path) {
+    if (!path || !*path) return -EINVAL;
+
+    /* 找到路径对应的 superblock */
+    dentry_t *dentry = NULL;
+    if (path_resolve(path, &dentry) != 0 || !dentry || !dentry->inode) {
+        return -ENOENT;
     }
 
-    return 0;
+    if (!dentry->inode->sb) {
+        return -ENODEV;
+    }
+
+    superblock_t *sb = dentry->inode->sb;
+    extern int32_t fs_sync_sb(superblock_t *sb);
+    return fs_sync_sb(sb);
 }
 
 int32_t vfs_mknod(const char *path, uint32_t mode, uint32_t dev) {
@@ -1110,6 +1178,30 @@ int32_t vfs_readdir(file_t *dir, vfs_dirent_t *entry) {
         return 1;
     }
 
+    if (dir->inode->sb && dir->inode->sb->fs_type == FS_TYPE_TMPFS) {
+        tmpfs_node_t *parent = (tmpfs_node_t *)dir->inode->private_data;
+        tmpfs_node_t *cur   = (tmpfs_node_t *)dir->private_data;
+        if (!parent) return -ENOENT;
+        if (!cur) {
+            cur = parent->child;
+        } else {
+            cur = cur->next_sibling;
+        }
+        if (!cur) {
+            dir->private_data = NULL;
+            return 0;
+        }
+        dir->private_data = cur;
+        entry->ino  = cur->ino;
+        entry->off  = 0;
+        entry->reclen = sizeof(vfs_dirent_t);
+        entry->type = (cur->mode & FILE_MODE_DIR) ? DT_DIR :
+                      (cur->mode & FILE_MODE_LNK) ? DT_LNK : DT_REG;
+        strncpy(entry->name, cur->name, 255);
+        entry->name[255] = '\0';
+        return 1;
+    }
+
     /* Generic fallback: walk the dentry children list using
      * private_data as the iterator (same pattern as ramfs/tarfs). */
     {
@@ -1327,13 +1419,91 @@ int32_t vfs_list_mounts(vfs_mount_info_t *mounts, uint32_t max_mounts) {
         strncpy(mounts[count].fs_type, vfs_fs_type_name(mnt->sb->fs_type), sizeof(mounts[count].fs_type) - 1);
         mounts[count].total_blocks = mnt->sb->total_blocks;
         mounts[count].free_blocks = mnt->sb->free_blocks;
+        mounts[count].total_inodes = mnt->sb->total_inodes;
+        mounts[count].free_inodes = mnt->sb->free_inodes;
         mounts[count].block_size = mnt->sb->block_size;
+        mounts[count].mount_flags = mnt->sb->mount_flags;
+        mounts[count].read_only = (mnt->sb->mount_flags & MS_RDONLY) ? 1 : 0;
         count++;
         mnt = mnt->next;
     }
 
     spinlock_unlock(&vfs_lock);
     return (int32_t)count;
+}
+
+/* ---- 辅助：查找路径对应的挂载点 ---- */
+static mount_t *find_mount_by_path_locked(const char *path) {
+    dentry_t *dentry = NULL;
+    if (path_resolve(path, &dentry) != 0 || !dentry) {
+        return NULL;
+    }
+
+    /* 向上查找最近的挂载点 */
+    mount_t *best = NULL;
+    mount_t *mnt = mount_list;
+    while (mnt) {
+        if (mnt->mount_point == dentry) {
+            return mnt;  /* 精确匹配 */
+        }
+        /* 检查是否是祖先挂载点 */
+        dentry_t *d = dentry;
+        while (d && d != d->parent) {
+            if (d == mnt->mount_point) {
+                best = mnt;
+                break;
+            }
+            d = d->parent;
+        }
+        mnt = mnt->next;
+    }
+    return best;
+}
+
+/* ---- 重新挂载 ---- */
+int32_t vfs_remount(const char *path, uint32_t flags) {
+    if (!path || !*path) return -EINVAL;
+
+    spinlock_lock(&vfs_lock);
+
+    mount_t *mnt = find_mount_by_path_locked(path);
+    if (!mnt) {
+        spinlock_unlock(&vfs_lock);
+        return -ENOENT;
+    }
+
+    mnt->sb->mount_flags = flags;
+
+    spinlock_unlock(&vfs_lock);
+    fs_stat_umount();  /* 统计 */
+    fs_stat_mount();
+    return 0;
+}
+
+/* ---- 检查是否只读 ---- */
+int vfs_is_readonly(const char *path) {
+    if (!path || !*path) return 0;
+
+    spinlock_lock(&vfs_lock);
+
+    mount_t *mnt = find_mount_by_path_locked(path);
+    int readonly = mnt && (mnt->sb->mount_flags & MS_RDONLY);
+
+    spinlock_unlock(&vfs_lock);
+    return readonly ? 1 : 0;
+}
+
+/* ---- 获取挂载标志 ---- */
+uint32_t vfs_get_mount_flags(const char *path) {
+    if (!path || !*path) return 0;
+
+    spinlock_lock(&vfs_lock);
+
+    mount_t *mnt = find_mount_by_path_locked(path);
+    uint32_t flags = mnt ? mnt->sb->mount_flags : 0;
+
+    spinlock_unlock(&vfs_lock);
+    return flags;
 }
 
 /* ===== 错误码字符串 ===== */

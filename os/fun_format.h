@@ -280,8 +280,8 @@ typedef struct __attribute__((packed)) {
 
 /* 共享库描述符 */
 struct funlib_s;
-typedef struct funlib_s __attribute__((packed)) funlib_t;
-struct funlib_s {
+typedef struct funlib_s funlib_t;
+struct __attribute__((packed)) funlib_s {
     char name[64];            /* 库名 */
     uint32_t base;            /* 加载基址 */
     uint32_t size;            /* 库大小 */

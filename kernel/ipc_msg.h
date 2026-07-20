@@ -23,10 +23,17 @@ typedef struct {
     sem_t wait_sem;
 } msg_queue_t;
 
+typedef struct {
+    int      key;
+    uint32_t count;
+    uint32_t used_bytes;
+} msg_queue_info_t;
+
 void msg_init(void);
 int msg_create(int key);
 int msg_send(int qid, void *data, uint32_t size, int flags);
 int msg_recv(int qid, void *buf, uint32_t size, int flags);
 void msg_destroy(int qid);
+uint32_t msg_list(msg_queue_info_t *out, uint32_t max_count);
 
 #endif

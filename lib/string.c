@@ -1,6 +1,7 @@
 #include "string.h"
 #include "stdint.h"
 #include "stdlib.h"
+#include "stdio.h"
 
 void *memcpy(void *dst, const void *src, size_t n) {
     uint8_t *d = (uint8_t *)dst;
@@ -318,45 +319,147 @@ char *strtok_r(char *str, const char *delim, char **saveptr) {
 
 char *strerror(int errnum) {
     static const char *error_strings[] = {
-        "Success",
-        "Operation not permitted",
-        "No such file or directory",
-        "No such process",
-        "Interrupted system call",
-        "I/O error",
-        "No such device or address",
-        "Argument list too long",
-        "Exec format error",
-        "Bad file number",
-        "No child processes",
-        "Try again",
-        "Out of memory",
-        "Permission denied",
-        "Bad address",
-        "Block device required",
-        "Device or resource busy",
-        "File exists",
-        "Cross-device link",
-        "No such device",
-        "Not a directory",
-        "Is a directory",
-        "Invalid argument",
-        "File table overflow",
-        "Too many open files",
-        "Not a typewriter",
-        "Text file busy",
-        "File too large",
-        "No space left on device",
-        "Illegal seek",
-        "Read-only file system",
-        "Too many links",
-        "Broken pipe",
-        "Math argument out of domain",
-        "Math result not representable"
+        [0]   = "Success",
+        [1]   = "Operation not permitted",
+        [2]   = "No such file or directory",
+        [3]   = "No such process",
+        [4]   = "Interrupted system call",
+        [5]   = "I/O error",
+        [6]   = "No such device or address",
+        [7]   = "Argument list too long",
+        [8]   = "Exec format error",
+        [9]   = "Bad file number",
+        [10]  = "No child processes",
+        [11]  = "Try again",
+        [12]  = "Out of memory",
+        [13]  = "Permission denied",
+        [14]  = "Bad address",
+        [15]  = "Block device required",
+        [16]  = "Device or resource busy",
+        [17]  = "File exists",
+        [18]  = "Cross-device link",
+        [19]  = "No such device",
+        [20]  = "Not a directory",
+        [21]  = "Is a directory",
+        [22]  = "Invalid argument",
+        [23]  = "File table overflow",
+        [24]  = "Too many open files",
+        [25]  = "Not a typewriter",
+        [26]  = "Text file busy",
+        [27]  = "File too large",
+        [28]  = "No space left on device",
+        [29]  = "Illegal seek",
+        [30]  = "Read-only file system",
+        [31]  = "Too many links",
+        [32]  = "Broken pipe",
+        [33]  = "Math argument out of domain",
+        [34]  = "Math result not representable",
+        [35]  = "Resource deadlock would occur",
+        [36]  = "File name too long",
+        [37]  = "No record locks available",
+        [38]  = "Function not implemented",
+        [39]  = "Directory not empty",
+        [40]  = "Too many symbolic links",
+        [42]  = "No message of desired type",
+        [43]  = "Identifier removed",
+        [74]  = "Not a data message",
+        [75]  = "Value too large",
+        [84]  = "Illegal byte sequence",
+        [88]  = "Socket operation on non-socket",
+        [89]  = "Destination address required",
+        [90]  = "Message too long",
+        [98]  = "Address already in use",
+        [99]  = "Cannot assign requested address",
+        [100] = "Network is down",
+        [101] = "Network is unreachable",
+        [103] = "Software caused connection abort",
+        [104] = "Connection reset by peer",
+        [105] = "No buffer space available",
+        [107] = "Transport endpoint not connected",
+        [110] = "Connection timed out",
+        [111] = "Connection refused",
+        [112] = "Host is down",
+        [113] = "No route to host",
+        [122] = "Quota exceeded",
+        [123] = "No medium found",
+        [124] = "Wrong medium type",
+        [125] = "Operation canceled",
+        [200] = "Kernel execution error",
+        [201] = "Kernel panic",
+        [202] = "Out of kernel memory",
+        [203] = "Invalid process",
+        [204] = "Invalid thread",
+        [205] = "Invalid memory region",
+        [206] = "Invalid filesystem",
+        [210] = "Mount error",
+        [211] = "Unmount error",
+        [212] = "Invalid syscall",
+        [228] = "Security policy violation",
+        [272] = "Page fault",
+        [273] = "Segmentation fault",
+        [275] = "Illegal instruction",
+        [276] = "Division by zero",
+        [279] = "Device not found",
+        [280] = "Device busy",
+        [282] = "Device not supported",
+        [300] = "Interpreter error",
+        [301] = "Parse error",
+        [302] = "Tokenizer error",
+        [303] = "Undefined identifier",
+        [304] = "Symbol redefinition",
+        [305] = "Type mismatch",
+        [306] = "Unexpected token",
+        [307] = "Missing return",
+        [308] = "Break outside loop",
+        [309] = "Continue outside loop",
+        [310] = "Invalid function call",
+        [311] = "Wrong argument count",
+        [313] = "Registry corrupt",
+        [314] = "Registry type mismatch",
+        [315] = "Registry key locked",
+        [316] = "Script error",
+        [317] = "Not a valid ELF executable",
+        [320] = "SDK version mismatch",
+        [321] = "Package corrupt",
+        [322] = "Package signature invalid",
+        [323] = "Package dependency missing",
+        [324] = "Package conflict",
+        [325] = "GUI subsystem error",
+        [326] = "Window error",
+        [336] = "End of file reached",
+        [337] = "Malformed path",
+        [338] = "Resource locked",
+        [339] = "Operation timed out",
+        [340] = "Operation aborted",
+        [341] = "Subsystem not initialized",
+        [342] = "Already initialized",
+        [343] = "Unsupported operation",
+        [344] = "Bad magic number",
+        [345] = "Version mismatch",
+        [346] = "Internal error",
+        [348] = "Buffer overrun",
+        [349] = "Buffer underrun",
     };
 
-    if (errnum >= 0 && errnum < 35) {
-        return (char *)error_strings[errnum];
+    if (errnum >= 0 && errnum < 512) {
+        if (errnum < (int)(sizeof(error_strings)/sizeof(error_strings[0])) && error_strings[errnum]) {
+            return (char *)error_strings[errnum];
+        }
+    }
+    if (errnum >= 35 && errnum <= 133) {
+        static char numbuf[32];
+        snprintf(numbuf, sizeof(numbuf), "Error %d", errnum);
+        return numbuf;
+    }
+    if (errnum >= 200 && errnum <= 299) {
+        static char numbuf2[32];
+        snprintf(numbuf2, sizeof(numbuf2), "Kernel error %d", errnum);
+        return numbuf2;
+    }
+    if (errnum >= 300 && errnum <= 399) {
+        static char numbuf3[32];
+        snprintf(numbuf3, sizeof(numbuf3), "App/SDK error %d", errnum);
+        return numbuf3;
     }
     return (char *)"Unknown error";
 }

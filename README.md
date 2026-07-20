@@ -1,7 +1,7 @@
-﻿# FunsCore v0.7 / FunsOS — 从零构建的完整 x86 操作系统
+# FunsCore v0.8 / FunsOS — 从零构建的完整 x86 操作系统
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-0.7-blue" alt="Version"/>
+  <img src="https://img.shields.io/badge/Version-0.8-blue" alt="Version"/>
   <img src="https://img.shields.io/badge/Platform-x86_32bit-green" alt="Platform"/>
   <img src="https://img.shields.io/badge/Language-C%2FASM-orange" alt="Language"/>
   <img src="https://img.shields.io/badge/Build-Passing-brightgreen" alt="Build Status"/>
@@ -22,7 +22,7 @@ Copyright (c) 2025-2026 Funs Liu. All Rights Reserved.
 
 ## 项目简介
 
-**FunsCore** 是本项目操作系统的内核名称（当前版本 **v0.7**），**FunsOS** 是基于 FunsCore 构建的完整操作系统名称。这是一个从零开始、不依赖任何现有操作系统代码的 **x86 32 位操作系统项目**，使用 **C 语言和 x86 汇编语言**编写。
+**FunsCore** 是本项目操作系统的内核名称（当前版本 **v0.8**），**FunsOS** 是基于 FunsCore 构建的完整操作系统名称。这是一个从零开始、不依赖任何现有操作系统代码的 **x86 32 位操作系统项目**，使用 **C 语言和 x86 汇编语言**编写。
 
 FunsOS 实现了现代操作系统的核心子系统，包括：进程调度与多任务管理、虚拟内存管理（VMM）、11 种文件系统支持、完整的 TCP/IP 网络协议栈、VBE 图形帧缓冲控制台与 3D 软件渲染器、窗口管理与合成器、音频系统、安全防护机制、KVM 虚拟化支持、内嵌数据库引擎 FunDB、完整的用户认证系统以及丰富的驱动程序框架。
 
@@ -457,7 +457,7 @@ funsos/
 │
 ├── renderer/                  # FunRender 独立渲染引擎
 │   ├── include/               #   渲染引擎头文件 (10 个)
-│   ├── src/                   #   渲染引擎源码 (17 个模块) (v0.7 扩展)
+│   ├── src/                   #   渲染引擎源码 (17 个模块) (v0.8 扩展)
 │   │   ├── canvas.c, context.c, widgets.c, widgets_extra.c,
 │   │   ├── layout.c, theme.c, animation.c, events.c,
 │   │   ├── compositor.c, input.c, text.c, window.c,
@@ -734,6 +734,6 @@ No commercial redistribution without explicit written permission from the author
 ---
 
 <p align="center">
-  <strong>FunsCore v0.7 — 从零构建的 x86 操作系统</strong><br/>
-  <em>FunsCore v0.7 — An operating system built from scratch</em>
+  <strong>FunsCore v0.8 — 从零构建的 x86 操作系统</strong><br/>
+  <em>FunsCore v0.8 — An operating system built from scratch</em>
 </p>

@@ -16,6 +16,7 @@
 #include "klog.h"
 #include "user.h"
 #include "ksym.h"
+#include "../kernel/env.h"
 
 static procfs_entry_t entries[128];
 static uint32_t entry_count;
@@ -694,6 +695,85 @@ static int32_t sys_kernel_hostname_read(char *buf, uint32_t offset, uint32_t cou
 }
 
 /* ------------------------------------------------------------------ */
+/*  /proc/environ                                                      */
+/* ------------------------------------------------------------------ */
+
+static int32_t environ_read(char *buf, uint32_t offset, uint32_t count) {
+    char tmp[2048];
+    uint32_t env_count_val = 0;
+    int32_t len = sysenv_get_all(tmp, sizeof(tmp), &env_count_val);
+    if (len < 0) len = 0;
+
+    if (offset >= (uint32_t)len) return 0;
+    uint32_t avail = (uint32_t)len - offset;
+    if (avail > count) avail = count;
+    memcpy(buf, tmp + offset, avail);
+    return (int32_t)avail;
+}
+
+/* ------------------------------------------------------------------ */
+/*  /proc/kmsg                                                         */
+/* ------------------------------------------------------------------ */
+
+static int32_t kmsg_read(char *buf, uint32_t offset, uint32_t count) {
+    char tmp[2048];
+    int32_t len = 0;
+    len = (int32_t)klog_read(tmp, sizeof(tmp));
+    if (len < 0) len = 0;
+
+    if (offset >= (uint32_t)len) return 0;
+    uint32_t avail = (uint32_t)len - offset;
+    if (avail > count) avail = count;
+    memcpy(buf, tmp + offset, avail);
+    return (int32_t)avail;
+}
+
+/* ------------------------------------------------------------------ */
+/*  /proc/sys/kernel/pid_max                                           */
+/* ------------------------------------------------------------------ */
+
+static int32_t sys_kernel_pid_max_read(char *buf, uint32_t offset, uint32_t count) {
+    char tmp[32];
+    int32_t len = sprintf(tmp, "%d\n", MAX_PROCESSES);
+
+    if (offset >= (uint32_t)len) return 0;
+    uint32_t avail = (uint32_t)len - offset;
+    if (avail > count) avail = count;
+    memcpy(buf, tmp + offset, avail);
+    return (int32_t)avail;
+}
+
+/* ------------------------------------------------------------------ */
+/*  /proc/sys/kernel/threads-max                                       */
+/* ------------------------------------------------------------------ */
+
+static int32_t sys_kernel_threads_max_read(char *buf, uint32_t offset, uint32_t count) {
+    char tmp[32];
+    int32_t len = sprintf(tmp, "%d\n", MAX_PROCESSES * 2);
+
+    if (offset >= (uint32_t)len) return 0;
+    uint32_t avail = (uint32_t)len - offset;
+    if (avail > count) avail = count;
+    memcpy(buf, tmp + offset, avail);
+    return (int32_t)avail;
+}
+
+/* ------------------------------------------------------------------ */
+/*  /proc/sys/fs/file-max                                              */
+/* ------------------------------------------------------------------ */
+
+static int32_t sys_fs_file_max_read(char *buf, uint32_t offset, uint32_t count) {
+    char tmp[32];
+    int32_t len = sprintf(tmp, "%d\n", 65536);
+
+    if (offset >= (uint32_t)len) return 0;
+    uint32_t avail = (uint32_t)len - offset;
+    if (avail > count) avail = count;
+    memcpy(buf, tmp + offset, avail);
+    return (int32_t)avail;
+}
+
+/* ------------------------------------------------------------------ */
 /*  /proc/[pid]/status                                                 */
 /* ------------------------------------------------------------------ */
 
@@ -764,6 +844,11 @@ int32_t procfs_init(void) {
     procfs_add_entry("sys/kernel/osrelease", FILE_MODE_READ, sys_kernel_osrelease_read);
     procfs_add_entry("sys/kernel/version", FILE_MODE_READ, sys_kernel_version_read);
     procfs_add_entry("sys/kernel/hostname", FILE_MODE_READ, sys_kernel_hostname_read);
+    procfs_add_entry("sys/kernel/pid_max", FILE_MODE_READ, sys_kernel_pid_max_read);
+    procfs_add_entry("sys/kernel/threads-max", FILE_MODE_READ, sys_kernel_threads_max_read);
+    procfs_add_entry("sys/fs/file-max", FILE_MODE_READ, sys_fs_file_max_read);
+    procfs_add_entry("environ", FILE_MODE_READ, environ_read);
+    procfs_add_entry("kmsg", FILE_MODE_READ, kmsg_read);
 
     uint32_t pid;
     for (pid = 0; pid < PROCFS_MAX_PROCS; pid++) {

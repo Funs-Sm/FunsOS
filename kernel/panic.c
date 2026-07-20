@@ -1,6 +1,7 @@
 #include "panic.h"
 #include "version.h"
 #include "serial.h"
+#include "crashdump.h"
 
 static volatile uint16_t *vga_buffer = (uint16_t *)0xB8000;
 static uint8_t current_color = 0x07;
@@ -40,10 +41,10 @@ static void vga_scroll(void)
 static void vga_update_cursor(void)
 {
     uint16_t pos = cursor_row * VGA_WIDTH + cursor_col;
-    asm volatile("outb %0, $0x3D4" : : "a"((uint8_t)14));
-    asm volatile("outb %0, $0x3D5" : : "a"((uint8_t)(pos >> 8)));
-    asm volatile("outb %0, $0x3D4" : : "a"((uint8_t)15));
-    asm volatile("outb %0, $0x3D5" : : "a"((uint8_t)(pos & 0xFF)));
+    asm volatile("outb %0, %%dx" : : "a"((uint8_t)14), "d"((uint16_t)0x3D4));
+    asm volatile("outb %0, %%dx" : : "a"((uint8_t)(pos >> 8)), "d"((uint16_t)0x3D5));
+    asm volatile("outb %0, %%dx" : : "a"((uint8_t)15), "d"((uint16_t)0x3D4));
+    asm volatile("outb %0, %%dx" : : "a"((uint8_t)(pos & 0xFF)), "d"((uint16_t)0x3D5));
 }
 
 void vga_putchar(char c)
@@ -129,6 +130,9 @@ void vga_print_hex(uint32_t value)
 void kernel_panic(const char *msg, const char *file, int line)
 {
     asm volatile("cli");
+
+    /* 持久化崩溃上下文到 /var/crash/（best-effort，失败也继续） */
+    crashdump_capture(msg ? msg : "<null>", file ? file : "<unknown>", line);
 
     /* Output panic info to serial port (visible even in VESA mode) */
     serial_print(COM1, "\n!!! KERNEL PANIC !!!\n");

@@ -279,4 +279,96 @@ int  sched_batch_add(pid_t pid, uint32_t prio, uint64_t est_runtime);
 int  sched_batch_remove(pid_t pid);
 void sched_batch_tick(void);
 
+/* ============================================================
+ * 调度策略表 (Scheduler Policy Table)
+ * ============================================================ */
+
+#define SCHED_POLICY_COUNT 6
+
+#define SCHED_ENERGY_PERF_BIAS_PERFORMANCE 0
+#define SCHED_ENERGY_PERF_BIAS_BALANCED   6
+#define SCHED_ENERGY_PERF_BIAS_POWERSAVE  15
+
+#define SCHED_DOMAIN_CPU 0
+#define SCHED_DOMAIN_CORE 1
+#define SCHED_DOMAIN_DIE 2
+
+typedef pcb_t *(*sched_pick_next_func_t)(void);
+typedef void (*sched_enqueue_func_t)(pcb_t *);
+typedef void (*sched_dequeue_func_t)(pcb_t *);
+typedef void (*sched_tick_func_t)(pcb_t *);
+typedef void (*sched_task_new_func_t)(pcb_t *);
+typedef void (*sched_task_wakeup_func_t)(pcb_t *);
+
+typedef struct sched_policy {
+    const char *name;
+    uint32_t policy_flag;
+    sched_pick_next_func_t pick_next;
+    sched_enqueue_func_t enqueue;
+    sched_dequeue_func_t dequeue;
+    sched_tick_func_t task_tick;
+    sched_task_new_func_t task_new;
+    sched_task_wakeup_func_t task_wakeup;
+    uint32_t time_granularity;
+    uint32_t wakeup_granularity;
+    uint32_t latency;
+    uint8_t preemptible;
+    const char *description;
+} sched_policy_t;
+
+typedef struct sched_domain {
+    uint32_t domain_id;
+    uint32_t type;
+    uint32_t cpu_mask;
+    uint32_t nr_cpus;
+    uint64_t load;
+    uint32_t capacity;
+} sched_domain_t;
+
+typedef struct energy_profile {
+    uint32_t current_freq;
+    uint32_t max_freq;
+    uint32_t min_freq;
+    uint32_t idle_percent;
+    uint32_t energy_perf_bias;
+    uint8_t  power_save_mode;
+    uint64_t idle_cycles;
+    uint64_t busy_cycles;
+} energy_profile_t;
+
+typedef struct sched_tunables {
+    uint32_t sched_min_granularity_ns;
+    uint32_t sched_latency_ns;
+    uint32_t sched_wakeup_granularity_ns;
+    uint32_t sched_migration_cost_ns;
+    uint32_t sched_nr_migrate;
+    uint32_t sched_cfs_bandwidth_slice_us;
+    uint32_t sched_rt_period_us;
+    uint32_t sched_rt_runtime_us;
+    int32_t  sched_child_runs_first;
+} sched_tunables_t;
+
+const sched_policy_t *sched_get_policy_table(void);
+const sched_policy_t *sched_get_policy_by_flag(uint32_t flag);
+const char *sched_get_policy_name(uint32_t policy_flag);
+
+void sched_set_energy_perf_bias(int bias);
+int  sched_get_energy_perf_bias(void);
+void sched_power_idle_tick(void);
+void sched_set_power_save(uint8_t enable);
+
+void sched_tunables_init(void);
+sched_tunables_t *sched_get_tunables(void);
+int sched_set_tunable(const char *name, uint32_t value);
+
+void sched_domain_init(void);
+sched_domain_t *sched_get_domain(uint32_t domain_id);
+
+void sched_energy_init(void);
+energy_profile_t *sched_get_energy_profile(void);
+void sched_energy_account_tick(uint8_t is_busy);
+uint32_t sched_energy_estimate_capacity(void);
+
+void sched_print_policy_table(void);
+
 #endif

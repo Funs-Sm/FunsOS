@@ -295,6 +295,39 @@ int vga_text_in_scrollback(void) {
     return sb_active;
 }
 
+void vga_text_snapshot(void) {
+    volatile uint16_t *buf = (volatile uint16_t *)VGA_BUFFER;
+    history_count = 0;
+    sb_active = 0;
+    sb_view = 0;
+    /* Capture the first VGA_HEIGHT-1 rows as history */
+    for (int row = 0; row < VGA_HEIGHT - 1; row++) {
+        if (history_count < VGA_HISTORY_SIZE) {
+            for (int col = 0; col < VGA_WIDTH; col++) {
+                history[history_count][col] = buf[row * VGA_WIDTH + col];
+            }
+            history_count++;
+        }
+    }
+    /* Capture the last row as current_line */
+    for (int col = 0; col < VGA_WIDTH; col++) {
+        current_line[col] = buf[(VGA_HEIGHT - 1) * VGA_WIDTH + col];
+    }
+    cursor_row = VGA_HEIGHT - 1;
+    /* Find last non-space character to set cursor column */
+    cursor_col = 0;
+    for (int col = VGA_WIDTH - 1; col >= 0; col--) {
+        uint16_t cell = current_line[col];
+        char ch = (char)(cell & 0xFF);
+        if (ch != ' ' && ch != 0) {
+            cursor_col = col + 1;
+            if (cursor_col >= VGA_WIDTH) cursor_col = VGA_WIDTH - 1;
+            break;
+        }
+    }
+    update_hw_cursor();
+}
+
 void vga_text_dump_screen(void) {
     volatile uint16_t *buf = (volatile uint16_t *)VGA_BUFFER;
     serial_print(COM1, "--- VGA screen dump ---\n");

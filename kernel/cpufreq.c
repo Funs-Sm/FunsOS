@@ -1,256 +1,345 @@
 #include "cpufreq.h"
+#include "klog.h"
 #include "string.h"
-#include "timer.h"
 
-/* Intel MSR definitions */
-#define IA32_PERF_STATUS   0x198
-#define IA32_PERF_CTL      0x199
-#define IA32_MISC_ENABLE   0x1A0
+struct cpufreq_global cpufreq_data;
 
-/* CPUID feature flags */
-#define CPUID_EST_BIT      7  /* Enhanced SpeedStep Technology bit in ECX */
-
-/* Governor types */
-#define GOV_PERFORMANCE  0
-#define GOV_POWERSAVE    1
-#define GOV_ONDEMAND     2
-
-static cpufreq_info_t cpufreq_info;
-static int cpufreq_available = 0;
-static int current_governor = GOV_PERFORMANCE;
-
-/* On-demand governor state */
-static uint32_t ondemand_idle_ticks = 0;
-static uint32_t ondemand_total_ticks = 0;
-static uint32_t ondemand_last_check = 0;
-#define ONDEMAND_CHECK_INTERVAL  100  /* Check every 100 ticks (1 second) */
-#define ONDEMAND_UP_THRESHOLD    80   /* Scale up if CPU usage > 80% */
-#define ONDEMAND_DOWN_THRESHOLD  20   /* Scale down if CPU usage < 20% */
-
-/* MSR read/write using inline assembly */
-static inline uint64_t msr_read(uint32_t msr) {
-    uint32_t low, high;
-    asm volatile("rdmsr" : "=a"(low), "=d"(high) : "c"(msr));
-    return ((uint64_t)high << 32) | low;
+static uint32_t dummy_driver_get(uint32_t cpu) {
+    if (cpu >= CPUFREQ_MAX_CPUS) return 0;
+    return cpufreq_data.policies[cpu].cur_freq;
 }
 
-static inline void msr_write(uint32_t msr, uint64_t val) {
-    asm volatile("wrmsr" :: "a"((uint32_t)val), "d"((uint32_t)(val >> 32)), "c"(msr));
-}
-
-/* Check if CPU supports Enhanced SpeedStep */
-static int cpufreq_check_est(void) {
-    uint32_t eax, ebx, ecx, edx;
-    uint32_t vendor[4];
-
-    /* CPUID with EAX=0 to get vendor ID and max level */
-    asm volatile("cpuid" : "=a"(eax), "=b"(vendor[0]), "=d"(vendor[1]), "=c"(vendor[2]) : "a"(0));
-    vendor[3] = 0;
-
-    /* Check if CPUID level 1 is supported */
-    if (eax < 1) return 0;
-
-    /* CPUID with EAX=1 to get feature flags */
-    asm volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(1));
-
-    /* For Intel CPUs: check if it's Intel first */
-    if (strcmp((char *)vendor, "GenuineIntel") != 0) {
-        /* Not Intel, no SpeedStep */
-        return 0;
-    }
-
-    /* Check EST bit (bit 7 of ECX) - Enhanced SpeedStep Technology */
-    if (!(ecx & (1 << 7))) {
-        return 0;
-    }
-
-    /* Safely try to read IA32_PERF_STATUS */
-    /* If the MSR doesn't exist, it will cause #GP, so we try a simple check first */
-    /* For now, just return based on CPUID to be safe in virtualized environments */
-    return 1;
-}
-
-/* Detect available P-states from MSR */
-static void cpufreq_detect_pstates(void) {
-    /* Read the current performance status */
-    uint64_t perf_status = msr_read(IA32_PERF_STATUS);
-
-    /* The bus ratio is in bits [15:8] of the lower 32 bits */
-    uint32_t current_ratio = (uint32_t)(perf_status >> 8) & 0xFF;
-
-    /* Assume a typical FSB of 100 MHz for modern Intel CPUs */
-    /* The actual FSB varies, but 100 MHz is common for Core-series */
-    uint32_t fsb = 100;
-
-    cpufreq_info.current_freq = current_ratio * fsb;
-    cpufreq_info.max_freq = current_ratio * fsb;
-    cpufreq_info.min_freq = (current_ratio / 2) * fsb;  /* Estimate min as half */
-
-    /* Try to detect available P-states by reading different values
-       from IA32_PERF_STATUS. On many Intel CPUs, the available ratios
-       can be found by iterating. For simplicity, we generate a set. */
-    cpufreq_info.available_count = 0;
-    uint32_t min_ratio = current_ratio / 2;
-    if (min_ratio < 6) min_ratio = 6;  /* Minimum ratio is usually 6 */
-
-    for (uint32_t r = min_ratio; r <= current_ratio; r++) {
-        if (cpufreq_info.available_count >= 16) break;
-        cpufreq_info.available_freqs[cpufreq_info.available_count++] = r * fsb;
-    }
-
-    /* If no P-states found, just add current */
-    if (cpufreq_info.available_count == 0) {
-        cpufreq_info.available_freqs[0] = cpufreq_info.current_freq;
-        cpufreq_info.available_count = 1;
-    }
-}
-
-void cpufreq_init(void) {
-    memset(&cpufreq_info, 0, sizeof(cpufreq_info_t));
-
-    /* Check for Intel Speed Step support */
-    if (!cpufreq_check_est()) {
-        cpufreq_available = 0;
-        strcpy(cpufreq_info.governor, "none");
-        return;
-    }
-
-    cpufreq_available = 1;
-
-    /* Detect available P-states */
-    cpufreq_detect_pstates();
-
-    /* Default to performance governor */
-    cpufreq_governor_performance();
-}
-
-uint32_t cpufreq_get(void) {
-    if (!cpufreq_available) return 0;
-
-    /* Read current frequency from IA32_PERF_STATUS */
-    uint64_t perf_status = msr_read(IA32_PERF_STATUS);
-    uint32_t ratio = (uint32_t)(perf_status >> 8) & 0xFF;
-    uint32_t fsb = 100;  /* Assume 100 MHz FSB */
-
-    cpufreq_info.current_freq = ratio * fsb;
-    return cpufreq_info.current_freq;
-}
-
-int cpufreq_set(uint32_t mhz) {
-    if (!cpufreq_available) return -1;
-
-    /* Validate the requested frequency is in available list */
-    int found = 0;
-    for (uint32_t i = 0; i < cpufreq_info.available_count; i++) {
-        if (cpufreq_info.available_freqs[i] == mhz) {
-            found = 1;
-            break;
-        }
-    }
-    if (!found) return -1;
-
-    /* Calculate the target ratio */
-    uint32_t fsb = 100;
-    uint32_t target_ratio = mhz / fsb;
-    if (target_ratio == 0) return -1;
-
-    /* Write to IA32_PERF_CTL to set the new frequency */
-    uint64_t perf_ctl = ((uint64_t)target_ratio << 8);
-    msr_write(IA32_PERF_CTL, perf_ctl);
-
-    /* Update current frequency */
-    cpufreq_info.current_freq = mhz;
+static int dummy_driver_target(struct cpufreq_policy *policy, uint32_t target_freq) {
+    if (!policy) return -1;
+    policy->cur_freq = target_freq;
     return 0;
 }
 
+static int dummy_driver_init(struct cpufreq_driver *driver) {
+    (void)driver;
+    return 0;
+}
+
+static int gov_performance_init(struct cpufreq_policy *policy) {
+    if (!policy) return -1;
+    policy->cur_freq = policy->max;
+    return 0;
+}
+
+static void gov_performance_exit(struct cpufreq_policy *policy) { (void)policy; }
+static void gov_performance_limits(struct cpufreq_policy *policy) {
+    if (policy) policy->cur_freq = policy->max;
+}
+
+static int gov_powersave_init(struct cpufreq_policy *policy) {
+    if (!policy) return -1;
+    policy->cur_freq = policy->min;
+    return 0;
+}
+
+static void gov_powersave_exit(struct cpufreq_policy *policy) { (void)policy; }
+static void gov_powersave_limits(struct cpufreq_policy *policy) {
+    if (policy) policy->cur_freq = policy->min;
+}
+
+static int gov_userspace_init(struct cpufreq_policy *policy) { (void)policy; return 0; }
+static void gov_userspace_exit(struct cpufreq_policy *policy) { (void)policy; }
+static void gov_userspace_limits(struct cpufreq_policy *policy) { (void)policy; }
+
+static int gov_ondemand_init(struct cpufreq_policy *policy) {
+    if (!policy) return -1;
+    policy->cur_freq = (policy->min + policy->max) / 2;
+    return 0;
+}
+static void gov_ondemand_exit(struct cpufreq_policy *policy) { (void)policy; }
+static void gov_ondemand_limits(struct cpufreq_policy *policy) { (void)policy; }
+
+static int gov_conservative_init(struct cpufreq_policy *policy) {
+    if (!policy) return -1;
+    policy->cur_freq = policy->min + (policy->max - policy->min) / 4;
+    return 0;
+}
+static void gov_conservative_exit(struct cpufreq_policy *policy) { (void)policy; }
+static void gov_conservative_limits(struct cpufreq_policy *policy) { (void)policy; }
+
+static int gov_schedutil_init(struct cpufreq_policy *policy) {
+    if (!policy) return -1;
+    policy->cur_freq = policy->max * 80 / 100;
+    return 0;
+}
+static void gov_schedutil_exit(struct cpufreq_policy *policy) { (void)policy; }
+static void gov_schedutil_limits(struct cpufreq_policy *policy) { (void)policy; }
+
+static struct cpufreq_governor builtin_governors[CPUFREQ_GOV_MAX] = {
+    { "performance", CPUFREQ_GOV_PERFORMANCE, gov_performance_init, gov_performance_exit, gov_performance_limits, 1000, NULL },
+    { "powersave",   CPUFREQ_GOV_POWERSAVE,   gov_powersave_init,   gov_powersave_exit,   gov_powersave_limits,   1000, NULL },
+    { "userspace",   CPUFREQ_GOV_USERSPACE,   gov_userspace_init,   gov_userspace_exit,   gov_userspace_limits,   1000, NULL },
+    { "ondemand",    CPUFREQ_GOV_ONDEMAND,    gov_ondemand_init,    gov_ondemand_exit,    gov_ondemand_limits,    10,   NULL },
+    { "conservative",CPUFREQ_GOV_CONSERVATIVE,gov_conservative_init,gov_conservative_exit,gov_conservative_limits,20,   NULL },
+    { "schedutil",   CPUFREQ_GOV_SCHEDUTIL,   gov_schedutil_init,   gov_schedutil_exit,   gov_schedutil_limits,   1,    NULL },
+};
+
+static struct cpufreq_governor *find_governor(const char *name) {
+    struct cpufreq_governor *g = cpufreq_data.governors;
+    while (g) {
+        if (strcmp(g->name, name) == 0) return g;
+        g = g->next;
+    }
+    for (uint32_t i = 0; i < CPUFREQ_GOV_MAX; i++) {
+        if (strcmp(builtin_governors[i].name, name) == 0) return &builtin_governors[i];
+    }
+    return NULL;
+}
+
+static int setup_policy(uint32_t cpu) {
+    struct cpufreq_policy *p = &cpufreq_data.policies[cpu];
+    struct cpufreq_stats *s = &cpufreq_data.stats[cpu];
+    memset(p, 0, sizeof(*p));
+    memset(s, 0, sizeof(*s));
+
+    p->cpu = cpu;
+    p->min_freq = 800000;
+    p->max_freq = 4000000;
+    p->min = 800000;
+    p->max = 4000000;
+    p->cur_freq = 2000000;
+
+    uint32_t freqs[] = {800000, 1200000, 1600000, 2000000, 2400000, 2800000, 3200000, 3600000, 4000000};
+    uint32_t volts[] = {800, 850, 900, 950, 1000, 1050, 1100, 1150, 1200};
+    p->n_freqs = sizeof(freqs)/sizeof(freqs[0]);
+    if (p->n_freqs > CPUFREQ_MAX_FREQS) p->n_freqs = CPUFREQ_MAX_FREQS;
+    for (uint32_t i = 0; i < p->n_freqs; i++) {
+        p->freq_table[i].frequency = freqs[i];
+        p->freq_table[i].voltage = volts[i];
+    }
+
+    p->governor = find_governor(CPUFREQ_DEFAULT_GOVERNOR);
+    if (p->governor && p->governor->init) p->governor->init(p);
+    p->policy_ready = 1;
+    return 0;
+}
+
+int cpufreq_init(void) {
+    if (cpufreq_data.initialized) return 0;
+    memset(&cpufreq_data, 0, sizeof(cpufreq_data));
+
+    for (uint32_t i = 0; i < CPUFREQ_GOV_MAX; i++) {
+        builtin_governors[i].next = cpufreq_data.governors;
+        cpufreq_data.governors = &builtin_governors[i];
+        cpufreq_data.governor_count++;
+    }
+
+    memset(&cpufreq_data.driver, 0, sizeof(cpufreq_data.driver));
+    strncpy(cpufreq_data.driver.name, "dummy_cpufreq", CPUFREQ_NAME_LEN);
+    cpufreq_data.driver.init = dummy_driver_init;
+    cpufreq_data.driver.target = dummy_driver_target;
+    cpufreq_data.driver.get = dummy_driver_get;
+    cpufreq_data.driver.initialized = 1;
+    cpufreq_data.n_cpus = 1;
+    cpufreq_data.boost_enabled = 0;
+    cpufreq_data.transition_latency_ns = 10000;
+
+    for (uint32_t cpu = 0; cpu < cpufreq_data.n_cpus; cpu++) {
+        setup_policy(cpu);
+    }
+
+    cpufreq_data.initialized = 1;
+    return 0;
+}
+
+int cpufreq_register_driver(struct cpufreq_driver *driver) {
+    if (!driver || cpufreq_data.driver.initialized) return -1;
+    memcpy(&cpufreq_data.driver, driver, sizeof(*driver));
+    cpufreq_data.driver.initialized = 1;
+    if (driver->init) driver->init(&cpufreq_data.driver);
+    return 0;
+}
+
+int cpufreq_unregister_driver(struct cpufreq_driver *driver) {
+    (void)driver;
+    memset(&cpufreq_data.driver, 0, sizeof(cpufreq_data.driver));
+    return 0;
+}
+
+int cpufreq_register_governor(struct cpufreq_governor *gov) {
+    if (!gov) return -1;
+    gov->next = cpufreq_data.governors;
+    cpufreq_data.governors = gov;
+    cpufreq_data.governor_count++;
+    return 0;
+}
+
+int cpufreq_unregister_governor(struct cpufreq_governor *gov) {
+    if (!gov) return -1;
+    struct cpufreq_governor **p = &cpufreq_data.governors;
+    while (*p) {
+        if (*p == gov) { *p = gov->next; cpufreq_data.governor_count--; return 0; }
+        p = &(*p)->next;
+    }
+    return -1;
+}
+
+struct cpufreq_governor *cpufreq_find_governor(const char *name) {
+    return find_governor(name);
+}
+
+int cpufreq_set_policy(uint32_t cpu, uint32_t min_freq, uint32_t max_freq) {
+    if (cpu >= cpufreq_data.n_cpus || !cpufreq_data.initialized) return -1;
+    struct cpufreq_policy *p = &cpufreq_data.policies[cpu];
+    if (min_freq < 800000) min_freq = 800000;
+    if (max_freq > 4000000) max_freq = 4000000;
+    if (min_freq > max_freq) return -1;
+    p->min = min_freq;
+    p->max = max_freq;
+    if (p->cur_freq < min_freq) p->cur_freq = min_freq;
+    if (p->cur_freq > max_freq) p->cur_freq = max_freq;
+    if (p->governor && p->governor->limits) p->governor->limits(p);
+    return 0;
+}
+
+int cpufreq_set_governor(uint32_t cpu, const char *gov_name) {
+    if (cpu >= cpufreq_data.n_cpus || !gov_name || !cpufreq_data.initialized) return -1;
+    struct cpufreq_policy *p = &cpufreq_data.policies[cpu];
+    struct cpufreq_governor *gov = find_governor(gov_name);
+    if (!gov) return -1;
+    if (p->governor && p->governor->exit) p->governor->exit(p);
+    p->governor = gov;
+    if (gov->init) gov->init(p);
+    return 0;
+}
+
+int cpufreq_set_frequency(uint32_t cpu, uint32_t freq) {
+    if (cpu >= cpufreq_data.n_cpus || !cpufreq_data.initialized) return -1;
+    struct cpufreq_policy *p = &cpufreq_data.policies[cpu];
+    if (p->governor && p->governor->type != CPUFREQ_GOV_USERSPACE) return -1;
+    if (freq < p->min) freq = p->min;
+    if (freq > p->max) freq = p->max;
+    if (cpufreq_data.driver.target) cpufreq_data.driver.target(p, freq);
+    cpufreq_data.stats[cpu].total_trans++;
+    return 0;
+}
+
+uint32_t cpufreq_get_frequency(uint32_t cpu) {
+    if (cpu >= cpufreq_data.n_cpus) return 0;
+    if (cpufreq_data.driver.get) return cpufreq_data.driver.get(cpu);
+    return cpufreq_data.policies[cpu].cur_freq;
+}
+
+void cpufreq_set_boost(uint8_t enable) {
+    cpufreq_data.boost_enabled = enable ? 1 : 0;
+}
+
+void cpufreq_update_load(uint32_t cpu, uint8_t load) {
+    if (cpu >= cpufreq_data.n_cpus || !cpufreq_data.initialized) return;
+    struct cpufreq_policy *p = &cpufreq_data.policies[cpu];
+    if (!p->governor) return;
+
+    switch (p->governor->type) {
+    case CPUFREQ_GOV_ONDEMAND:
+        if (load > 80) p->cur_freq = p->max;
+        else if (load < 20) p->cur_freq = p->min;
+        else p->cur_freq = p->min + (p->max - p->min) * load / 100;
+        break;
+    case CPUFREQ_GOV_CONSERVATIVE:
+        if (load > 80) p->cur_freq += (p->max - p->min) / 10;
+        else if (load < 20) p->cur_freq -= (p->max - p->min) / 10;
+        if (p->cur_freq > p->max) p->cur_freq = p->max;
+        if (p->cur_freq < p->min) p->cur_freq = p->min;
+        break;
+    case CPUFREQ_GOV_SCHEDUTIL:
+        p->cur_freq = p->min + (p->max - p->min) * load / 100;
+        break;
+    default: break;
+    }
+    p->last_load = load;
+}
+
+void cpufreq_tick(void) {
+    static uint8_t sim_load = 50;
+    static int dir = 1;
+    for (uint32_t cpu = 0; cpu < cpufreq_data.n_cpus; cpu++) {
+        cpufreq_update_load(cpu, sim_load);
+    }
+    sim_load = (uint8_t)(sim_load + dir * 5);
+    if (sim_load >= 95) dir = -1;
+    if (sim_load <= 10) dir = 1;
+}
+
+void cpufreq_print_governors(void) {
+    klog_info("=== CPUFreq Governors ===");
+    struct cpufreq_governor *g = cpufreq_data.governors;
+    uint32_t idx = 0;
+    while (g && idx < cpufreq_data.governor_count) {
+        const char *desc = "";
+        switch (g->type) {
+        case CPUFREQ_GOV_PERFORMANCE: desc = "Run at max frequency"; break;
+        case CPUFREQ_GOV_POWERSAVE: desc = "Run at min frequency"; break;
+        case CPUFREQ_GOV_USERSPACE: desc = "User-set frequency"; break;
+        case CPUFREQ_GOV_ONDEMAND: desc = "On-demand scaling"; break;
+        case CPUFREQ_GOV_CONSERVATIVE: desc = "Conservative scaling"; break;
+        case CPUFREQ_GOV_SCHEDUTIL: desc = "Scheduler-driven"; break;
+        default: break;
+        }
+        klog_info("  %s: %s (sample %u ms)", g->name, desc, g->min_sampling_rate_ms);
+        g = g->next;
+        idx++;
+    }
+}
+
+void cpufreq_print_stats(void) {
+    klog_info("=== CPUFreq Statistics ===");
+    klog_info("CPUFreq Driver: %s", cpufreq_data.driver.name);
+    klog_info("Boost: %s", cpufreq_data.boost_enabled ? "enabled" : "disabled");
+    klog_info("Transition latency: %u ns", cpufreq_data.transition_latency_ns);
+    klog_info("Number of CPUs: %u", cpufreq_data.n_cpus);
+    klog_info("Governors registered: %u", cpufreq_data.governor_count);
+    klog_info("");
+    for (uint32_t cpu = 0; cpu < cpufreq_data.n_cpus; cpu++) {
+        struct cpufreq_policy *p = &cpufreq_data.policies[cpu];
+        struct cpufreq_stats *s = &cpufreq_data.stats[cpu];
+        klog_info("CPU %u:", cpu);
+        klog_info("  Current: %u MHz", p->cur_freq / 1000);
+        klog_info("  Policy:  %u - %u MHz", p->min / 1000, p->max / 1000);
+        klog_info("  Governor: %s", p->governor ? p->governor->name : "none");
+        klog_info("  Available frequencies: ");
+        for (uint32_t i = 0; i < p->n_freqs; i++) {
+            klog_info("    %u MHz", p->freq_table[i].frequency / 1000);
+        }
+        klog_info("  Total transitions: %u", (uint32_t)(s->total_trans & 0xFFFFFFFF));
+    }
+    cpufreq_print_governors();
+}
+
+static cpufreq_info_t compat_info;
 cpufreq_info_t *cpufreq_get_info(void) {
-    return &cpufreq_info;
-}
-
-void cpufreq_set_governor(const char *name) {
-    if (!name) return;
-
-    if (strcmp(name, "performance") == 0) {
-        cpufreq_governor_performance();
-    } else if (strcmp(name, "powersave") == 0) {
-        cpufreq_governor_powersave();
-    } else if (strcmp(name, "ondemand") == 0) {
-        cpufreq_governor_ondemand();
+    if (!cpufreq_data.initialized || cpufreq_data.n_cpus == 0) return NULL;
+    struct cpufreq_policy *p = &cpufreq_data.policies[0];
+    memset(&compat_info, 0, sizeof(compat_info));
+    compat_info.current_freq = p->cur_freq / 1000;
+    compat_info.min_freq = p->min / 1000;
+    compat_info.max_freq = p->max / 1000;
+    if (p->governor) {
+        strncpy(compat_info.governor, p->governor->name, CPUFREQ_NAME_LEN - 1);
+        compat_info.governor[CPUFREQ_NAME_LEN - 1] = '\0';
+    } else {
+        compat_info.governor[0] = '\0';
     }
-}
-
-void cpufreq_governor_performance(void) {
-    current_governor = GOV_PERFORMANCE;
-    strcpy(cpufreq_info.governor, "performance");
-
-    if (cpufreq_available) {
-        cpufreq_set(cpufreq_info.max_freq);
+    compat_info.available_count = p->n_freqs;
+    if (compat_info.available_count > CPUFREQ_MAX_FREQS)
+        compat_info.available_count = CPUFREQ_MAX_FREQS;
+    for (uint32_t i = 0; i < compat_info.available_count; i++) {
+        compat_info.available_freqs[i] = p->freq_table[i].frequency / 1000;
     }
+    return &compat_info;
 }
 
-void cpufreq_governor_powersave(void) {
-    current_governor = GOV_POWERSAVE;
-    strcpy(cpufreq_info.governor, "powersave");
-
-    if (cpufreq_available) {
-        cpufreq_set(cpufreq_info.min_freq);
-    }
-}
-
-void cpufreq_governor_ondemand(void) {
-    current_governor = GOV_ONDEMAND;
-    strcpy(cpufreq_info.governor, "ondemand");
-    ondemand_idle_ticks = 0;
-    ondemand_total_ticks = 0;
-    ondemand_last_check = timer_get_ticks();
-}
-
-/* Called periodically from timer interrupt for ondemand governor */
-void cpufreq_ondemand_tick(void) {
-    if (!cpufreq_available || current_governor != GOV_ONDEMAND) return;
-
-    ondemand_total_ticks++;
-    /* We count idle ticks by checking if the current CPU is in idle loop.
-       For simplicity, we use a heuristic based on timer_get_ticks(). */
-
-    uint32_t now = timer_get_ticks();
-    if (now - ondemand_last_check >= ONDEMAND_CHECK_INTERVAL) {
-        /* Calculate CPU usage as percentage */
-        uint32_t usage_pct = 0;
-        if (ondemand_total_ticks > 0) {
-            /* Simple heuristic: assume idle if we're in HLT often */
-            usage_pct = 100 - (ondemand_idle_ticks * 100 / ondemand_total_ticks);
-        }
-
-        if (usage_pct > ONDEMAND_UP_THRESHOLD) {
-            /* High load: scale to max */
-            cpufreq_set(cpufreq_info.max_freq);
-        } else if (usage_pct < ONDEMAND_DOWN_THRESHOLD) {
-            /* Low load: scale to min */
-            cpufreq_set(cpufreq_info.min_freq);
-        } else {
-            /* Medium load: find appropriate frequency */
-            uint32_t target = cpufreq_info.min_freq +
-                (cpufreq_info.max_freq - cpufreq_info.min_freq) * usage_pct / 100;
-            /* Find nearest available frequency */
-            uint32_t best = cpufreq_info.available_freqs[0];
-            for (uint32_t i = 1; i < cpufreq_info.available_count; i++) {
-                if (cpufreq_info.available_freqs[i] <= target) {
-                    best = cpufreq_info.available_freqs[i];
-                }
-            }
-            cpufreq_set(best);
-        }
-
-        ondemand_idle_ticks = 0;
-        ondemand_total_ticks = 0;
-        ondemand_last_check = now;
-    }
-}
-
-/* Mark a tick as idle (called from idle loop) */
-void cpufreq_ondemand_idle(void) {
-    if (current_governor == GOV_ONDEMAND) {
-        ondemand_idle_ticks++;
-    }
+int cpufreq_set(uint32_t mhz) {
+    if (!cpufreq_data.initialized || cpufreq_data.n_cpus == 0) return -1;
+    struct cpufreq_policy *p = &cpufreq_data.policies[0];
+    uint32_t freq = mhz * 1000;
+    if (freq < p->min) freq = p->min;
+    if (freq > p->max) freq = p->max;
+    if (cpufreq_data.driver.target) cpufreq_data.driver.target(p, freq);
+    cpufreq_data.stats[0].total_trans++;
+    return 0;
 }

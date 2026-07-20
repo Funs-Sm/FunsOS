@@ -986,7 +986,7 @@ static dl_node_t *dl_alloc_node(void) {
     return NULL;
 }
 
-static void dl_free_node(dl_node_t *node) {
+static void __attribute__((unused)) dl_free_node(dl_node_t *node) {
     if (node) {
         node->proc = NULL;
         node->next = NULL;
@@ -1375,6 +1375,303 @@ void sched_batch_tick(void) {
     /* 负载低时，批处理作业可以正常参与调度 */
 }
 
+/* ============================================================
+ * 调度策略表 (Scheduler Policy Table) - 实现
+ * ============================================================ */
+
+static pcb_t *pick_next_rt(void);
+static pcb_t *pick_next_mlfq(void);
+static void enqueue_rt(pcb_t *proc);
+static void enqueue_mlfq(pcb_t *proc);
+static void dequeue_rt(pcb_t *proc);
+static void dequeue_mlfq(pcb_t *proc);
+static void tick_rt(pcb_t *proc);
+static void tick_mlfq(pcb_t *proc);
+static void task_new_generic(pcb_t *proc);
+static void task_wakeup_generic(pcb_t *proc);
+
+static sched_policy_t sched_policies[] = {
+    {
+        "RT", PROCESS_REAL_TIME,
+        pick_next_rt, enqueue_rt, dequeue_rt, tick_rt,
+        task_new_generic, task_wakeup_generic,
+        1, 1, 1, 1, "Real-Time FIFO policy"
+    },
+    {
+        "Normal", PROCESS_NORMAL,
+        pick_next_mlfq, enqueue_mlfq, dequeue_mlfq, tick_mlfq,
+        task_new_generic, task_wakeup_generic,
+        sched_min_granularity, sched_wakeup_granularity, sched_latency, 1,
+        "Multi-level Feedback Queue (MLFQ)"
+    },
+    {
+        "CFS", PROCESS_CFS,
+        sched_cfs_dequeue, sched_cfs_enqueue, NULL, sched_cfs_tick,
+        task_new_generic, task_wakeup_generic,
+        sched_min_granularity, sched_wakeup_granularity, sched_latency, 1,
+        "Completely Fair Scheduler"
+    },
+    {
+        "Deadline", PROCESS_DEADLINE,
+        sched_dl_dequeue, sched_dl_enqueue, NULL, sched_dl_tick,
+        task_new_generic, task_wakeup_generic,
+        1, 1, 1, 1, "Earliest Deadline First (EDF)"
+    },
+    {
+        "Batch", PROCESS_BATCH,
+        pick_next_mlfq, enqueue_mlfq, dequeue_mlfq, tick_mlfq,
+        task_new_generic, task_wakeup_generic,
+        50, 20, 100, 0, "Batch scheduling (non-preemptible)"
+    },
+    {
+        "Idle", PROCESS_IDLE_PRIO,
+        NULL, NULL, NULL, NULL,
+        task_new_generic, task_wakeup_generic,
+        100, 100, 100, 0, "Idle priority (only when nothing else)"
+    },
+};
+
+static pcb_t *pick_next_rt(void) {
+    for (int i = 0; i < SCHED_RT_QUEUE_COUNT; i++) {
+        pcb_t *proc = queue_pop_front(&sched.rt_queues[i]);
+        if (proc) return proc;
+    }
+    return NULL;
+}
+
+static pcb_t *pick_next_mlfq(void) {
+    for (int i = 0; i < SCHED_QUEUE_COUNT; i++) {
+        pcb_t *proc = queue_pop_front(&sched.mlfq_queues[i]);
+        if (proc) return proc;
+    }
+    return NULL;
+}
+
+static void enqueue_rt(pcb_t *proc) {
+    int rt_level = proc->priority / 50;
+    if (rt_level >= SCHED_RT_QUEUE_COUNT) rt_level = SCHED_RT_QUEUE_COUNT - 1;
+    queue_add(&sched.rt_queues[rt_level], proc);
+}
+
+static void enqueue_mlfq(pcb_t *proc) {
+    int level = proc->queue_level;
+    if (level >= SCHED_QUEUE_COUNT) level = SCHED_QUEUE_COUNT - 1;
+    queue_add(&sched.mlfq_queues[level], proc);
+}
+
+static void dequeue_rt(pcb_t *proc) {
+    int rt_level = proc->priority / 50;
+    if (rt_level >= SCHED_RT_QUEUE_COUNT) rt_level = SCHED_RT_QUEUE_COUNT - 1;
+    queue_remove(&sched.rt_queues[rt_level], proc);
+}
+
+static void dequeue_mlfq(pcb_t *proc) {
+    queue_remove(&sched.mlfq_queues[proc->queue_level], proc);
+}
+
+static void tick_rt(pcb_t *proc) {
+    if (proc->time_slice <= 0) {
+        schedule();
+    }
+}
+
+static void tick_mlfq(pcb_t *proc) {
+    if (proc->time_slice <= 0) {
+        if (proc->queue_level < SCHED_QUEUE_COUNT - 1) {
+            proc->queue_level++;
+        }
+        schedule();
+    }
+}
+
+static void task_new_generic(pcb_t *proc) {
+    (void)proc;
+}
+
+static void task_wakeup_generic(pcb_t *proc) {
+    if (proc && proc->queue_level > 0) {
+        proc->queue_level--;
+    }
+}
+
+const sched_policy_t *sched_get_policy_table(void) {
+    return sched_policies;
+}
+
+const sched_policy_t *sched_get_policy_by_flag(uint32_t flag) {
+    for (int i = 0; i < SCHED_POLICY_COUNT; i++) {
+        if (sched_policies[i].policy_flag & flag) {
+            return &sched_policies[i];
+        }
+    }
+    return NULL;
+}
+
+const char *sched_get_policy_name(uint32_t policy_flag) {
+    const sched_policy_t *p = sched_get_policy_by_flag(policy_flag);
+    return p ? p->name : "Unknown";
+}
+
+void sched_print_policy_table(void) {
+    printf("=== Scheduler Policy Table ===\n");
+    printf("%-10s %-12s %-8s %-10s %-10s %s\n",
+           "Name", "Flag", "Granul.", "Wakeup", "Latency", "Description");
+    printf("-----------------------------------------------------------\n");
+    for (int i = 0; i < SCHED_POLICY_COUNT; i++) {
+        printf("%-10s 0x%08X %-8u %-10u %-10u %s\n",
+               sched_policies[i].name,
+               sched_policies[i].policy_flag,
+               sched_policies[i].time_granularity,
+               sched_policies[i].wakeup_granularity,
+               sched_policies[i].latency,
+               sched_policies[i].description);
+    }
+    printf("===============================\n");
+}
+
+/* ============================================================
+ * 能量感知调度 (Energy-Aware Scheduling) - 实现
+ * ============================================================ */
+
+static energy_profile_t energy_prof;
+static sched_tunables_t sched_tunables;
+static sched_domain_t root_domain;
+
+void sched_energy_init(void) {
+    energy_prof.current_freq = 100;
+    energy_prof.max_freq = 100;
+    energy_prof.min_freq = 50;
+    energy_prof.idle_percent = 0;
+    energy_prof.energy_perf_bias = SCHED_ENERGY_PERF_BIAS_BALANCED;
+    energy_prof.power_save_mode = 0;
+    energy_prof.idle_cycles = 0;
+    energy_prof.busy_cycles = 0;
+}
+
+energy_profile_t *sched_get_energy_profile(void) {
+    return &energy_prof;
+}
+
+void sched_energy_account_tick(uint8_t is_busy) {
+    if (is_busy) {
+        energy_prof.busy_cycles++;
+    } else {
+        energy_prof.idle_cycles++;
+    }
+
+    uint64_t total = energy_prof.busy_cycles + energy_prof.idle_cycles;
+    if (total > 100) {
+        energy_prof.idle_percent = (uint32_t)((energy_prof.idle_cycles * 100) / total);
+    }
+
+    if (energy_prof.power_save_mode) {
+        if (energy_prof.idle_percent > 70 && energy_prof.current_freq > energy_prof.min_freq) {
+            energy_prof.current_freq--;
+        } else if (energy_prof.idle_percent < 30 && energy_prof.current_freq < energy_prof.max_freq) {
+            energy_prof.current_freq++;
+        }
+    }
+}
+
+uint32_t sched_energy_estimate_capacity(void) {
+    uint32_t base_cap = 1024;
+    uint32_t freq_factor = energy_prof.current_freq;
+    return (base_cap * freq_factor) / 100;
+}
+
+void sched_set_energy_perf_bias(int bias) {
+    if (bias < 0) bias = 0;
+    if (bias > 15) bias = 15;
+    energy_prof.energy_perf_bias = (uint32_t)bias;
+
+    if (bias <= 3) {
+        energy_prof.current_freq = energy_prof.max_freq;
+    } else if (bias >= 12) {
+        energy_prof.current_freq = energy_prof.min_freq + 10;
+    } else {
+        energy_prof.current_freq = energy_prof.min_freq + ((energy_prof.max_freq - energy_prof.min_freq) * (15 - bias)) / 15;
+    }
+}
+
+int sched_get_energy_perf_bias(void) {
+    return (int)energy_prof.energy_perf_bias;
+}
+
+void sched_set_power_save(uint8_t enable) {
+    energy_prof.power_save_mode = enable;
+}
+
+void sched_power_idle_tick(void) {
+    uint32_t flags = spinlock_irq_save(&sched.lock);
+    sched_energy_account_tick((sched.current != NULL && sched.current != sched.idle_task) ? 1 : 0);
+    spinlock_irq_restore(&sched.lock, flags);
+}
+
+/* ============================================================
+ * 调度器可调参数 (Scheduler Tunables) - 实现
+ * ============================================================ */
+
+void sched_tunables_init(void) {
+    sched_tunables.sched_min_granularity_ns = 10000000;
+    sched_tunables.sched_latency_ns = 20000000;
+    sched_tunables.sched_wakeup_granularity_ns = 4000000;
+    sched_tunables.sched_migration_cost_ns = 500000;
+    sched_tunables.sched_nr_migrate = 32;
+    sched_tunables.sched_cfs_bandwidth_slice_us = 5000;
+    sched_tunables.sched_rt_period_us = 1000000;
+    sched_tunables.sched_rt_runtime_us = 950000;
+    sched_tunables.sched_child_runs_first = 0;
+}
+
+sched_tunables_t *sched_get_tunables(void) {
+    return &sched_tunables;
+}
+
+int sched_set_tunable(const char *name, uint32_t value) {
+    if (!name) return -1;
+    if (strcmp(name, "min_granularity") == 0) {
+        sched_tunables.sched_min_granularity_ns = value;
+        return 0;
+    } else if (strcmp(name, "latency") == 0) {
+        sched_tunables.sched_latency_ns = value;
+        return 0;
+    } else if (strcmp(name, "wakeup_granularity") == 0) {
+        sched_tunables.sched_wakeup_granularity_ns = value;
+        return 0;
+    } else if (strcmp(name, "migration_cost") == 0) {
+        sched_tunables.sched_migration_cost_ns = value;
+        return 0;
+    } else if (strcmp(name, "nr_migrate") == 0) {
+        sched_tunables.sched_nr_migrate = value;
+        return 0;
+    } else if (strcmp(name, "rt_period") == 0) {
+        sched_tunables.sched_rt_period_us = value;
+        return 0;
+    } else if (strcmp(name, "rt_runtime") == 0) {
+        sched_tunables.sched_rt_runtime_us = value;
+        return 0;
+    }
+    return -1;
+}
+
+/* ============================================================
+ * 调度域 (Scheduling Domains) - 实现
+ * ============================================================ */
+
+void sched_domain_init(void) {
+    root_domain.domain_id = 0;
+    root_domain.type = SCHED_DOMAIN_CPU;
+    root_domain.cpu_mask = 0x1;
+    root_domain.nr_cpus = 1;
+    root_domain.load = 0;
+    root_domain.capacity = 1024;
+}
+
+sched_domain_t *sched_get_domain(uint32_t domain_id) {
+    if (domain_id == 0) return &root_domain;
+    return NULL;
+}
+
 /* 在sched_init中初始化新增模块 */
 __attribute__((constructor))
 static void sched_extended_init(void) {
@@ -1385,6 +1682,9 @@ static void sched_extended_init(void) {
     sched_pi_init();
     sched_stats_init();
     sched_batch_init();
+    sched_energy_init();
+    sched_tunables_init();
+    sched_domain_init();
     for (int i = 0; i < MAX_PROCESSES; i++) {
         proc_affinity[i].cpumask = 0x1;
         proc_affinity[i].cpu_count = 1;

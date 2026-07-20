@@ -27,6 +27,21 @@
 #include "vesa.h"
 #include "acpi_sleep.h"
 #include "cpufreq.h"
+#include "cpuidle.h"
+#include "regmap.h"
+#include "hwmon.h"
+#include "ftrace.h"
+#include "dmabuf.h"
+#include "iio.h"
+#include "pwm.h"
+#include "led.h"
+#include "pinctrl.h"
+#include "gpio.h"
+#include "dmaengine.h"
+#include "clk.h"
+#include "i2c.h"
+#include "spi.h"
+#include "mfd.h"
 #include "battery.h"
 #include "kheap.h"
 #include "process.h"
@@ -53,9 +68,8 @@
 #include "smp.h"
 #include "telnet.h"
 #include "user.h"
+#include "user_ext.h"
 #include "shell_error.h"
-#include "sound.h"
-#include "sound.h"
 #include "bios_edit.h"
 #include "user_persist.h"
 #include "fundb.h"
@@ -70,8 +84,76 @@
 #include "cgroup.h"
 #include "kprobe.h"
 #include "stacktrace.h"
-#include "notifier.h"
 #include "health.h"
+#include "quota.h"
+#include "flock.h"
+#include "ktrace.h"
+#include "kwork.h"
+#include "registry.h"
+#include "cron.h"
+#include "evlog.h"
+#include "fim.h"
+#include "appexec.h"
+#include "app_registry.h"
+#include "gui_apps.h"
+#include "netmon.h"
+#include "sysacct.h"
+#include "svcmgr.h"
+#include "taskmgr.h"
+#include "crashdump.h"
+#include "ipc_sem.h"
+#include "signal_diag.h"
+#include "quota_db.h"
+#include "logrotate_ext.h"
+#include "../fs/dcache.h"
+#include "../fs/icache.h"
+#include "../fs/page_cache.h"
+#include "../fs/readahead.h"
+#include "../fs/fs_sync.h"
+#include "../fs/fs_stat.h"
+#include "env.h"
+#include "rlimit.h"
+#include "page_replace.h"
+#include "iosched.h"
+#include "softirq.h"
+#include "oom_killer.h"
+#include "sysctl.h"
+#include "sysrq.h"
+#include "workqueue.h"
+#include "rcu.h"
+#include "hrtimer.h"
+#include "slab.h"
+#include "watchdog.h"
+#include "knotifier.h"
+#include "crypto.h"
+#include "vmalloc.h"
+#include "percpu.h"
+#include "kfence.h"
+#include "debugobjects.h"
+#include "lockdep.h"
+#include "irqdomain.h"
+#include "games.h"
+#include "app_utils.h"
+#include "more_apps.h"
+#include "version.h"
+
+#include "devtmpfs.h"
+#include "ksysfs.h"
+#include "netns.h"
+#include "knetfilter.h"
+#include "seccomp.h"
+#include "apparmor.h"
+#include "keyring.h"
+#include "audit.h"
+
+#include "namespace.h"
+#include "tracepoint.h"
+#include "uprobe.h"
+#include "kmod.h"
+#include "firmware.h"
+#include "remoteproc.h"
+#include "rpmsg.h"
+#include "virtio.h"
 
 #define SHELL_MAX_LINE 256
 #define SHELL_PROMPT  "funs> "
@@ -98,6 +180,120 @@ static int history_pos = 0;   /* next write position */
 static char shell_history[SHELL_HISTORY_MAX][SHELL_HISTORY_LINE];
 static int shell_history_count = 0;
 static int shell_history_pos = -1;
+
+/* Tab completion */
+#define SHELL_MAX_COMPLETIONS 256
+#define SHELL_COMPLETION_CMD_MAX 32
+
+static uint32_t len_strlen(const char *s);
+
+static const char *completion_commands[] = {
+    "pt", "ls", "cat", "show", "type", "cd", "go", "pwd", "where",
+    "cp", "copy", "mv", "ren", "rm", "del", "mkdir", "rmdir", "touch",
+    "echo", "set", "env", "unset", "alias", "unalias", "history",
+    "help", "ver", "sysinfo", "mem", "free", "uptime", "date", "time",
+    "ps", "top", "kill", "dmesg", "loglevel", "reboot", "halt", "shutdown",
+    "mount", "umount", "format", "fdisk", "chkdsk", "lsblk", "df", "du",
+    "ifconfig", "ping", "route", "dns", "wget", "netstat", "arp", "hostname",
+    "lspci", "lsusb", "sensors", "freq", "dev", "clr", "clear",
+    "head", "tail", "wc", "grep", "find", "diff", "sort", "uniq",
+    "chmod", "chown", "stat", "tree", "file", "which", "tee",
+    "edit", "run", "exec", "gui", "calc", "whoami", "su", "logout",
+    "snake", "2048", "tetris", "mine", "minesweeper", "pong", "games", "desktop",
+    "notepad", "paint", "terminal", "filemgr",
+    "acalc", "sysmon", "cal", "clock", "matrix",
+    "life", "sokoban", "typing", "ascii", "xxd", "nano",
+    "sync", "ipcs", "vmstat", "iostat", "slabtop", "meminfo",
+    "tar", "gzip", "gunzip", "hexdump", "strings", "cksum",
+    "telnet", "tftp", "ntp", "ssh", "ftp", "nc", "tcpdump",
+    "pkg", "sudo", "passwd", "useradd", "userdel", "users", "groups", "who",
+    "taskbar", "watch", "sleep", "test", "expr", "xargs",
+    "cut", "paste", "tr", "rev", "nl", "fold", "expand", "unexpand",
+    "basename", "dirname", "realpath", "truncate", "mkfifo", "mknod",
+    "readlink", "ln", "symlink", "append", "replace", "look", "comm",
+    "dd", "split", "join", "fallocate", "filefrag", "losetup", "fsck",
+    "nslookup", "dig", "dhcp", "nmap", "lanscan", "wol", "sockstat",
+    "speedtest", "cal", "traceroute", "mtr", "ss",
+    "reg", "apps", "cron", "crontab", "ktrace", "kwork",
+    "flock", "dcache", "icache", "pagecache", "readahead", "syncstat",
+    "mount2", "cgroup", "kprobe", "strace", "lsof", "mpstat",
+    "pidstat", "prlimit", "capsh", "dumpstack", "sysctl",
+    "health", "notifier", "quota", "fsstat",
+    "cpufreq", "cpuidle", "regmap", "hwmon", "ftrace", "dmabuf", "iio", "pwm", "led",
+    "rtc", "pinctrl", "gpio", "dmaengine", "clk", "i2c", "spi", "mfd",
+    "vmalloc", "vmap", "percpu", "kfence", "debugobj", "lockdep", "irqdomain",
+    "devtmpfs", "sysfs", "netns", "netfilter", "seccomp", "apparmor", "keyring", "audit",
+    "namespace", "tracepoint", "uprobe", "kmod", "firmware", "remoteproc", "rpmsg", "virtio",
+    "db", "config", "httpget", "imgview", "play", "vol", "sound",
+    "save", "resume", "nice", "renice", "jobs", "bg", "fg", "nohup",
+    "service", "taskmgr", "sysreport", "ipc", "sigstat",
+    "taskset", "chrt", "pidof", "pstree", "last", "uname",
+    "yes", "seq", "factor", "shuf", "true", "false",
+    "lscolor", "col", "column", "tsort", "splash",
+    "schedpolicy", "mempolicy",
+    "iosched", "softirq", "tasklet", "oom", "sysctl", "sysrq",
+    NULL
+};
+
+static int tab_complete_command(const char *prefix, char *result, uint32_t result_size) {
+    uint32_t prefix_len = len_strlen(prefix);
+    int count = 0;
+    const char *best_match = NULL;
+    uint32_t best_match_len = 0;
+
+    if (prefix_len == 0) return 0;
+
+    for (int i = 0; completion_commands[i]; i++) {
+        if (strncmp(completion_commands[i], prefix, prefix_len) == 0) {
+            count++;
+            if (!best_match) {
+                best_match = completion_commands[i];
+                best_match_len = len_strlen(best_match);
+            } else {
+                uint32_t common = 0;
+                while (common < best_match_len && completion_commands[i][common] &&
+                       best_match[common] == completion_commands[i][common]) {
+                    common++;
+                }
+                best_match_len = common;
+            }
+        }
+    }
+
+    if (count == 1 && best_match) {
+        strncpy(result, best_match, result_size - 1);
+        result[result_size - 1] = '\0';
+        return 1;
+    } else if (count > 1 && best_match_len > prefix_len) {
+        for (uint32_t i = 0; i < best_match_len && i < result_size - 1; i++) {
+            result[i] = best_match[i];
+        }
+        result[best_match_len < result_size - 1 ? best_match_len : result_size - 1] = '\0';
+        return 2;
+    }
+
+    return count;
+}
+
+static void tab_show_completions(const char *prefix) {
+    uint32_t prefix_len = len_strlen(prefix);
+    int col = 0;
+
+    shell_print("\n");
+    for (int i = 0; completion_commands[i]; i++) {
+        if (strncmp(completion_commands[i], prefix, prefix_len) == 0) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "  %-16s", completion_commands[i]);
+            shell_print(buf);
+            col++;
+            if (col >= 5) {
+                shell_print("\n");
+                col = 0;
+            }
+        }
+    }
+    if (col > 0) shell_print("\n");
+}
 
 /* Alias support */
 #define SHELL_MAX_ALIASES 20
@@ -638,6 +834,72 @@ static int shell_read_line(char *buf, uint32_t size) {
             continue;
         }
 
+        /* Tab key: command completion */
+        if (event.ascii == '\t') {
+            /* Only complete the first word (command name) */
+            int has_space = 0;
+            uint32_t word_start = 0;
+            for (uint32_t i = 0; i < pos; i++) {
+                if (buf[i] == ' ') {
+                    has_space = 1;
+                    break;
+                }
+            }
+            if (!has_space && pos > 0) {
+                char prefix[SHELL_COMPLETION_CMD_MAX];
+                for (uint32_t i = 0; i < pos && i < SHELL_COMPLETION_CMD_MAX - 1; i++) {
+                    prefix[i] = buf[i];
+                }
+                prefix[pos < SHELL_COMPLETION_CMD_MAX - 1 ? pos : SHELL_COMPLETION_CMD_MAX - 1] = '\0';
+
+                char completion[SHELL_COMPLETION_CMD_MAX];
+                int result = tab_complete_command(prefix, completion, sizeof(completion));
+
+                if (result == 1) {
+                    /* Single match: complete it */
+                    uint32_t compl_len = len_strlen(completion);
+                    if (compl_len > pos && compl_len < size - 1) {
+                        /* Clear current input display */
+                        while (pos > word_start) {
+                            pos--;
+                            shell_putchar('\b');
+                        }
+                        /* Write completed command */
+                        for (uint32_t i = 0; i < compl_len; i++) {
+                            buf[i] = completion[i];
+                            shell_putchar(completion[i]);
+                        }
+                        pos = compl_len;
+                        buf[pos] = '\0';
+                    }
+                } else if (result == 2) {
+                    /* Multiple matches with common prefix: complete common part */
+                    uint32_t compl_len = len_strlen(completion);
+                    if (compl_len > pos && compl_len < size - 1) {
+                        while (pos > word_start) {
+                            pos--;
+                            shell_putchar('\b');
+                        }
+                        for (uint32_t i = 0; i < compl_len; i++) {
+                            buf[i] = completion[i];
+                            shell_putchar(completion[i]);
+                        }
+                        pos = compl_len;
+                        buf[pos] = '\0';
+                    }
+                } else if (result > 2) {
+                    /* Multiple matches, no common prefix - show all */
+                    tab_show_completions(prefix);
+                    /* Redraw prompt and current input */
+                    shell_print(SHELL_PROMPT);
+                    for (uint32_t i = 0; i < pos; i++) {
+                        shell_putchar(buf[i]);
+                    }
+                }
+            }
+            continue;
+        }
+
         if (pos < size - 1 && event.ascii >= 32 && event.ascii < 127) {
             buf[pos] = event.ascii;
             pos++;
@@ -740,6 +1002,19 @@ static const char *env_get(const char *name) {
     return 0;
 }
 
+static int env_unset(const char *name) {
+    for (int i = 0; i < env_count; i++) {
+        if (strcmp(env_vars[i].name, name) == 0) {
+            for (int j = i; j < env_count - 1; j++) {
+                env_vars[j] = env_vars[j + 1];
+            }
+            env_count--;
+            return 0;
+        }
+    }
+    return -1;
+}
+
 /* Expand $VAR references in a string */
 static void env_expand(char *buf, uint32_t buf_size) {
     char tmp[SHELL_MAX_LINE];
@@ -811,7 +1086,52 @@ static void cmd_where(void);
 static void cmd_clr(void);
 static void cmd_ver(void);
 static void cmd_help(const char *arg);
+static void cmd_applist(const char *arg);
 static void cmd_sysinfo(void);
+static void cmd_schedpolicy(void);
+static void cmd_mempolicy(void);
+static void cmd_iosched(void);
+static void cmd_softirq(void);
+static void cmd_oom(void);
+static void cmd_sysctl(const char *name, const char *value);
+static void cmd_sysrq(void);
+static void cmd_workqueue(void);
+static void cmd_rcu(void);
+static void cmd_hrtimer(void);
+static void cmd_slab(void);
+static void cmd_watchdog(void);
+static void cmd_crypto(void);
+static void cmd_cpufreq(void);
+static void cmd_vmalloc(void);
+static void cmd_percpu(void);
+static void cmd_kfence(void);
+static void cmd_debugobj(void);
+static void cmd_lockdep(void);
+static void cmd_irqdomain(void);
+static void cmd_cpuidle(void);
+static void cmd_regmap(void);
+static void cmd_hwmon(void);
+static void cmd_ftrace(void);
+static void cmd_dmabuf(void);
+static void cmd_iio(void);
+static void cmd_pwm(void);
+static void cmd_led(void);
+static void cmd_rtc(void);
+static void cmd_pinctrl(void);
+static void cmd_gpio(void);
+static void cmd_dmaengine(void);
+static void cmd_clk(void);
+static void cmd_i2c(void);
+static void cmd_spi(void);
+static void cmd_mfd(void);
+static void cmd_devtmpfs(void);
+static void cmd_sysfs(void);
+static void cmd_netns(void);
+static void cmd_netfilter(void);
+static void cmd_seccomp(void);
+static void cmd_apparmor(void);
+static void cmd_keyring(void);
+static void cmd_audit(void);
 static void cmd_reboot(void);
 static void cmd_halt(void);
 static void cmd_shutdown(void);
@@ -830,6 +1150,7 @@ static void cmd_size(const char *file);
 static void cmd_echo(const char *text);
 static void cmd_set(const char *var, const char *value);
 static void cmd_env(void);
+static void cmd_unset(const char *name);
 static void cmd_run(const char *file);
 static void cmd_ps(void);
 static void cmd_kill(const char *pid_str);
@@ -883,12 +1204,11 @@ static void cmd_freq(const char *freq_str);
 static void cmd_calc(const char *expr);
 static void cmd_base64(const char *opt, const char *file);
 static void cmd_md5(const char *file);
-static void cmd_history(void);
+static void cmd_history(const char *options);
 static void cmd_alias(const char *arg);
 static void cmd_edit(const char *file);
 static void cmd_cedit(const char *filename);
 static void cmd_kvm(void);
-static void cmd_apps(void);
 static void cmd_run_app(const char *name);
 /* Advanced commands */
 static void cmd_exec(const char *file, const char *args);
@@ -925,6 +1245,17 @@ static void cmd_ipcs(void);
 static void cmd_vmstat(void);
 static void cmd_iostat(void);
 static void cmd_crontab(const char *subcmd, const char *arg1, const char *arg2);
+static void cmd_evlog(const char *subcmd, const char *arg1, const char *arg2);
+static void cmd_fim(const char *subcmd, const char *arg1, const char *arg2);
+static void cmd_netmon(const char *subcmd, const char *arg1, const char *arg2);
+static void cmd_sysacct(const char *subcmd, const char *arg1, const char *arg2);
+static void cmd_service(const char *subcmd, const char *arg1, const char *arg2);
+static void cmd_taskmgr(const char *subcmd, const char *arg1, const char *arg2);
+static void cmd_sysreport(const char *arg);
+static void cmd_ipc(const char *subcmd, const char *arg1, const char *arg2);
+static void cmd_sigstat(const char *subcmd, const char *arg1, const char *arg2);
+static void cmd_quota_ext(const char *subcmd, const char *arg1, const char *arg2);
+static void cmd_logrotate_ext(const char *subcmd, const char *arg1, const char *arg2);
 static void cmd_taskset(const char *pid_str, const char *mask_str);
 static void cmd_chrt(const char *pid_str, const char *policy_str);
 static void cmd_pidof(const char *name);
@@ -999,7 +1330,6 @@ static void cmd_inotifyinfo(void);
 static void cmd_cgroup(const char *subcmd, const char *arg1, const char *arg2);
 static void cmd_kprobe(const char *subcmd, const char *arg1, const char *arg2);
 static void cmd_dumpstack(void);
-static void cmd_sysctl(const char *name, const char *value);
 static void cmd_strace(const char *cmd);
 static void cmd_lsof(void);
 static void cmd_mpstat(void);
@@ -1007,9 +1337,37 @@ static void cmd_pidstat(const char *pid_str);
 static void cmd_prlimit(const char *pid_str);
 static void cmd_capsh(void);
 
+/* Namespace and tracing subsystem commands */
+static void cmd_namespace(void);
+static void cmd_tracepoint(void);
+static void cmd_uprobe(void);
+static void cmd_kmod(void);
+static void cmd_firmware(void);
+static void cmd_remoteproc(void);
+static void cmd_rpmsg(void);
+static void cmd_virtio(void);
+
 /* System health and notifier commands */
 static void cmd_health(void);
 static void cmd_notifier(const char *subcmd);
+
+/* Filesystem commands */
+static void cmd_quota(const char *subcmd, const char *arg1, const char *arg2,
+                      const char *arg3, const char *arg4, const char *arg5);
+static void cmd_fsstat(void);
+static void cmd_flock(const char *subcmd, const char *arg1, const char *arg2,
+                      const char *arg3);
+static void cmd_mount2(const char *subcmd, const char *arg1, const char *arg2,
+                       const char *arg3);
+static void cmd_dcache(const char *subcmd);
+static void cmd_icache(const char *subcmd);
+static void cmd_pagecache(const char *subcmd);
+static void cmd_readahead_stat(const char *subcmd);
+static void cmd_syncstat(const char *subcmd);
+static void cmd_ktrace(const char *subcmd, const char *arg1, const char *arg2);
+static void cmd_kwork(const char *subcmd, const char *arg1, const char *arg2);
+static void cmd_reg(const char *subcmd, const char *arg1, const char *arg2);
+static void cmd_apps(const char *subcmd, const char *arg1, const char *arg2);
 
 /* File management advanced commands */
 static void cmd_snapshot(const char *subcmd, const char *arg1, const char *arg2);
@@ -1055,7 +1413,7 @@ typedef struct {
     const char *name;
     const char *desc;
     app_main_t main_func;
-} app_entry_t;
+} shell_builtin_app_t;
 
 /* App declarations - defined in apps/_app.c files */
 extern int app_init_main(int argc, char *argv[]);
@@ -1126,36 +1484,151 @@ static int app_notepad_main(int argc, char *argv[]) {
 
 static int app_paint_main(int argc, char *argv[]) {
     (void)argc; (void)argv;
-    shell_print("Paint: Starting graphical paint application...\n");
-    shell_print("Paint requires display server. Use 'gui' first, then 'run paint'.\n");
+    shell_print("Starting Paint...\n");
+    gui_app_paint();
     return 0;
 }
 
 static int app_snake_main(int argc, char *argv[]) {
     (void)argc; (void)argv;
-    shell_print("Snake: Starting snake game...\n");
-    shell_print("Snake requires display server. Use 'gui' first, then 'run snake'.\n");
+    shell_print("Starting Snake game... Use arrow keys to move, P to pause, R to restart, ESC to quit.\n");
+    snake_game_run();
+    vga_text_snapshot();
+    shell_print("Snake exited.\n");
+    return 0;
+}
+
+static int app_2048_main(int argc, char *argv[]) {
+    (void)argc; (void)argv;
+    shell_print("Starting 2048... Arrows to move, R to restart, ESC to quit.\n");
+    game_2048_run();
+    vga_text_snapshot();
+    shell_print("2048 exited.\n");
+    return 0;
+}
+
+static int app_tetris_main(int argc, char *argv[]) {
+    (void)argc; (void)argv;
+    shell_print("Starting Tetris... Arrows to move/rotate, Space to drop, P to pause, R to restart, ESC to quit.\n");
+    tetris_run();
+    vga_text_snapshot();
+    shell_print("Tetris exited.\n");
+    return 0;
+}
+
+static int app_minesweeper_main(int argc, char *argv[]) {
+    (void)argc; (void)argv;
+    shell_print("Starting Minesweeper... Arrows to move, Enter to reveal, F to flag, R to restart, ESC to quit.\n");
+    minesweeper_run();
+    vga_text_snapshot();
+    shell_print("Minesweeper exited.\n");
+    return 0;
+}
+
+static int app_pong_main(int argc, char *argv[]) {
+    (void)argc; (void)argv;
+    shell_print("Starting Pong...\n");
+    pong_run();
+    vga_text_snapshot();
+    shell_print("Pong exited.\n");
+    return 0;
+}
+
+static int app_games_main(int argc, char *argv[]) {
+    (void)argc; (void)argv;
+    game_menu_run();
+    vga_text_snapshot();
+    return 0;
+}
+
+static int app_acalc_main(int argc, char *argv[]) {
+    (void)argc; (void)argv;
+    calc_interactive_run();
+    vga_text_snapshot();
+    return 0;
+}
+
+static int app_sysmon_main(int argc, char *argv[]) {
+    (void)argc; (void)argv;
+    sysmon_run();
+    vga_text_snapshot();
+    return 0;
+}
+
+static int app_cal_main(int argc, char *argv[]) {
+    (void)argc; (void)argv;
+    cal_run();
+    vga_text_snapshot();
+    return 0;
+}
+
+static int app_clock_main(int argc, char *argv[]) {
+    (void)argc; (void)argv;
+    clock_run();
+    vga_text_snapshot();
+    return 0;
+}
+
+static int app_matrix_main(int argc, char *argv[]) {
+    (void)argc; (void)argv;
+    matrix_run();
+    vga_text_snapshot();
+    return 0;
+}
+
+static int cmd_life(int argc, char *argv[]) {
+    (void)argc; (void)argv;
+    life_run();
+    vga_text_snapshot();
+    return 0;
+}
+
+static int cmd_sokoban(int argc, char *argv[]) {
+    (void)argc; (void)argv;
+    sokoban_run();
+    vga_text_snapshot();
+    return 0;
+}
+
+static int cmd_typing(int argc, char *argv[]) {
+    (void)argc; (void)argv;
+    typing_run();
+    vga_text_snapshot();
+    return 0;
+}
+
+static int cmd_ascii(int argc, char *argv[]) {
+    (void)argc; (void)argv;
+    ascii_table_run();
+    vga_text_snapshot();
+    return 0;
+}
+
+static int cmd_nano(int argc, char *argv[]) {
+    const char *path = (argc > 1) ? argv[1] : NULL;
+    nano_run(path);
+    vga_text_snapshot();
     return 0;
 }
 
 static int app_desktop_main(int argc, char *argv[]) {
     (void)argc; (void)argv;
-    shell_print("Desktop: Starting desktop environment...\n");
-    shell_print("Desktop requires display server. Use 'gui' first, then 'run desktop'.\n");
+    shell_print("Starting desktop environment (display server)...\n");
+    shell_print("Press ESC to exit GUI mode.\n");
+    ds_start();
     return 0;
 }
 
 static int app_terminal_main(int argc, char *argv[]) {
     (void)argc; (void)argv;
-    shell_print("Terminal: Starting graphical terminal...\n");
-    shell_print("Terminal requires display server. Use 'gui' first, then 'run terminal'.\n");
+    shell_print("You are already in the terminal. Type 'help' for commands, 'apps' for applications.\n");
     return 0;
 }
 
 static int app_filemgr_main(int argc, char *argv[]) {
     (void)argc; (void)argv;
-    shell_print("FileMgr: Starting file manager...\n");
-    shell_print("FileMgr requires display server. Use 'gui' first, then 'run filemgr'.\n");
+    shell_print("Starting File Manager...\n");
+    gui_app_filemanager();
     return 0;
 }
 
@@ -1197,7 +1670,7 @@ static int app_help_main(int argc, char *argv[]) {
     return 0;
 }
 
-static const app_entry_t app_registry[] = {
+static const shell_builtin_app_t app_registry[] = {
     {"init",     "Init process",            app_init_main},
     {"ls",       "List directory",          app_ls_main},
     {"cat",      "Display file contents",   app_cat_main},
@@ -1214,6 +1687,23 @@ static const app_entry_t app_registry[] = {
     {"notepad",  "Text editor",             app_notepad_main},
     {"paint",    "Drawing program",         app_paint_main},
     {"snake",    "Snake game",              app_snake_main},
+    {"2048",     "2048 puzzle game",        app_2048_main},
+    {"tetris",   "Tetris game",             app_tetris_main},
+    {"mine",     "Minesweeper game",        app_minesweeper_main},
+    {"minesweeper", "Minesweeper game",     app_minesweeper_main},
+    {"pong",     "Pong game",               app_pong_main},
+    {"games",    "Game menu",               app_games_main},
+    {"acalc",    "Advanced calculator",     app_acalc_main},
+    {"sysmon",   "System monitor",          app_sysmon_main},
+    {"cal",      "Calendar",                app_cal_main},
+    {"clock",    "Digital clock",           app_clock_main},
+    {"matrix",   "Matrix rain effect",      app_matrix_main},
+    {"life",     "Conway's Game of Life",   cmd_life},
+    {"sokoban",  "Sokoban puzzle",          cmd_sokoban},
+    {"typing",   "Typing practice",         cmd_typing},
+    {"ascii",    "ASCII table",             cmd_ascii},
+    {"nano",     "Text editor",             cmd_nano},
+    {"edit",     "Text editor",             cmd_nano},
     {"desktop",  "Desktop environment",     app_desktop_main},
     {"terminal", "Graphical terminal",      app_terminal_main},
     {"filemgr",  "File manager",            app_filemgr_main},
@@ -1700,6 +2190,16 @@ static void cmd_ver(void) {
     last_exit_code = 0;
 }
 
+static void cmd_applist(const char *arg) {
+    (void)arg;
+    shell_print("Installed applications:\n\n");
+    app_list_all();
+    shell_print("\nType the app name to launch it (e.g., 'snake', 'calc', 'settings').\n");
+    shell_print("Snake runs in text mode with arrow keys.\n");
+    shell_print("Type 'desktop' to start the GUI environment.\n");
+    last_exit_code = 0;
+}
+
 static void cmd_help(const char *arg) {
     if (arg && *arg) {
         /* Detailed help for a specific command */
@@ -1854,6 +2354,26 @@ static void cmd_help(const char *arg) {
             shell_print("Usage: readlink <path>\n");
             shell_print("Shows the target path of a symbolic link.\n");
             shell_print("Example: readlink symlink.txt\n");
+        } else if (strcmp(arg, "env") == 0) {
+            shell_print("env - List all environment variables\n");
+            shell_print("Usage: env\n");
+            shell_print("Lists all currently set environment variables.\n");
+        } else if (strcmp(arg, "setenv") == 0) {
+            shell_print("setenv - Set environment variable\n");
+            shell_print("Usage: setenv <name> <value>\n");
+            shell_print("Sets or updates an environment variable.\n");
+            shell_print("Example: setenv PATH /bin:/usr/bin\n");
+        } else if (strcmp(arg, "unsetenv") == 0) {
+            shell_print("unsetenv - Unset environment variable\n");
+            shell_print("Usage: unsetenv <name>\n");
+            shell_print("Removes an environment variable.\n");
+            shell_print("Example: unsetenv PATH\n");
+        } else if (strcmp(arg, "ulimit") == 0) {
+            shell_print("ulimit - Get/set resource limits\n");
+            shell_print("Usage: ulimit [resource] [value]\n");
+            shell_print("Shows or modifies process resource limits.\n");
+            shell_print("Resources: cpu fsize data stack core nofile nproc memlock as locks\n");
+            shell_print("Example: ulimit nofile 1024\n");
         } else if (strcmp(arg, "which") == 0) {
             shell_print("which - Show command location/type\n");
             shell_print("Usage: which <cmd>\n");
@@ -1965,6 +2485,11 @@ static void cmd_help(const char *arg) {
             shell_print("env - Show environment variables\n");
             shell_print("Usage: env\n");
             shell_print("Displays all environment variables.\n");
+        } else if (strcmp(arg, "unset") == 0) {
+            shell_print("unset - Remove environment variable\n");
+            shell_print("Usage: unset <var>\n");
+            shell_print("Removes an environment variable.\n");
+            shell_print("Example: unset TEMP\n");
         } else if (strcmp(arg, "alias") == 0) {
             shell_print("alias - Create command alias\n");
             shell_print("Usage: alias [name=value]\n");
@@ -1973,8 +2498,9 @@ static void cmd_help(const char *arg) {
             shell_print("Example: alias ll=pt\n");
         } else if (strcmp(arg, "history") == 0) {
             shell_print("history - Show command history\n");
-            shell_print("Usage: history\n");
+            shell_print("Usage: history [-c]\n");
             shell_print("Displays the command history with line numbers.\n");
+            shell_print("  -c  Clear all command history\n");
         } else if (strcmp(arg, "calc") == 0) {
             shell_print("calc - Simple calculator\n");
             shell_print("Usage: calc <expression>\n");
@@ -2005,6 +2531,36 @@ static void cmd_help(const char *arg) {
             shell_print("sysinfo - Show system information\n");
             shell_print("Usage: sysinfo\n");
             shell_print("Displays kernel version, memory, uptime, and CPU info.\n");
+        } else if (strcmp(arg, "schedpolicy") == 0) {
+            shell_print("schedpolicy - Show scheduler policy table\n");
+            shell_print("Usage: schedpolicy\n");
+            shell_print("Displays all available scheduling policies and current settings.\n");
+        } else if (strcmp(arg, "mempolicy") == 0) {
+            shell_print("mempolicy - Show page replacement policy table\n");
+            shell_print("Usage: mempolicy\n");
+            shell_print("Displays page replacement algorithms, stats, and current policy.\n");
+        } else if (strcmp(arg, "iosched") == 0) {
+            shell_print("iosched - Show I/O scheduler policies\n");
+            shell_print("Usage: iosched\n");
+            shell_print("Displays available I/O scheduler algorithms and queue stats.\n");
+        } else if (strcmp(arg, "softirq") == 0) {
+            shell_print("softirq - Show softirq statistics\n");
+            shell_print("Usage: softirq\n");
+            shell_print("Displays softirq/tasklet execution counts.\n");
+        } else if (strcmp(arg, "oom") == 0) {
+            shell_print("oom - Show OOM killer state\n");
+            shell_print("Usage: oom\n");
+            shell_print("Displays OOM scores for all processes and kill count.\n");
+        } else if (strcmp(arg, "sysctl") == 0) {
+            shell_print("sysctl - Read/write kernel parameters\n");
+            shell_print("Usage: sysctl [-a] [name[=value]]\n");
+            shell_print("  -a         List all parameters\n");
+            shell_print("  name       Read parameter value\n");
+            shell_print("  name=val   Set parameter value\n");
+        } else if (strcmp(arg, "sysrq") == 0) {
+            shell_print("sysrq - Show SysRq magic key help\n");
+            shell_print("Usage: sysrq\n");
+            shell_print("Displays all available SysRq magic key functions.\n");
         } else if (strcmp(arg, "mem") == 0) {
             shell_print("mem - Show memory usage\n");
             shell_print("Usage: mem\n");
@@ -2294,6 +2850,58 @@ static void cmd_help(const char *arg) {
     shell_print("\n  [System]\n");
     shell_print("    ver             Kernel version\n");
     shell_print("    sysinfo         System information\n");
+    shell_print("    schedpolicy     Scheduler policy table\n");
+    shell_print("    mempolicy       Memory replacement policy table\n");
+    shell_print("    iosched         I/O scheduler policies\n");
+    shell_print("    softirq         SoftIRQ statistics\n");
+    shell_print("    oom             OOM killer state\n");
+    shell_print("    sysctl          Kernel parameters\n");
+    shell_print("    sysrq           SysRq magic key help\n");
+    shell_print("    workqueue       Workqueue statistics\n");
+    shell_print("    rcu             RCU synchronization stats\n");
+    shell_print("    hrtimer         High-resolution timers\n");
+    shell_print("    slab            Slab allocator stats\n");
+    shell_print("    watchdog        Watchdog devices\n");
+    shell_print("    crypto          Crypto framework\n");
+    shell_print("    cpufreq         CPU frequency scaling\n");
+    shell_print("    cpuidle         CPU idle C-state management\n");
+    shell_print("    regmap          Register map framework stats\n");
+    shell_print("    hwmon           Hardware monitor sensors\n");
+    shell_print("    ftrace          Function tracer statistics\n");
+    shell_print("    dmabuf          DMA-BUF buffer sharing stats\n");
+    shell_print("    iio             Industrial I/O subsystem stats\n");
+    shell_print("    pwm             PWM controller statistics\n");
+    shell_print("    led             LED subsystem statistics\n");
+    shell_print("    rtc             RTC real-time clock stats\n");
+    shell_print("    pinctrl         Pin control subsystem stats\n");
+    shell_print("    gpio            GPIO subsystem statistics\n");
+    shell_print("    dmaengine       DMA engine statistics\n");
+    shell_print("    clk             Common clock framework stats\n");
+    shell_print("    i2c             I2C bus subsystem stats\n");
+    shell_print("    spi             SPI bus subsystem stats\n");
+    shell_print("    mfd             MFD multi-function device stats\n");
+    shell_print("    vmalloc / vmap  Vmalloc allocator stats\n");
+    shell_print("    percpu          Per-CPU allocator\n");
+    shell_print("    kfence          KFENCE memory checker\n");
+    shell_print("    debugobj        Debug objects tracker\n");
+    shell_print("    lockdep         Lock dependency validator\n");
+    shell_print("    irqdomain       IRQ domain manager\n");
+    shell_print("    devtmpfs        Devtmpfs device filesystem stats\n");
+    shell_print("    sysfs           Sysfs kernel object filesystem\n");
+    shell_print("    netns           Network namespace stats\n");
+    shell_print("    netfilter       Netfilter packet filter stats\n");
+    shell_print("    seccomp         Seccomp secure computing stats\n");
+    shell_print("    apparmor        AppArmor MAC stats\n");
+    shell_print("    keyring         Kernel key retention stats\n");
+    shell_print("    audit           Linux audit framework stats\n");
+    shell_print("    namespace       Namespace isolation stats\n");
+    shell_print("    tracepoint/tp   Static tracepoints stats\n");
+    shell_print("    uprobe          User-space probes stats\n");
+    shell_print("    kmod            Kernel module loader stats\n");
+    shell_print("    firmware/fwldr  Firmware loader stats\n");
+    shell_print("    remoteproc/rproc Remote processor stats\n");
+    shell_print("    rpmsg           Remote processor messaging stats\n");
+    shell_print("    virtio          VirtIO framework stats\n");
     shell_print("    mem / free      Memory usage\n");
     shell_print("    uptime          System uptime\n");
     shell_print("    load            Load average\n");
@@ -2342,7 +2950,7 @@ static void cmd_help(const char *arg) {
 
     shell_print("\n  [Shell Built-in]\n");
     shell_print("    echo            Print text\n");
-    shell_print("    set / env       Environment variables\n");
+    shell_print("    set / env / unset  Environment variables\n");
     shell_print("    alias           Command aliases\n");
     shell_print("    history         Command history\n");
     shell_print("    calc            Calculator\n");
@@ -2383,6 +2991,19 @@ static void cmd_help(const char *arg) {
     shell_print("    passwd          Change password\n");
     shell_print("    su              Switch user\n");
     shell_print("    logout          End session\n");
+
+    shell_print("\n  [Kernel Diagnostics]\n");
+    shell_print("    ktrace          Kernel event tracing (ring buffer)\n");
+    shell_print("    kwork           Kernel workqueue (deferred work)\n");
+    shell_print("    flock           File lock statistics\n");
+    shell_print("    dcache          Dentry cache stats\n");
+    shell_print("    icache          Inode cache stats\n");
+    shell_print("    syncstat        FS sync statistics\n");
+    shell_print("    mount2          Mount flag management\n");
+
+    shell_print("\n  [Registry & Apps]\n");
+    shell_print("    reg             System registry (query/add/delete/export)\n");
+    shell_print("    apps            Browse & launch built-in applications\n");
 
     shell_print("\n  +-------------------------------------------+\n");
     shell_print("  Tip: 'help <cmd>' for detailed usage info.\n");
@@ -2457,7 +3078,6 @@ static uint32_t count_processes(void) {
 }
 
 static void cmd_sysinfo(void) {
-    char buf[128];
     char val[64];
     int box_w = 60;
 
@@ -2643,6 +3263,305 @@ static void cmd_sysinfo(void) {
     }
     print_box_line('+', '-', '+', '-', box_w);
 
+    last_exit_code = 0;
+}
+
+static void cmd_schedpolicy(void) {
+    shell_print("=== Scheduler Policy Table ===\n\n");
+    sched_print_policy_table();
+    shell_print("\n");
+    last_exit_code = 0;
+}
+
+static void cmd_mempolicy(void) {
+    shell_print("=== Page Replacement Policy Table ===\n\n");
+    page_replace_print_stats();
+    shell_print("\n");
+    last_exit_code = 0;
+}
+
+static void cmd_iosched(void) {
+    shell_print("=== I/O Scheduler Policies ===\n\n");
+    iosched_print_all_policies();
+    shell_print("\n");
+    last_exit_code = 0;
+}
+
+static void cmd_softirq(void) {
+    shell_print("=== SoftIRQ Statistics ===\n\n");
+    softirq_print_stats();
+    shell_print("\n");
+    last_exit_code = 0;
+}
+
+static void cmd_oom(void) {
+    shell_print("=== OOM Killer State ===\n\n");
+    oom_print_score_table();
+    shell_print("\n");
+    last_exit_code = 0;
+}
+
+static void cmd_sysrq(void) {
+    shell_print("=== SysRq Magic Key Help ===\n");
+    sysrq_print_help('h');
+    char buf[128];
+    snprintf(buf, sizeof(buf), "\nSysRq is %s\n", sysrq_is_enabled() ? "enabled" : "disabled");
+    shell_print(buf);
+    last_exit_code = 0;
+}
+
+static void cmd_workqueue(void) {
+    shell_print("=== Workqueue Statistics ===\n");
+    workqueue_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_rcu(void) {
+    shell_print("=== RCU Statistics ===\n");
+    rcu_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_hrtimer(void) {
+    shell_print("=== High-Resolution Timers ===\n");
+    hrtimer_print_stats();
+    timer_list_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_slab(void) {
+    shell_print("=== Slab Allocator ===\n");
+    slab_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_watchdog(void) {
+    shell_print("=== Watchdog Devices ===\n");
+    watchdog_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_crypto(void) {
+    shell_print("=== Crypto Framework ===\n");
+    crypto_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_namespace(void) {
+    shell_print("=== Namespaces Statistics ===\n");
+    namespace_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_tracepoint(void) {
+    shell_print("=== Tracepoints Statistics ===\n");
+    tracepoint_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_uprobe(void) {
+    shell_print("=== Uprobes Statistics ===\n");
+    uprobe_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_kmod(void) {
+    shell_print("=== Kernel Modules Statistics ===\n");
+    kmod_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_firmware(void) {
+    shell_print("=== Firmware Loader Statistics ===\n");
+    firmware_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_remoteproc(void) {
+    shell_print("=== Remote Processor Statistics ===\n");
+    remoteproc_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_rpmsg(void) {
+    shell_print("=== Rpmsg Statistics ===\n");
+    rpmsg_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_virtio(void) {
+    shell_print("=== VirtIO Statistics ===\n");
+    virtio_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_cpufreq(void) {
+    shell_print("=== CPUFreq Statistics ===\n");
+    cpufreq_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_vmalloc(void) {
+    shell_print("=== Vmalloc Statistics ===\n");
+    vmalloc_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_percpu(void) {
+    shell_print("=== Per-CPU Allocator Statistics ===\n");
+    percpu_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_kfence(void) {
+    shell_print("=== KFENCE Statistics ===\n");
+    kfence_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_debugobj(void) {
+    shell_print("=== Debug Objects Statistics ===\n");
+    debug_objects_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_lockdep(void) {
+    shell_print("=== Lockdep Statistics ===\n");
+    lockdep_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_irqdomain(void) {
+    shell_print("=== IRQ Domain Statistics ===\n");
+    irqdomain_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_cpuidle(void) {
+    shell_print("=== CPUIdle Statistics ===\n");
+    cpuidle_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_regmap(void) {
+    shell_print("=== Regmap Statistics ===\n");
+    regmap_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_hwmon(void) {
+    shell_print("=== Hwmon Hardware Monitor Statistics ===\n");
+    hwmon_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_ftrace(void) {
+    shell_print("=== Ftrace Statistics ===\n");
+    ftrace_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_dmabuf(void) {
+    shell_print("=== DMA-BUF Statistics ===\n");
+    dmabuf_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_iio(void) {
+    shell_print("=== IIO Industrial I/O Statistics ===\n");
+    iio_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_pwm(void) {
+    shell_print("=== PWM Subsystem Statistics ===\n");
+    pwm_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_led(void) {
+    shell_print("=== LED Subsystem Statistics ===\n");
+    led_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_rtc(void) {
+    rtc_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_pinctrl(void) {
+    pinctrl_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_gpio(void) {
+    gpio_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_dmaengine(void) {
+    dmaengine_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_clk(void) {
+    clk_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_i2c(void) {
+    i2c_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_spi(void) {
+    spi_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_mfd(void) {
+    mfd_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_devtmpfs(void) {
+    devtmpfs_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_sysfs(void) {
+    ksysfs_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_netns(void) {
+    netns_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_netfilter(void) {
+    knetfilter_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_seccomp(void) {
+    seccomp_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_apparmor(void) {
+    apparmor_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_keyring(void) {
+    keyring_print_stats();
+    last_exit_code = 0;
+}
+
+static void cmd_audit(void) {
+    audit_print_stats();
     last_exit_code = 0;
 }
 
@@ -3312,6 +4231,22 @@ static void cmd_env(void) {
     last_exit_code = 0;
 }
 
+static void cmd_unset(const char *name) {
+    if (!name || !*name) {
+        shell_print("Usage: unset <variable>\n");
+        last_exit_code = 1;
+        return;
+    }
+    if (env_unset(name) == 0) {
+        last_exit_code = 0;
+    } else {
+        shell_print("unset: no such variable: ");
+        shell_print(name);
+        shell_print("\n");
+        last_exit_code = 1;
+    }
+}
+
 static void cmd_run(const char *file) {
     if (!file || !*file) {
         shell_err_run(0);
@@ -3971,11 +4906,19 @@ static void cmd_touch(const char *file) {
     inode_t stat;
     memset(&stat, 0, sizeof(stat));
     if (vfs_stat(full_path, &stat) == 0) {
-        /* File exists - update timestamp (stub) */
-        shell_print("Updated: ");
-        shell_print(file);
-        shell_print("\n");
-        last_exit_code = 0;
+        /* File exists - update timestamp */
+        uint32_t now = rtc_get_timestamp();
+        if (vfs_utimes(full_path, now, now) == 0) {
+            shell_print("Updated: ");
+            shell_print(file);
+            shell_print("\n");
+            last_exit_code = 0;
+        } else {
+            shell_print("touch: cannot touch '");
+            shell_print(file);
+            shell_print("': Unable to update timestamp\n");
+            last_exit_code = 1;
+        }
         return;
     }
 
@@ -4919,6 +5862,125 @@ static void cmd_readlink(const char *path) {
     last_exit_code = 0;
 }
 
+/* setenv - Set system environment variable */
+static void cmd_setenv(const char *name, const char *value) {
+    if (!name || !*name) {
+        shell_print("Usage: setenv <name> <value>\n");
+        last_exit_code = 1;
+        return;
+    }
+
+    if (sysenv_set(name, value ? value : "", 1) != 0) {
+        shell_print("setenv: failed to set environment variable\n");
+        last_exit_code = 1;
+        return;
+    }
+    last_exit_code = 0;
+}
+
+/* unsetenv - Unset system environment variable */
+static void cmd_unsetenv(const char *name) {
+    if (!name || !*name) {
+        shell_print("Usage: unsetenv <name>\n");
+        last_exit_code = 1;
+        return;
+    }
+
+    if (sysenv_unset(name) != 0) {
+        shell_print("unsetenv: no such variable\n");
+        last_exit_code = 1;
+        return;
+    }
+    last_exit_code = 0;
+}
+
+/* ulimit - Get/set resource limits */
+static void cmd_ulimit(const char *resource, const char *value) {
+    static rlimit_info_t rlim;
+    static int rlim_initialized = 0;
+
+    if (!rlim_initialized) {
+        rlimit_init_defaults(&rlim);
+        rlim_initialized = 1;
+    }
+
+    if (!resource || !*resource) {
+        shell_print("Resource limits:\n");
+        for (uint32_t i = 0; i < RLIMIT_NLIMITS; i++) {
+            const char *name = rlimit_name(i);
+            uint32_t cur = rlimit_get_cur(&rlim, i);
+            uint32_t max = rlimit_get_max(&rlim, i);
+            char cur_buf[32], max_buf[32];
+            if (cur == RLIM_INFINITY) {
+                strcpy(cur_buf, "unlimited");
+            } else {
+                sprintf(cur_buf, "%u", cur);
+            }
+            if (max == RLIM_INFINITY) {
+                strcpy(max_buf, "unlimited");
+            } else {
+                sprintf(max_buf, "%u", max);
+            }
+            shell_print("  ");
+            shell_print(name);
+            shell_print(": soft=");
+            shell_print(cur_buf);
+            shell_print(" hard=");
+            shell_print(max_buf);
+            shell_print("\n");
+        }
+        last_exit_code = 0;
+        return;
+    }
+
+    int res = -1;
+    for (uint32_t i = 0; i < RLIMIT_NLIMITS; i++) {
+        if (strcmp(resource, rlimit_name(i)) == 0) {
+            res = (int)i;
+            break;
+        }
+    }
+
+    if (res < 0) {
+        shell_print("ulimit: unknown resource '");
+        shell_print(resource);
+        shell_print("'\n");
+        last_exit_code = 1;
+        return;
+    }
+
+    if (!value || !*value) {
+        uint32_t cur = rlimit_get_cur(&rlim, (uint32_t)res);
+        char buf[32];
+        if (cur == RLIM_INFINITY) {
+            strcpy(buf, "unlimited");
+        } else {
+            sprintf(buf, "%u", cur);
+        }
+        shell_print(buf);
+        shell_print("\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    rlimit_t new_rlim;
+    if (strcmp(value, "unlimited") == 0) {
+        new_rlim.rlim_cur = RLIM_INFINITY;
+        new_rlim.rlim_max = RLIM_INFINITY;
+    } else {
+        uint32_t val = (uint32_t)atoi(value);
+        new_rlim.rlim_cur = val;
+        new_rlim.rlim_max = val;
+    }
+
+    if (rlimit_set(&rlim, (uint32_t)res, &new_rlim) != 0) {
+        shell_print("ulimit: failed to set limit\n");
+        last_exit_code = 1;
+        return;
+    }
+    last_exit_code = 0;
+}
+
 /* file - Determine file type */
 static void cmd_file(const char *file) {
     if (!file || !*file) {
@@ -5224,15 +6286,38 @@ static void cmd_du(const char *dir) {
 
 /* 32. df - Show filesystem disk space usage */
 static void cmd_df(void) {
-    shell_print("Filesystem    Size    Used    Free    Use%  Mounted on\n");
-    uint32_t total = pmm_get_total_pages() * 4096;
-    uint32_t used = pmm_get_used_pages() * 4096;
-    uint32_t free_mem = pmm_get_free_pages() * 4096;
-    char buf[128];
-    snprintf(buf, sizeof(buf), "ramfs      %6uK %6uK %6uK  %3u%%  /\n",
-             total / 1024, used / 1024, free_mem / 1024,
-             total > 0 ? (used * 100) / total : 0);
-    shell_print(buf);
+    shell_print("Filesystem     Type       Size     Used     Free  Use%  Mounted on\n");
+    vfs_mount_info_t mounts[32];
+    int32_t n = vfs_list_mounts(mounts, 32);
+    for (int32_t i = 0; i < n; i++) {
+        uint64_t total = mounts[i].total_blocks;
+        uint64_t free_b = mounts[i].free_blocks;
+        uint64_t used_b = (total > free_b) ? (total - free_b) : 0;
+        uint32_t use_pct = (total > 0) ? (uint32_t)((used_b * 100) / total) : 0;
+        char ro_flag = mounts[i].read_only ? 'r' : ' ';
+        char sz_unit = 'K';
+        uint64_t t_disp = total, u_disp = used_b, f_disp = free_b;
+        if (t_disp > 1024*1024) { t_disp /= 1024; u_disp /= 1024; f_disp /= 1024; sz_unit = 'M'; }
+        t_disp /= 2; u_disp /= 2; f_disp /= 2;
+        char buf[192];
+        snprintf(buf, sizeof(buf), "%-14s%-9s%6lu%c %6lu%c %6lu%c  %2lu%%%c %s\n",
+                 "none",
+                 mounts[i].fs_type,
+                 (unsigned long)t_disp, sz_unit,
+                 (unsigned long)u_disp, sz_unit,
+                 (unsigned long)f_disp, sz_unit,
+                 (unsigned long)use_pct, ro_flag,
+                 mounts[i].mount_point);
+        shell_print(buf);
+    }
+    uint32_t total_mem = pmm_get_total_pages() * 4;
+    uint32_t used_mem = pmm_get_used_pages() * 4;
+    uint32_t free_mem = pmm_get_free_pages() * 4;
+    uint32_t mem_pct = total_mem > 0 ? (used_mem * 100) / total_mem : 0;
+    char buf2[128];
+    snprintf(buf2, sizeof(buf2), "%-14s%-9s%6uK %6uK %6uK  %2u%%   (memory)\n",
+             "mem", "tmpfs", total_mem, used_mem, free_mem, mem_pct);
+    shell_print(buf2);
     last_exit_code = 0;
 }
 
@@ -5788,14 +6873,52 @@ static void cmd_sensors(void) {
 
 /* 45. freq - Show/set CPU frequency */
 static void cmd_freq(const char *freq_str) {
-    if (freq_str && *freq_str) {
-        shell_print("CPU frequency set to ");
-        shell_print(freq_str);
-        shell_print(" MHz (stub)\n");
-    } else {
-        shell_print("CPU frequency: ~1000 MHz (estimated)\n");
+    cpufreq_info_t *info = cpufreq_get_info();
+    if (!info) {
+        shell_print("CPU frequency information unavailable\n");
+        last_exit_code = 1;
+        return;
     }
-    last_exit_code = 0;
+
+    if (freq_str && *freq_str) {
+        uint32_t mhz = (uint32_t)atoi(freq_str);
+        if (mhz == 0) {
+            shell_print("Invalid frequency: ");
+            shell_print(freq_str);
+            shell_print(" MHz\n");
+            last_exit_code = 1;
+            return;
+        }
+        int rc = cpufreq_set(mhz);
+        if (rc == 0) {
+            shell_print("CPU frequency set to ");
+            shell_print(freq_str);
+            shell_print(" MHz\n");
+            last_exit_code = 0;
+        } else {
+            shell_print("Failed to set CPU frequency to ");
+            shell_print(freq_str);
+            shell_print(" MHz\n");
+            last_exit_code = 1;
+        }
+    } else {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "CPU frequency: %u MHz\n", info->current_freq);
+        shell_print(buf);
+        snprintf(buf, sizeof(buf), "  Min: %u MHz, Max: %u MHz\n", info->min_freq, info->max_freq);
+        shell_print(buf);
+        snprintf(buf, sizeof(buf), "  Governor: %s\n", info->governor);
+        shell_print(buf);
+        if (info->available_count > 0) {
+            shell_print("  Available frequencies:");
+            for (uint32_t i = 0; i < info->available_count; i++) {
+                snprintf(buf, sizeof(buf), " %u", info->available_freqs[i]);
+                shell_print(buf);
+            }
+            shell_print(" MHz\n");
+        }
+        last_exit_code = 0;
+    }
 }
 
 /* 46. calc - Simple calculator */
@@ -6173,7 +7296,25 @@ static void cmd_md5(const char *file) {
 }
 
 /* 49. history - Show command history */
-static void cmd_history(void) {
+static void cmd_history(const char *options) {
+    if (options && strcmp(options, "-c") == 0) {
+        /* Clear history */
+        history_count = 0;
+        history_pos = 0;
+        history_head = 0;
+        shell_history_count = 0;
+        shell_history_pos = -1;
+        for (int i = 0; i < SHELL_HISTORY_SIZE; i++) {
+            history_buf[i][0] = '\0';
+        }
+        for (int i = 0; i < SHELL_HISTORY_MAX; i++) {
+            shell_history[i][0] = '\0';
+        }
+        shell_print("History cleared.\n");
+        last_exit_code = 0;
+        return;
+    }
+
     int start = (history_count < SHELL_HISTORY_SIZE) ? 0 : history_pos;
     for (int i = 0; i < history_count; i++) {
         int idx = (start + i) % SHELL_HISTORY_SIZE;
@@ -6507,17 +7648,7 @@ static void cmd_kvm(void) {
     last_exit_code = 0;
 }
 
-/* ---- apps command - list available apps ---- */
-static void cmd_apps(void) {
-    shell_print("Available applications:\n");
-    for (uint32_t i = 0; i < APP_COUNT; i++) {
-        char buf[128];
-        snprintf(buf, sizeof(buf), "  %-10s %s\n", app_registry[i].name, app_registry[i].desc);
-        shell_print(buf);
-    }
-    shell_print("\nUse 'run <appname>' to execute an application.\n");
-    last_exit_code = 0;
-}
+/* ---- apps command - list available apps (see new cmd_apps below) ---- */
 
 /* ---- run command - execute a built-in app ---- */
 static void cmd_run_app(const char *name) {
@@ -7005,6 +8136,7 @@ static void cmd_which(const char *cmd) {
         "load", "dmesg", "loglevel", "syslog", "mount", "umount", "format", "fdisk", "chkdsk",
         "touch", "append", "head", "tail", "wc", "diff", "sort", "uniq",
         "grep", "replace", "chmod", "chown", "file", "ln", "ln_s", "readlink", "stat", "tree", "du", "df",
+        "env", "setenv", "unsetenv", "ulimit",
         "ifconfig", "route", "dns", "wget", "netstat", "traceroute", "arp", "fw",
         "hostname", "lspci", "lsusb", "lsblk", "sensors", "freq",
         "calc", "base64", "md5", "history", "alias", "edit",
@@ -8083,7 +9215,25 @@ static void cmd_sound(void) {
 static void cmd_ipcs(void) {
     shell_print("------ Message Queues ------\n");
     shell_print("key        msqid      perms      used-bytes   messages\n");
-    shell_print("(no message queues - IPC message queue status unavailable)\n");
+
+    msg_queue_info_t *queues = (msg_queue_info_t *)kmalloc(sizeof(msg_queue_info_t) * 64);
+    int msg_count = 0;
+    if (queues) {
+        uint32_t n = msg_list(queues, 64);
+        for (uint32_t i = 0; i < n; i++) {
+            char buf[128];
+            snprintf(buf, sizeof(buf),
+                     "0x%08x %-10d %-10u %-12u %-8u\n",
+                     queues[i].key, i, 0644u,
+                     queues[i].used_bytes, queues[i].count);
+            shell_print(buf);
+            msg_count++;
+        }
+        kfree(queues);
+    }
+    if (msg_count == 0) {
+        shell_print("(no message queues)\n");
+    }
 
     shell_print("\n------ Shared Memory Segments ------\n");
     shell_print("key        shmid      perms      bytes       nattch   status\n");
@@ -8108,7 +9258,24 @@ static void cmd_ipcs(void) {
 
     shell_print("\n------ Semaphore Arrays ------\n");
     shell_print("key        semid      perms      nsems   status\n");
-    shell_print("(no semaphore arrays - stub implementation)\n");
+
+    semid_ds_t *sets = (semid_ds_t *)kmalloc(sizeof(semid_ds_t) * IPC_SEM_MAX_SETS);
+    int sem_count = 0;
+    if (sets) {
+        uint32_t n = ipc_sem_list(sets, IPC_SEM_MAX_SETS);
+        for (uint32_t i = 0; i < n; i++) {
+            char buf[128];
+            snprintf(buf, sizeof(buf),
+                     "0x%08x %-10d %-10u %-7u\n",
+                     sets[i].key, i, 0644u, sets[i].nsems);
+            shell_print(buf);
+            sem_count++;
+        }
+        kfree(sets);
+    }
+    if (sem_count == 0) {
+        shell_print("(no semaphore arrays)\n");
+    }
 
     last_exit_code = 0;
 }
@@ -8187,84 +9354,143 @@ static void cmd_iostat(void) {
     last_exit_code = 0;
 }
 
-/* crontab - Simple cron job management */
-#define CRONTAB_MAX_JOBS 16
+/* crontab - Cron job management (uses cron subsystem) */
 
-typedef struct {
-    uint8_t used;
-    uint8_t minute;
-    uint8_t hour;
-    uint8_t day;
-    uint8_t month;
-    uint8_t weekday;
-    char command[128];
-} cron_job_t;
+/* 命令执行器：cron 子系统调用此函数来执行 shell 命令 */
+static int cron_shell_executor(const char *command) {
+    if (!command || !*command) return -1;
+    shell_execute(command);
+    return last_exit_code;
+}
 
-static cron_job_t cron_jobs[CRONTAB_MAX_JOBS];
-static int cron_job_count = 0;
+static const char *cron_type_name(cron_type_t t) {
+    switch (t) {
+        case CRON_TYPE_ONCE:     return "ONCE";
+        case CRON_TYPE_INTERVAL: return "INTERVAL";
+        case CRON_TYPE_DAILY:    return "DAILY";
+        default:                 return "?";
+    }
+}
+
+static const char *cron_state_name(cron_state_t s) {
+    switch (s) {
+        case CRON_STATE_DISABLED: return "OFF";
+        case CRON_STATE_ENABLED:  return "ON";
+        case CRON_STATE_RUNNING:  return "RUN";
+        case CRON_STATE_ERROR:    return "ERR";
+        default:                  return "?";
+    }
+}
 
 static void cmd_crontab(const char *subcmd, const char *arg1, const char *arg2) {
     (void)arg2;
 
-    if (!subcmd || !*subcmd || strcmp(subcmd, "-l") == 0 || strcmp(subcmd, "list") == 0) {
-        shell_print("Scheduled cron jobs:\n");
-        if (cron_job_count == 0) {
-            shell_print("  (no cron jobs)\n");
+    if (!subcmd || !*subcmd || strcmp(subcmd, "list") == 0 || strcmp(subcmd, "-l") == 0) {
+        cron_job_t jobs[CRON_MAX_JOBS];
+        int n = cron_list_jobs(jobs, CRON_MAX_JOBS);
+        if (n == 0) {
+            shell_print("No cron jobs. Use 'crontab add ...' to create.\n");
         } else {
-            for (int i = 0; i < CRONTAB_MAX_JOBS; i++) {
-                if (cron_jobs[i].used) {
-                    char buf[256];
-                    snprintf(buf, sizeof(buf),
-                             "  %d: %u %u %u %u %u  %s\n",
-                             i,
-                             cron_jobs[i].minute, cron_jobs[i].hour,
-                             cron_jobs[i].day, cron_jobs[i].month,
-                             cron_jobs[i].weekday, cron_jobs[i].command);
-                    shell_print(buf);
+            shell_print("ID   Name            Type       State  Schedule            Runs  Cmd\n");
+            shell_print("---- -------------- ---------- ------ ------------------ ----- ---\n");
+            for (int i = 0; i < n; i++) {
+                char sched[32] = "";
+                if (jobs[i].type == CRON_TYPE_ONCE ||
+                    jobs[i].type == CRON_TYPE_INTERVAL) {
+                    snprintf(sched, sizeof(sched), "every %us",
+                             jobs[i].interval_sec);
+                } else if (jobs[i].type == CRON_TYPE_DAILY) {
+                    snprintf(sched, sizeof(sched), "daily %02u:%02u",
+                             jobs[i].hour, jobs[i].minute);
                 }
+                char line[512];
+                snprintf(line, sizeof(line),
+                         "%-4u %-14s %-10s %-6s %-18s %5u %s\n",
+                         jobs[i].id, jobs[i].name,
+                         cron_type_name(jobs[i].type),
+                         cron_state_name(jobs[i].state),
+                         sched, jobs[i].run_count, jobs[i].command);
+                shell_print(line);
             }
         }
         last_exit_code = 0;
         return;
     }
 
-    if (strcmp(subcmd, "-e") == 0 || strcmp(subcmd, "edit") == 0) {
-        shell_print("crontab: interactive editor not available (stub)\n");
-        shell_print("Use: crontab add <minute> <hour> <day> <month> <weekday> <command>\n");
-        last_exit_code = 0;
-        return;
-    }
-
     if (strcmp(subcmd, "add") == 0) {
-        if (cron_job_count >= CRONTAB_MAX_JOBS) {
-            shell_print("crontab: maximum jobs reached\n");
+        /* crontab add <name> <type> <schedule> <command...>
+         * shell dispatch: subcmd=arg, arg1=name(arg2), arg2="type sched cmd"(arg3)
+         */
+        if (!arg1 || !*arg1 || !arg2 || !*arg2) {
+            shell_print("Usage: crontab add <name> <once|interval|daily> <schedule> <command>\n");
+            shell_print("  once     <name> once <delay_sec> <command>\n");
+            shell_print("  interval <name> interval <sec> <command>\n");
+            shell_print("  daily    <name> daily <HH:MM> <command>\n");
             last_exit_code = 1;
             return;
         }
-        int idx = -1;
-        for (int i = 0; i < CRONTAB_MAX_JOBS; i++) {
-            if (!cron_jobs[i].used) { idx = i; break; }
-        }
-        if (idx < 0) {
-            shell_print("crontab: no free slot\n");
+        /* arg2 = "type schedule command" - parse first two tokens, rest is command */
+        char type_str[16];
+        char sched_str[32];
+        char cmd_str[CRON_MAX_CMD_LEN];
+        type_str[0] = sched_str[0] = cmd_str[0] = '\0';
+        int parsed = sscanf(arg2, "%15s %31s", type_str, sched_str);
+        if (parsed < 2) {
+            shell_print("crontab: parse error. Expected: <type> <schedule> <command>\n");
             last_exit_code = 1;
             return;
         }
-        cron_jobs[idx].used = 1;
-        cron_jobs[idx].minute = 0;
-        cron_jobs[idx].hour = 0;
-        cron_jobs[idx].day = 0;
-        cron_jobs[idx].month = 0;
-        cron_jobs[idx].weekday = 0;
-        if (arg1 && *arg1) {
-            strncpy(cron_jobs[idx].command, arg1, 127);
-            cron_jobs[idx].command[127] = '\0';
+        /* 提取命令部分：arg2 中跳过前两个 token */
+        const char *p = arg2;
+        int tok = 0;
+        while (*p && tok < 2) {
+            while (*p == ' ') p++;
+            while (*p && *p != ' ') p++;
+            tok++;
+        }
+        while (*p == ' ') p++;
+        strncpy(cmd_str, p, CRON_MAX_CMD_LEN - 1);
+        cmd_str[CRON_MAX_CMD_LEN - 1] = '\0';
+        if (!*cmd_str) {
+            strncpy(cmd_str, "echo cron", CRON_MAX_CMD_LEN - 1);
+        }
+
+        cron_job_t job;
+        memset(&job, 0, sizeof(job));
+        strncpy(job.name, arg1, CRON_MAX_NAME - 1);
+        strncpy(job.command, cmd_str, CRON_MAX_CMD_LEN - 1);
+        job.state = CRON_STATE_ENABLED;
+
+        if (strcmp(type_str, "once") == 0) {
+            job.type = CRON_TYPE_ONCE;
+            job.interval_sec = (uint32_t)atoi(sched_str);
+        } else if (strcmp(type_str, "interval") == 0) {
+            job.type = CRON_TYPE_INTERVAL;
+            job.interval_sec = (uint32_t)atoi(sched_str);
+        } else if (strcmp(type_str, "daily") == 0) {
+            job.type = CRON_TYPE_DAILY;
+            unsigned int h = 0, m = 0;
+            if (sscanf(sched_str, "%u:%u", &h, &m) != 2 || h > 23 || m > 59) {
+                shell_print("crontab: invalid time format, use HH:MM\n");
+                last_exit_code = 1;
+                return;
+            }
+            job.hour = (uint8_t)h;
+            job.minute = (uint8_t)m;
         } else {
-            strncpy(cron_jobs[idx].command, "echo cron job", 127);
+            shell_print("crontab: unknown type. Use once|interval|daily\n");
+            last_exit_code = 1;
+            return;
         }
-        cron_job_count++;
+
+        uint32_t id = cron_add_job(&job);
+        if (id == CRON_INVALID_ID) {
+            shell_print("crontab: failed to add job (table full?)\n");
+            last_exit_code = 1;
+            return;
+        }
         char buf[64];
-        snprintf(buf, sizeof(buf), "crontab: added job %d\n", idx);
+        snprintf(buf, sizeof(buf), "crontab: added job %u\n", id);
         shell_print(buf);
         last_exit_code = 0;
         return;
@@ -8272,38 +9498,2312 @@ static void cmd_crontab(const char *subcmd, const char *arg1, const char *arg2) 
 
     if (strcmp(subcmd, "rm") == 0 || strcmp(subcmd, "remove") == 0) {
         if (!arg1 || !*arg1) {
-            shell_print("crontab: usage: crontab rm <job_id>\n");
+            shell_print("Usage: crontab rm <job_id>\n");
             last_exit_code = 1;
             return;
         }
-        int id = atoi(arg1);
-        if (id < 0 || id >= CRONTAB_MAX_JOBS || !cron_jobs[id].used) {
-            shell_print("crontab: invalid job id\n");
+        uint32_t id = (uint32_t)atoi(arg1);
+        if (cron_remove_job(id) != 0) {
+            shell_print("crontab: job not found\n");
             last_exit_code = 1;
             return;
         }
-        cron_jobs[id].used = 0;
-        cron_job_count--;
         shell_print("crontab: job removed\n");
         last_exit_code = 0;
         return;
     }
 
-    if (strcmp(subcmd, "-r") == 0 || strcmp(subcmd, "clear") == 0) {
-        for (int i = 0; i < CRONTAB_MAX_JOBS; i++) {
-            cron_jobs[i].used = 0;
+    if (strcmp(subcmd, "enable") == 0) {
+        if (!arg1 || !*arg1) {
+            shell_print("Usage: crontab enable <job_id>\n");
+            last_exit_code = 1;
+            return;
         }
-        cron_job_count = 0;
-        shell_print("crontab: all jobs removed\n");
+        uint32_t id = (uint32_t)atoi(arg1);
+        if (cron_enable_job(id) != 0) {
+            shell_print("crontab: job not found\n");
+            last_exit_code = 1;
+            return;
+        }
+        shell_print("crontab: job enabled\n");
         last_exit_code = 0;
         return;
     }
 
-    shell_print("Usage: crontab [-l | list | -e | edit | add <cmd> | rm <id> | -r | clear]\n");
+    if (strcmp(subcmd, "disable") == 0) {
+        if (!arg1 || !*arg1) {
+            shell_print("Usage: crontab disable <job_id>\n");
+            last_exit_code = 1;
+            return;
+        }
+        uint32_t id = (uint32_t)atoi(arg1);
+        if (cron_disable_job(id) != 0) {
+            shell_print("crontab: job not found\n");
+            last_exit_code = 1;
+            return;
+        }
+        shell_print("crontab: job disabled\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "run") == 0) {
+        if (!arg1 || !*arg1) {
+            shell_print("Usage: crontab run <job_id>\n");
+            last_exit_code = 1;
+            return;
+        }
+        uint32_t id = (uint32_t)atoi(arg1);
+        int rc = cron_run_job_now(id);
+        if (rc == -1) {
+            shell_print("crontab: job not found\n");
+            last_exit_code = 1;
+            return;
+        }
+        if (rc == -2) {
+            shell_print("crontab: no executor registered\n");
+            last_exit_code = 1;
+            return;
+        }
+        char buf[64];
+        snprintf(buf, sizeof(buf), "crontab: job executed, exit=%d\n", rc);
+        shell_print(buf);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "stats") == 0) {
+        cron_stats_t st;
+        cron_get_stats(&st);
+        char buf[256];
+        shell_print("=== Cron Statistics ===\n");
+        snprintf(buf, sizeof(buf), "Total jobs   : %u\n", st.total_jobs);
+        shell_print(buf);
+        snprintf(buf, sizeof(buf), "Enabled jobs : %u\n", st.enabled_jobs);
+        shell_print(buf);
+        snprintf(buf, sizeof(buf), "Total runs   : %u\n", st.total_runs);
+        shell_print(buf);
+        snprintf(buf, sizeof(buf), "Total errors : %u\n", st.total_errors);
+        shell_print(buf);
+        snprintf(buf, sizeof(buf), "Next ID      : %u\n", st.next_id);
+        shell_print(buf);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "reset") == 0) {
+        cron_reset_stats();
+        shell_print("crontab: stats reset\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "help") == 0 || strcmp(subcmd, "-h") == 0) {
+        shell_print("Usage: crontab <command> [args]\n");
+        shell_print("Commands:\n");
+        shell_print("  list                  List all jobs\n");
+        shell_print("  add <name> <type> <sched> <cmd>\n");
+        shell_print("                        Add a job (type=once|interval|daily)\n");
+        shell_print("  rm <id>               Remove a job\n");
+        shell_print("  enable <id>           Enable a job\n");
+        shell_print("  disable <id>          Disable a job\n");
+        shell_print("  run <id>              Run a job immediately\n");
+        shell_print("  stats                 Show statistics\n");
+        shell_print("  reset                 Reset statistics\n");
+        shell_print("\nExamples:\n");
+        shell_print("  crontab add backup interval 60 echo tick\n");
+        shell_print("  crontab add greet once 10 echo hello\n");
+        shell_print("  crontab add wake daily 08:30 echo morning\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    shell_print("Usage: crontab [list|add|rm|enable|disable|run|stats|reset|help]\n");
     last_exit_code = 1;
 }
 
-/* taskset - Set/get process CPU affinity */
+/* evlog - 系统事件日志查询与管理 */
+static uint8_t evlog_parse_sev(const char *s) {
+    if (!s || !*s) return EVLOG_SEV_INFO;
+    if (!strcmp(s, "info") || !strcmp(s, "0")) return EVLOG_SEV_INFO;
+    if (!strcmp(s, "warn") || !strcmp(s, "warning") || !strcmp(s, "1")) return EVLOG_SEV_WARNING;
+    if (!strcmp(s, "error") || !strcmp(s, "err") || !strcmp(s, "2")) return EVLOG_SEV_ERROR;
+    if (!strcmp(s, "crit") || !strcmp(s, "critical") || !strcmp(s, "3")) return EVLOG_SEV_CRITICAL;
+    return 0xFF;  /* invalid */
+}
+
+static void cmd_evlog(const char *subcmd, const char *arg1, const char *arg2) {
+    if (!subcmd || !*subcmd || strcmp(subcmd, "list") == 0) {
+        /* evlog list [source] [limit]
+         * arg1 = source (optional), arg2 = limit (optional)
+         */
+        evlog_filter_t f;
+        memset(&f, 0, sizeof(f));
+        f.limit = 20;
+        if (arg1 && *arg1 && strcmp(arg1, "*") != 0) {
+            f.source = arg1;
+        }
+        if (arg2 && *arg2) {
+            int n = atoi(arg2);
+            if (n > 0 && n <= 500) f.limit = (uint32_t)n;
+        }
+
+        evlog_record_t *recs = (evlog_record_t *)kmalloc(sizeof(evlog_record_t) * f.limit);
+        if (!recs) {
+            shell_print("evlog: out of memory\n");
+            last_exit_code = 1;
+            return;
+        }
+        uint32_t n = evlog_query(&f, recs, f.limit);
+        if (n == 0) {
+            shell_print("No event log records.\n");
+        } else {
+            shell_print("ID    Time          Sev     Source           Eid   Msg\n");
+            shell_print("----  -----------   -----   --------------- ----  ----\n");
+            for (uint32_t i = 0; i < n; i++) {
+                char line[512];
+                uint32_t sec = (uint32_t)(recs[i].timestamp / EVLOG_TICKS_PER_SEC);
+                uint32_t ms = (uint32_t)((recs[i].timestamp % EVLOG_TICKS_PER_SEC) * 10);
+                snprintf(line, sizeof(line),
+                         "%-4u  %u.%03us     %-6s   %-15s %-4u  %s\n",
+                         recs[i].id, sec, ms,
+                         evlog_severity_name(recs[i].severity),
+                         recs[i].source, recs[i].event_id,
+                         recs[i].message);
+                shell_print(line);
+            }
+            char tail[64];
+            snprintf(tail, sizeof(tail), "(%u record%s shown)\n",
+                     n, n == 1 ? "" : "s");
+            shell_print(tail);
+        }
+        kfree(recs);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "sources") == 0) {
+        evlog_source_t srcs[EVLOG_MAX_SOURCES];
+        int n = evlog_list_sources(srcs, EVLOG_MAX_SOURCES);
+        if (n == 0) {
+            shell_print("No event sources registered.\n");
+        } else {
+            shell_print("Name             Enabled  MinSev      Events\n");
+            shell_print("---------------- -------- ----------- ------\n");
+            for (int i = 0; i < n; i++) {
+                char line[128];
+                snprintf(line, sizeof(line), "%-15s %-8s %-11s %u\n",
+                         srcs[i].name,
+                         srcs[i].enabled ? "yes" : "no",
+                         evlog_severity_name(srcs[i].min_severity),
+                         srcs[i].event_count);
+                shell_print(line);
+            }
+        }
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "write") == 0) {
+        /* evlog write <source> <severity> <event_id> <message...>
+         * arg1 = source, arg2 = "severity event_id message"
+         */
+        if (!arg1 || !*arg1 || !arg2 || !*arg2) {
+            shell_print("Usage: evlog write <source> <info|warn|error|crit> <event_id> <message>\n");
+            last_exit_code = 1;
+            return;
+        }
+        char sev_str[16];
+        char eid_str[16];
+        sev_str[0] = eid_str[0] = '\0';
+        int parsed = sscanf(arg2, "%15s %15s", sev_str, eid_str);
+        if (parsed < 2) {
+            shell_print("evlog: parse error. Expected: <severity> <event_id> <message>\n");
+            last_exit_code = 1;
+            return;
+        }
+        uint8_t sev = evlog_parse_sev(sev_str);
+        if (sev == 0xFF) {
+            shell_print("evlog: invalid severity. Use info|warn|error|crit\n");
+            last_exit_code = 1;
+            return;
+        }
+        uint32_t eid = (uint32_t)atoi(eid_str);
+
+        /* 提取消息部分：跳过 arg2 中前两个 token */
+        const char *p = arg2;
+        int tok = 0;
+        while (*p && tok < 2) {
+            while (*p == ' ') p++;
+            while (*p && *p != ' ') p++;
+            tok++;
+        }
+        while (*p == ' ') p++;
+        char msg[EVLOG_MAX_MSG];
+        strncpy(msg, p, EVLOG_MAX_MSG - 1);
+        msg[EVLOG_MAX_MSG - 1] = '\0';
+        if (!*msg) {
+            strncpy(msg, "(no message)", EVLOG_MAX_MSG - 1);
+        }
+
+        evlog_write(arg1, sev, EVLOG_CAT_SYSADMIN, eid, "%s", msg);
+        char buf[128];
+        snprintf(buf, sizeof(buf),
+                 "Event written: source=%s sev=%s eid=%u\n",
+                 arg1, evlog_severity_name(sev), eid);
+        shell_print(buf);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "clear") == 0) {
+        evlog_clear();
+        shell_print("Event log cleared.\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "stats") == 0) {
+        evlog_stats_t s;
+        evlog_get_stats(&s);
+        char buf[256];
+        shell_print("Event Log Statistics\n");
+        shell_print("--------------------\n");
+        snprintf(buf, sizeof(buf), "Total records:  %u\n", s.total_records);
+        shell_print(buf);
+        snprintf(buf, sizeof(buf), "Total sources:  %u\n", s.total_sources);
+        shell_print(buf);
+        snprintf(buf, sizeof(buf), "  INFO:         %u\n", s.per_severity[EVLOG_SEV_INFO]);
+        shell_print(buf);
+        snprintf(buf, sizeof(buf), "  WARN:         %u\n", s.per_severity[EVLOG_SEV_WARNING]);
+        shell_print(buf);
+        snprintf(buf, sizeof(buf), "  ERROR:        %u\n", s.per_severity[EVLOG_SEV_ERROR]);
+        shell_print(buf);
+        snprintf(buf, sizeof(buf), "  CRITICAL:     %u\n", s.per_severity[EVLOG_SEV_CRITICAL]);
+        shell_print(buf);
+        snprintf(buf, sizeof(buf), "Retention:      %u (max %u)\n",
+                 s.retention_limit, EVLOG_MAX_RETENTION);
+        shell_print(buf);
+        snprintf(buf, sizeof(buf), "Pruned total:   %u\n", s.pruned);
+        shell_print(buf);
+        snprintf(buf, sizeof(buf), "Dropped total:  %u\n", s.dropped);
+        shell_print(buf);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "prune") == 0) {
+        uint32_t keep = 100;
+        if (arg1 && *arg1) {
+            int n = atoi(arg1);
+            if (n > 0 && n <= (int)EVLOG_MAX_RETENTION) keep = (uint32_t)n;
+        }
+        int deleted = evlog_prune(keep);
+        char buf[128];
+        snprintf(buf, sizeof(buf), "Pruned %d record(s), keeping most recent %u.\n",
+                 deleted, keep);
+        shell_print(buf);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "retention") == 0) {
+        if (!arg1 || !*arg1) {
+            evlog_stats_t s;
+            evlog_get_stats(&s);
+            char buf[128];
+            snprintf(buf, sizeof(buf), "Current retention limit: %u (max %u)\n",
+                     s.retention_limit, EVLOG_MAX_RETENTION);
+            shell_print(buf);
+            shell_print("Usage: evlog retention <limit>\n");
+            last_exit_code = 0;
+            return;
+        }
+        uint32_t limit = (uint32_t)atoi(arg1);
+        if (limit == 0 || limit > EVLOG_MAX_RETENTION) {
+            char buf[128];
+            snprintf(buf, sizeof(buf),
+                     "Invalid limit. Must be 1..%u\n", EVLOG_MAX_RETENTION);
+            shell_print(buf);
+            last_exit_code = 1;
+            return;
+        }
+        evlog_set_retention(limit);
+        char buf[128];
+        snprintf(buf, sizeof(buf), "Retention set to %u.\n", limit);
+        shell_print(buf);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "sev") == 0) {
+        /* evlog sev <source> <min_severity> */
+        if (!arg1 || !*arg1 || !arg2 || !*arg2) {
+            shell_print("Usage: evlog sev <source> <info|warn|error|crit>\n");
+            last_exit_code = 1;
+            return;
+        }
+        char sev_str[16];
+        sev_str[0] = '\0';
+        sscanf(arg2, "%15s", sev_str);
+        uint8_t sev = evlog_parse_sev(sev_str);
+        if (sev == 0xFF) {
+            shell_print("evlog: invalid severity. Use info|warn|error|crit\n");
+            last_exit_code = 1;
+            return;
+        }
+        if (evlog_source_set_min_severity(arg1, sev) != 0) {
+            shell_print("evlog: source not found (use 'evlog sources' to list)\n");
+            last_exit_code = 1;
+            return;
+        }
+        char buf[128];
+        snprintf(buf, sizeof(buf), "Source '%s' min severity set to %s\n",
+                 arg1, evlog_severity_name(sev));
+        shell_print(buf);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "enable") == 0 || strcmp(subcmd, "disable") == 0) {
+        if (!arg1 || !*arg1) {
+            shell_print("Usage: evlog <enable|disable> <source>\n");
+            last_exit_code = 1;
+            return;
+        }
+        int en = (strcmp(subcmd, "enable") == 0) ? 1 : 0;
+        if (evlog_source_enable(arg1, en) != 0) {
+            shell_print("evlog: source not found\n");
+            last_exit_code = 1;
+            return;
+        }
+        char buf[128];
+        snprintf(buf, sizeof(buf), "Source '%s' %s\n", arg1,
+                 en ? "enabled" : "disabled");
+        shell_print(buf);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "register") == 0) {
+        if (!arg1 || !*arg1) {
+            shell_print("Usage: evlog register <source_name>\n");
+            last_exit_code = 1;
+            return;
+        }
+        if (evlog_register_source(arg1) != 0) {
+            shell_print("evlog: failed to register source (full or exists)\n");
+            last_exit_code = 1;
+            return;
+        }
+        char buf[128];
+        snprintf(buf, sizeof(buf), "Source '%s' registered.\n", arg1);
+        shell_print(buf);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "export") == 0) {
+        /* evlog export <file> [source] [limit]
+         * arg1 = file path, arg2 = "source limit" (可选)
+         */
+        if (!arg1 || !*arg1) {
+            shell_print("Usage: evlog export <file> [source] [limit]\n");
+            last_exit_code = 1;
+            return;
+        }
+        evlog_filter_t f;
+        char src_buf[EVLOG_MAX_SOURCE_NAME];
+        memset(&f, 0, sizeof(f));
+        src_buf[0] = '\0';
+        f.limit = 1000;
+        if (arg2 && *arg2) {
+            int parsed = sscanf(arg2, "%31s", src_buf);
+            if (parsed >= 1 && strcmp(src_buf, "*") != 0) {
+                f.source = src_buf;
+            }
+            /* 尝试解析 limit（第二个 token） */
+            const char *p = arg2;
+            while (*p && *p != ' ') p++;
+            while (*p == ' ') p++;
+            if (*p) {
+                int n = atoi(p);
+                if (n > 0 && n <= 5000) f.limit = (uint32_t)n;
+            }
+        }
+        int written = evlog_export(arg1, &f);
+        if (written < 0) {
+            shell_print("evlog: export failed (cannot create file)\n");
+            last_exit_code = 1;
+        } else {
+            char buf[160];
+            snprintf(buf, sizeof(buf),
+                     "Exported %d records to '%s'.\n", written, arg1);
+            shell_print(buf);
+            last_exit_code = 0;
+        }
+        return;
+    }
+
+    if (strcmp(subcmd, "watch") == 0) {
+        /* evlog watch <add|list|rm|enable|disable|reset> ...
+         * arg1 = watch 子命令, arg2 = 参数（rest of line）
+         */
+        if (!arg1 || !*arg1 || strcmp(arg1, "list") == 0) {
+            evlog_watch_t watches[EVLOG_MAX_WATCHES];
+            int n = evlog_watch_list(watches, EVLOG_MAX_WATCHES);
+            if (n == 0) {
+                shell_print("No event watch rules.\n");
+            } else {
+                shell_print("ID  Name            Source           MinSev   Eid   En  Matches  LastMsg\n");
+                shell_print("--  --------------  ---------------  -------  ----- --  -------  -------\n");
+                for (int i = 0; i < n; i++) {
+                    char line[320];
+                    const char *src = watches[i].source[0] ?
+                                      watches[i].source : "*";
+                    snprintf(line, sizeof(line),
+                             "%-2u  %-14s  %-15s  %-7s  %-5u %-2s %-7u  %s\n",
+                             watches[i].id,
+                             watches[i].name,
+                             src,
+                             evlog_severity_name(watches[i].min_severity),
+                             watches[i].event_id,
+                             watches[i].enabled ? "y" : "n",
+                             watches[i].match_count,
+                             watches[i].last_match_msg);
+                    shell_print(line);
+                }
+            }
+            last_exit_code = 0;
+            return;
+        }
+        if (strcmp(arg1, "add") == 0) {
+            /* evlog watch add <name> [source] [min_sev] [event_id]
+             * arg2 = "name [source] [min_sev] [event_id]"
+             */
+            if (!arg2 || !*arg2) {
+                shell_print("Usage: evlog watch add <name> [source] [min_sev] [event_id]\n");
+                last_exit_code = 1;
+                return;
+            }
+            char name[EVLOG_WATCH_NAME];
+            char src[EVLOG_MAX_SOURCE_NAME];
+            char sev_str[16];
+            char eid_str[16];
+            name[0] = src[0] = sev_str[0] = eid_str[0] = '\0';
+            int parsed = sscanf(arg2, "%31s %31s %15s %15s",
+                                 name, src, sev_str, eid_str);
+            if (parsed < 1) {
+                shell_print("evlog watch: parse error\n");
+                last_exit_code = 1;
+                return;
+            }
+            uint8_t sev = EVLOG_SEV_INFO;
+            if (parsed >= 3 && sev_str[0]) {
+                sev = evlog_parse_sev(sev_str);
+                if (sev == 0xFF) {
+                    shell_print("evlog watch: invalid severity\n");
+                    last_exit_code = 1;
+                    return;
+                }
+            }
+            uint32_t eid = 0;
+            if (parsed >= 4 && eid_str[0]) {
+                eid = (uint32_t)atoi(eid_str);
+            }
+            const char *src_arg = (parsed >= 2 && src[0] &&
+                                   strcmp(src, "*") != 0) ? src : NULL;
+            int id = evlog_watch_add(name, src_arg, sev, eid);
+            if (id <= 0) {
+                shell_print("evlog watch: failed to add (table full?)\n");
+                last_exit_code = 1;
+                return;
+            }
+            char buf[160];
+            snprintf(buf, sizeof(buf),
+                     "Watch rule %u added (name=%s source=%s sev=%s eid=%u)\n",
+                     (uint32_t)id, name, src_arg ? src_arg : "*",
+                     evlog_severity_name(sev), eid);
+            shell_print(buf);
+            last_exit_code = 0;
+            return;
+        }
+        if (strcmp(arg1, "rm") == 0) {
+            if (!arg2 || !*arg2) {
+                shell_print("Usage: evlog watch rm <id>\n");
+                last_exit_code = 1;
+                return;
+            }
+            uint32_t id = (uint32_t)atoi(arg2);
+            if (evlog_watch_remove(id) != 0) {
+                shell_print("evlog watch: rule not found\n");
+                last_exit_code = 1;
+                return;
+            }
+            shell_print("Watch rule removed.\n");
+            last_exit_code = 0;
+            return;
+        }
+        if (strcmp(arg1, "enable") == 0 || strcmp(arg1, "disable") == 0) {
+            if (!arg2 || !*arg2) {
+                shell_print("Usage: evlog watch <enable|disable> <id>\n");
+                last_exit_code = 1;
+                return;
+            }
+            uint32_t id = (uint32_t)atoi(arg2);
+            int en = (strcmp(arg1, "enable") == 0) ? 1 : 0;
+            if (evlog_watch_enable(id, en) != 0) {
+                shell_print("evlog watch: rule not found\n");
+                last_exit_code = 1;
+                return;
+            }
+            char buf[128];
+            snprintf(buf, sizeof(buf), "Watch rule %u %s.\n", id,
+                     en ? "enabled" : "disabled");
+            shell_print(buf);
+            last_exit_code = 0;
+            return;
+        }
+        if (strcmp(arg1, "reset") == 0) {
+            if (!arg2 || !*arg2) {
+                shell_print("Usage: evlog watch reset <id>\n");
+                last_exit_code = 1;
+                return;
+            }
+            uint32_t id = (uint32_t)atoi(arg2);
+            if (evlog_watch_reset_stats(id) != 0) {
+                shell_print("evlog watch: rule not found\n");
+                last_exit_code = 1;
+                return;
+            }
+            shell_print("Watch rule stats reset.\n");
+            last_exit_code = 0;
+            return;
+        }
+        shell_print("Usage: evlog watch [list|add|rm|enable|disable|reset]\n");
+        last_exit_code = 1;
+        return;
+    }
+
+    if (strcmp(subcmd, "help") == 0 || strcmp(subcmd, "-h") == 0) {
+        shell_print("Event Log subsystem - persistent structured event log\n");
+        shell_print("Usage: evlog <command> [args]\n\n");
+        shell_print("Commands:\n");
+        shell_print("  list [source] [limit]  List recent events (newest first)\n");
+        shell_print("  sources                List registered event sources\n");
+        shell_print("  write <src> <sev> <eid> <msg>  Write an event\n");
+        shell_print("  clear                  Delete all records\n");
+        shell_print("  stats                  Show statistics\n");
+        shell_print("  prune [keep]           Prune to most recent <keep> records\n");
+        shell_print("  retention [limit]      Show/set retention limit\n");
+        shell_print("  sev <source> <min_sev> Set source min severity\n");
+        shell_print("  export <file> [src] [limit]  Export records to a text file\n");
+        shell_print("  watch list             List watch rules and match stats\n");
+        shell_print("  watch add <name> [src] [min_sev] [eid]  Add a watch rule\n");
+        shell_print("  watch rm <id>          Remove a watch rule\n");
+        shell_print("  watch enable <id>      Enable a watch rule\n");
+        shell_print("  watch disable <id>     Disable a watch rule\n");
+        shell_print("  watch reset <id>       Reset match stats for a rule\n");
+        shell_print("  enable <source>        Enable a source\n");
+        shell_print("  disable <source>       Disable a source\n");
+        shell_print("  register <source>      Register a new source\n");
+        shell_print("\nSeverities: info, warn, error, crit\n");
+        shell_print("Examples:\n");
+        shell_print("  evlog list Kernel 50\n");
+        shell_print("  evlog write System warn 100 low memory\n");
+        shell_print("  evlog retention 500\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    shell_print("Usage: evlog [list|sources|write|clear|stats|prune|retention|sev|enable|disable|register|help]\n");
+    last_exit_code = 1;
+}
+
+/* fim - 文件完整性监视 */
+static const char *fim_state_name(fim_state_t s) {
+    switch (s) {
+        case FIM_STATE_NEW:       return "NEW";
+        case FIM_STATE_UNCHANGED: return "OK";
+        case FIM_STATE_MODIFIED:  return "MOD";
+        case FIM_STATE_DELETED:   return "DEL";
+        case FIM_STATE_ERROR:     return "ERR";
+        default:                  return "?";
+    }
+}
+
+static void cmd_fim(const char *subcmd, const char *arg1, const char *arg2) {
+    (void)arg2;
+    if (!subcmd || !*subcmd || strcmp(subcmd, "list") == 0) {
+        uint32_t count = fim_count();
+        if (count == 0) {
+            shell_print("No files being monitored. Use 'fim add <path>' to add.\n");
+            last_exit_code = 0;
+            return;
+        }
+        fim_entry_t *entries = (fim_entry_t *)kmalloc(sizeof(fim_entry_t) * count);
+        if (!entries) {
+            shell_print("fim: out of memory\n");
+            last_exit_code = 1;
+            return;
+        }
+        int n = fim_list(entries, count);
+        shell_print("State  Path                                    BaseSize  CurSize  BaseMtime  CurMtime\n");
+        shell_print("-----  --------------------------------------  --------  -------  ---------  --------\n");
+        for (int i = 0; i < n; i++) {
+            char line[512];
+            snprintf(line, sizeof(line), "%-5s  %-38s  %8u  %7u  %9u  %8u\n",
+                     fim_state_name(entries[i].last_state),
+                     entries[i].path,
+                     entries[i].baseline_size,
+                     entries[i].current_size,
+                     entries[i].baseline_mtime,
+                     entries[i].current_mtime);
+            shell_print(line);
+        }
+        kfree(entries);
+        char tail[64];
+        snprintf(tail, sizeof(tail), "(%d file%s monitored)\n",
+                 n, n == 1 ? "" : "s");
+        shell_print(tail);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "add") == 0) {
+        if (!arg1 || !*arg1) {
+            shell_print("Usage: fim add <path>\n");
+            last_exit_code = 1;
+            return;
+        }
+        if (fim_add(arg1) != 0) {
+            shell_print("fim: failed to add (path too long or db error)\n");
+            last_exit_code = 1;
+            return;
+        }
+        char buf[320];
+        snprintf(buf, sizeof(buf), "Added watch on '%s'.\n", arg1);
+        shell_print(buf);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "remove") == 0 || strcmp(subcmd, "rm") == 0) {
+        if (!arg1 || !*arg1) {
+            shell_print("Usage: fim remove <path>\n");
+            last_exit_code = 1;
+            return;
+        }
+        if (fim_remove(arg1) != 0) {
+            shell_print("fim: failed to remove\n");
+            last_exit_code = 1;
+            return;
+        }
+        shell_print("Watch removed.\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "scan") == 0) {
+        fim_scan();
+        fim_stats_t s;
+        fim_get_stats(&s);
+        char buf[256];
+        shell_print("File Integrity Scan Results\n");
+        shell_print("--------------------------\n");
+        snprintf(buf, sizeof(buf), "Watched:    %u\n", s.watched);
+        shell_print(buf);
+        snprintf(buf, sizeof(buf), "Unchanged:  %u\n", s.unchanged);
+        shell_print(buf);
+        snprintf(buf, sizeof(buf), "Modified:   %u\n", s.modified);
+        shell_print(buf);
+        snprintf(buf, sizeof(buf), "Added:      %u\n", s.added);
+        shell_print(buf);
+        snprintf(buf, sizeof(buf), "Deleted:    %u\n", s.deleted);
+        shell_print(buf);
+        snprintf(buf, sizeof(buf), "Errors:     %u\n", s.errors);
+        shell_print(buf);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "baseline") == 0) {
+        fim_baseline();
+        shell_print("Baseline reset to current state.\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "clear") == 0) {
+        fim_clear();
+        shell_print("All file integrity watches cleared.\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "stats") == 0) {
+        fim_stats_t s;
+        fim_get_stats(&s);
+        char buf[256];
+        shell_print("File Integrity Monitor Statistics\n");
+        shell_print("---------------------------------\n");
+        snprintf(buf, sizeof(buf), "Watched paths:   %u\n", s.watched);
+        shell_print(buf);
+        snprintf(buf, sizeof(buf), "Total scans:     %u\n", s.total_scans);
+        shell_print(buf);
+        snprintf(buf, sizeof(buf), "Last scan:       tick %u\n", s.last_scan_tick);
+        shell_print(buf);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "help") == 0 || strcmp(subcmd, "-h") == 0) {
+        shell_print("File Integrity Monitor - tracks file metadata changes\n");
+        shell_print("Usage: fim <command> [args]\n\n");
+        shell_print("Commands:\n");
+        shell_print("  list              List monitored files and current state\n");
+        shell_print("  add <path>        Add a file/directory to monitor\n");
+        shell_print("  remove <path>     Remove a file from monitoring\n");
+        shell_print("  scan              Scan all files for changes\n");
+        shell_print("  baseline          Reset baseline to current state\n");
+        shell_print("  clear             Remove all monitored files\n");
+        shell_print("  stats             Show statistics\n");
+        shell_print("\nStates: NEW=added, OK=unchanged, MOD=modified, DEL=deleted, ERR=error\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    shell_print("Usage: fim [list|add|remove|scan|baseline|clear|stats|help]\n");
+    last_exit_code = 1;
+}
+
+/* netmon - 网络监视 */
+static void netmon_print_if(const netmon_if_snapshot_t *s) {
+    char ipbuf[32], maskbuf[32];
+    snprintf(ipbuf, sizeof(ipbuf), "%u.%u.%u.%u",
+             s->ip & 0xFF, (s->ip >> 8) & 0xFF,
+             (s->ip >> 16) & 0xFF, (s->ip >> 24) & 0xFF);
+    snprintf(maskbuf, sizeof(maskbuf), "%u.%u.%u.%u",
+             s->mask & 0xFF, (s->mask >> 8) & 0xFF,
+             (s->mask >> 16) & 0xFF, (s->mask >> 24) & 0xFF);
+    char line[256];
+    snprintf(line, sizeof(line),
+             "%-10s %-3s %-15s %-15s %8u %8u %8u %8u  %5u %5u\n",
+             s->name, s->up ? "UP" : "DN", ipbuf, maskbuf,
+             s->rx_packets, s->tx_packets, s->rx_bytes, s->tx_bytes,
+             s->rx_errors, s->tx_errors);
+    shell_print(line);
+}
+
+static void cmd_netmon(const char *subcmd, const char *arg1, const char *arg2) {
+    (void)arg2;
+    if (!subcmd || !*subcmd || strcmp(subcmd, "list") == 0) {
+        netmon_if_snapshot_t ifs[NETMON_MAX_INTERFACES];
+        uint32_t n = netmon_get_latest(ifs, NETMON_MAX_INTERFACES);
+        if (n == 0) {
+            shell_print("No network interfaces detected.\n");
+            last_exit_code = 0;
+            return;
+        }
+        shell_print("Name       Sts IP               Mask             RxPkt    TxPkt    RxByte   TxByte   RxErr TxErr\n");
+        shell_print("---------- --- --------------- --------------- -------- -------- -------- -------- ----- -----\n");
+        for (uint32_t i = 0; i < n; i++) {
+            netmon_print_if(&ifs[i]);
+        }
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "stats") == 0) {
+        netmon_stats_t s;
+        netmon_get_stats(&s);
+        char buf[256];
+        shell_print("Network Monitor Statistics\n");
+        shell_print("--------------------------\n");
+        snprintf(buf, sizeof(buf), "Total samples:    %u\n", s.total_samples);
+        shell_print(buf);
+        snprintf(buf, sizeof(buf), "Interfaces seen:   %u\n", s.interfaces_seen);
+        shell_print(buf);
+        snprintf(buf, sizeof(buf), "State changes:     %u\n", s.state_changes);
+        shell_print(buf);
+        snprintf(buf, sizeof(buf), "Error alerts:      %u\n", s.error_alerts);
+        shell_print(buf);
+        snprintf(buf, sizeof(buf), "Sample interval:   %u ms\n", s.sample_interval_ms);
+        shell_print(buf);
+        snprintf(buf, sizeof(buf), "Last sample tick:  %llu\n",
+                 (unsigned long long)s.last_sample_tick);
+        shell_print(buf);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "history") == 0) {
+        netmon_sample_t samples[4];
+        uint32_t n = netmon_get_history(samples, 4);
+        if (n == 0) {
+            shell_print("No history samples available.\n");
+            last_exit_code = 0;
+            return;
+        }
+        char buf[128];
+        snprintf(buf, sizeof(buf), "Showing last %u sample(s):\n\n", n);
+        shell_print(buf);
+        for (uint32_t i = 0; i < n; i++) {
+            snprintf(buf, sizeof(buf),
+                     "=== Sample %u (tick %llu, %u interfaces) ===\n",
+                     i + 1, (unsigned long long)samples[i].sample_tick,
+                     samples[i].interface_count);
+            shell_print(buf);
+            for (uint32_t j = 0; j < samples[i].interface_count; j++) {
+                netmon_print_if(&samples[i].interfaces[j]);
+            }
+            shell_print("\n");
+        }
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "sample") == 0) {
+        netmon_sample();
+        shell_print("Manual sample taken.\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "interval") == 0) {
+        if (!arg1 || !*arg1) {
+            netmon_stats_t s;
+            netmon_get_stats(&s);
+            char buf[128];
+            snprintf(buf, sizeof(buf), "Current interval: %u ms (range 1000-60000)\n",
+                     s.sample_interval_ms);
+            shell_print(buf);
+            shell_print("Usage: netmon interval <ms>\n");
+            last_exit_code = 0;
+            return;
+        }
+        uint32_t ms = (uint32_t)atoi(arg1);
+        if (netmon_set_interval(ms) != 0) {
+            shell_print("netmon: invalid interval (must be 1000-60000)\n");
+            last_exit_code = 1;
+            return;
+        }
+        char buf[128];
+        snprintf(buf, sizeof(buf), "Sample interval set to %u ms.\n", ms);
+        shell_print(buf);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "clear") == 0) {
+        netmon_clear_history();
+        shell_print("Network monitor history cleared.\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "help") == 0 || strcmp(subcmd, "-h") == 0) {
+        shell_print("Network Monitor - interface statistics monitoring\n");
+        shell_print("Usage: netmon <command> [args]\n\n");
+        shell_print("Commands:\n");
+        shell_print("  list               List current interface statistics\n");
+        shell_print("  stats              Show monitor statistics\n");
+        shell_print("  history            Show recent sample history\n");
+        shell_print("  sample             Take a manual sample now\n");
+        shell_print("  interval [ms]      Show/set sample interval (1000-60000)\n");
+        shell_print("  clear              Clear history\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    shell_print("Usage: netmon [list|stats|history|sample|interval|clear|help]\n");
+    last_exit_code = 1;
+}
+
+/* ============================================================
+ * sysacct - 系统账户审计桥接命令
+ *   sysacct sessions [open|all]    列出会话
+ *   sysacct audit [event_type]     列出审计事件
+ *   sysacct stats                  显示统计
+ *   sysacct lockout [username]     查看锁定状态
+ *   sysacct unlock <username>       解锁账户
+ *   sysacct unlockall               解锁所有账户
+ *   sysacct reset                   重置统计
+ *   sysacct help
+ * ============================================================ */
+static void cmd_sysacct(const char *subcmd, const char *arg1, const char *arg2) {
+    (void)arg2;
+    if (!subcmd || !*subcmd || strcmp(subcmd, "help") == 0) {
+        shell_print("Usage: sysacct <subcommand> [args]\n");
+        shell_print("  sessions [open|all]   List login sessions\n");
+        shell_print("  audit [event_type]    List audit events\n");
+        shell_print("  stats                  Show security statistics\n");
+        shell_print("  lockout [username]     Show lockout status\n");
+        shell_print("  unlock <username>      Unlock an account\n");
+        shell_print("  unlockall              Unlock all accounts\n");
+        shell_print("  reset                  Reset statistics\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "sessions") == 0) {
+        uint8_t filter = 0;
+        if (arg1 && strcmp(arg1, "open") == 0) filter = SYSACCT_SESS_OPEN;
+        else if (arg1 && strcmp(arg1, "closed") == 0) filter = SYSACCT_SESS_CLOSED;
+
+        sysacct_session_t *sessions = (sysacct_session_t *)kmalloc(sizeof(sysacct_session_t) * 64);
+        if (!sessions) {
+            shell_print("sysacct: out of memory\n");
+            last_exit_code = 1;
+            return;
+        }
+        uint32_t n = sysacct_session_list(sessions, 64, filter);
+        shell_print("SID     UID    USERNAME           LOGIN    LOGOUT   STATE\n");
+        shell_print("------  -----  -----------------  -------  -------  --------\n");
+        for (uint32_t i = 0; i < n; i++) {
+            char line[256];
+            snprintf(line, sizeof(line), "%-6u  %-5u  %-18s  %-7u  %-7u  %s\n",
+                     sessions[i].session_id,
+                     sessions[i].uid,
+                     sessions[i].username,
+                     sessions[i].login_tick,
+                     sessions[i].logout_tick,
+                     sysacct_session_state_name(sessions[i].state));
+            shell_print(line);
+        }
+        char summary[64];
+        snprintf(summary, sizeof(summary), "Total: %u session(s)\n", n);
+        shell_print(summary);
+        kfree(sessions);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "audit") == 0) {
+        uint32_t filter = 0;
+        if (arg1 && *arg1) {
+            filter = (uint32_t)atoi(arg1);
+        }
+        sysacct_audit_t *audits = (sysacct_audit_t *)kmalloc(sizeof(sysacct_audit_t) * 64);
+        if (!audits) {
+            shell_print("sysacct: out of memory\n");
+            last_exit_code = 1;
+            return;
+        }
+        uint32_t n = sysacct_audit_query(audits, 64, filter);
+        shell_print("ID     UID    USERNAME           EVENT              TIMESTAMP  DETAIL\n");
+        shell_print("-----  -----  -----------------  -----------------  ---------  -----------------\n");
+        for (uint32_t i = 0; i < n; i++) {
+            char line[512];
+            snprintf(line, sizeof(line), "%-5u  %-5u  %-18s  %-18s  %-9u  %s\n",
+                     audits[i].id,
+                     audits[i].uid,
+                     audits[i].username,
+                     sysacct_event_name(audits[i].event_type),
+                     audits[i].timestamp,
+                     audits[i].detail);
+            shell_print(line);
+        }
+        char summary[64];
+        snprintf(summary, sizeof(summary), "Total: %u audit record(s)\n", n);
+        shell_print(summary);
+        kfree(audits);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "stats") == 0) {
+        sysacct_stats_t s;
+        sysacct_get_stats(&s);
+        char line[256];
+        shell_print("Security Statistics:\n");
+        snprintf(line, sizeof(line), "  Total logins:     %u\n", s.total_logins);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Failed logins:    %u\n", s.failed_logins);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Active sessions:  %u\n", s.active_sessions);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Total sessions:   %u\n", s.total_sessions);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Locked accounts:  %u\n", s.locked_accounts);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Password changes: %u\n", s.pass_changes);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Sudo uses:        %u\n", s.sudo_uses);
+        shell_print(line);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "lockout") == 0) {
+        if (!arg1 || !*arg1) {
+            shell_print("Usage: sysacct lockout <username>\n");
+            last_exit_code = 1;
+            return;
+        }
+        int locked = user_ext_lockout_is_locked(arg1);
+        char line[128];
+        snprintf(line, sizeof(line), "Account '%s': %s\n", arg1,
+                 locked ? "LOCKED" : "not locked");
+        shell_print(line);
+        user_ext_lockout_print_status(arg1);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "unlock") == 0) {
+        if (!arg1 || !*arg1) {
+            shell_print("Usage: sysacct unlock <username>\n");
+            last_exit_code = 1;
+            return;
+        }
+        int rc = sysacct_lockout_unlock(arg1);
+        if (rc == 0) {
+            shell_print("Account unlocked\n");
+            last_exit_code = 0;
+        } else {
+            shell_print("Failed to unlock account\n");
+            last_exit_code = 1;
+        }
+        return;
+    }
+
+    if (strcmp(subcmd, "unlockall") == 0) {
+        int rc = sysacct_lockout_unlock_all();
+        if (rc == 0) {
+            shell_print("All accounts unlocked\n");
+            last_exit_code = 0;
+        } else {
+            shell_print("Failed to unlock accounts\n");
+            last_exit_code = 1;
+        }
+        return;
+    }
+
+    if (strcmp(subcmd, "reset") == 0) {
+        sysacct_reset_stats();
+        shell_print("Security statistics reset\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    shell_print("Unknown subcommand. Try 'sysacct help'\n");
+    last_exit_code = 1;
+}
+
+/* ============================================================
+ * service - 服务管理器命令
+ *   service list                   列出所有服务
+ *   service register <name> <cmd> [desc]   注册服务
+ *   service unregister <name>     注销服务
+ *   service start <name>          启动服务
+ *   service stop <name>           停止服务
+ *   service restart <name>        重启服务
+ *   service status <name>         显示服务状态
+ *   service enable <name>         启用服务
+ *   service disable <name>        禁用服务
+ *   service autostart <name> <0|1>  设置自启动
+ *   service policy <name> <never|on_failure|always>
+ *   service history                显示启动/停止历史
+ *   service stats                  显示统计
+ *   service startall               启动所有自启动服务
+ *   service stopall                停止所有服务
+ *   service help
+ * ============================================================ */
+static void cmd_service(const char *subcmd, const char *arg1, const char *arg2) {
+    if (!subcmd || !*subcmd || strcmp(subcmd, "help") == 0) {
+        shell_print("Usage: service <subcommand> [args]\n");
+        shell_print("  list                          List all services\n");
+        shell_print("  register <name> <cmd> [desc]  Register a service\n");
+        shell_print("  unregister <name>            Unregister a service\n");
+        shell_print("  start <name>                 Start a service\n");
+        shell_print("  stop <name>                  Stop a service\n");
+        shell_print("  restart <name>               Restart a service\n");
+        shell_print("  status <name>                 Show service status\n");
+        shell_print("  enable/disable <name>        Enable/disable a service\n");
+        shell_print("  autostart <name> <0|1>       Set autostart flag\n");
+        shell_print("  policy <name> <never|on_failure|always>\n");
+        shell_print("  history                      Show start/stop history\n");
+        shell_print("  stats                        Show service statistics\n");
+        shell_print("  startall/stopall             Start/stop all\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "list") == 0) {
+        svcmgr_service_t *list = (svcmgr_service_t *)kmalloc(
+            sizeof(svcmgr_service_t) * SVCMGR_MAX_SERVICES);
+        if (!list) {
+            shell_print("service: out of memory\n");
+            last_exit_code = 1;
+            return;
+        }
+        uint32_t n = svcmgr_list(list, SVCMGR_MAX_SERVICES);
+        shell_print("NAME             STATE      POLICY       AUTOSTART  RESTARTS  CMD\n");
+        shell_print("---------------- ---------- ------------ --------- --------  ----------------\n");
+        for (uint32_t i = 0; i < n; i++) {
+            char line[512];
+            snprintf(line, sizeof(line), "%-16s %-10s %-12s %-9s %-8u  %s\n",
+                     list[i].name,
+                     svcmgr_state_name(list[i].state),
+                     svcmgr_restart_policy_name(list[i].restart_policy),
+                     list[i].autostart ? "yes" : "no",
+                     list[i].restart_count,
+                     list[i].command);
+            shell_print(line);
+        }
+        char summary[64];
+        snprintf(summary, sizeof(summary), "Total: %u service(s)\n", n);
+        shell_print(summary);
+        kfree(list);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "register") == 0) {
+        /* arg1=name, arg2=command (rest of line after name) */
+        if (!arg1 || !*arg1 || !arg2 || !*arg2) {
+            shell_print("Usage: service register <name> <command> [description...]\n");
+            last_exit_code = 1;
+            return;
+        }
+        /* arg2 是命令+描述，第一个 token 是 command，剩下是 description */
+        char cmd_buf[SVCMGR_MAX_CMD];
+        strncpy(cmd_buf, arg2, sizeof(cmd_buf) - 1);
+        cmd_buf[sizeof(cmd_buf) - 1] = '\0';
+        /* 取第一个 token 作为 command，剩下的作为 description */
+        char *cmd = cmd_buf;
+        char *desc = NULL;
+        char *p = cmd_buf;
+        while (*p && *p != ' ') p++;
+        if (*p) {
+            *p = '\0';
+            p++;
+            while (*p == ' ') p++;
+            if (*p) desc = p;
+        }
+        int rc = svcmgr_register(arg1, desc ? desc : "", cmd, 0, SVCMGR_RESTART_NEVER);
+        if (rc == 0) {
+            shell_print("Service registered\n");
+            last_exit_code = 0;
+        } else {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "Failed to register service (rc=%d)\n", rc);
+            shell_print(buf);
+            last_exit_code = 1;
+        }
+        return;
+    }
+
+    if (strcmp(subcmd, "unregister") == 0) {
+        if (!arg1 || !*arg1) {
+            shell_print("Usage: service unregister <name>\n");
+            last_exit_code = 1;
+            return;
+        }
+        int rc = svcmgr_unregister(arg1);
+        if (rc == 0) {
+            shell_print("Service unregistered\n");
+            last_exit_code = 0;
+        } else {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "Failed (rc=%d). Service may not exist or is running.\n", rc);
+            shell_print(buf);
+            last_exit_code = 1;
+        }
+        return;
+    }
+
+    if (strcmp(subcmd, "start") == 0) {
+        if (!arg1 || !*arg1) {
+            shell_print("Usage: service start <name>\n");
+            last_exit_code = 1;
+            return;
+        }
+        int rc = svcmgr_start(arg1);
+        if (rc == 0) {
+            shell_print("Service started\n");
+            last_exit_code = 0;
+        } else {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "Failed to start service (rc=%d)\n", rc);
+            shell_print(buf);
+            last_exit_code = 1;
+        }
+        return;
+    }
+
+    if (strcmp(subcmd, "stop") == 0) {
+        if (!arg1 || !*arg1) {
+            shell_print("Usage: service stop <name>\n");
+            last_exit_code = 1;
+            return;
+        }
+        int rc = svcmgr_stop(arg1);
+        if (rc == 0) {
+            shell_print("Service stopped\n");
+            last_exit_code = 0;
+        } else {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "Failed to stop service (rc=%d)\n", rc);
+            shell_print(buf);
+            last_exit_code = 1;
+        }
+        return;
+    }
+
+    if (strcmp(subcmd, "restart") == 0) {
+        if (!arg1 || !*arg1) {
+            shell_print("Usage: service restart <name>\n");
+            last_exit_code = 1;
+            return;
+        }
+        int rc = svcmgr_restart(arg1);
+        if (rc == 0) {
+            shell_print("Service restarted\n");
+            last_exit_code = 0;
+        } else {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "Failed to restart service (rc=%d)\n", rc);
+            shell_print(buf);
+            last_exit_code = 1;
+        }
+        return;
+    }
+
+    if (strcmp(subcmd, "status") == 0) {
+        if (!arg1 || !*arg1) {
+            shell_print("Usage: service status <name>\n");
+            last_exit_code = 1;
+            return;
+        }
+        svcmgr_service_t *s = svcmgr_find(arg1);
+        if (!s) {
+            shell_print("Service not found\n");
+            last_exit_code = 1;
+            return;
+        }
+        char line[256];
+        shell_print("Service details:\n");
+        snprintf(line, sizeof(line), "  Name:          %s\n", s->name);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Description:   %s\n", s->description);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Command:       %s\n", s->command);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  State:         %s\n", svcmgr_state_name(s->state));
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Restart policy: %s\n",
+                 svcmgr_restart_policy_name(s->restart_policy));
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Autostart:     %s\n", s->autostart ? "yes" : "no");
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Enabled:       %s\n", s->enabled ? "yes" : "no");
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Start tick:    %u\n", s->start_tick);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Stop tick:     %u\n", s->stop_tick);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Restart count: %u\n", s->restart_count);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Failure count:  %u\n", s->failure_count);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Run count:     %u\n", s->run_count);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Last exit:     %d\n", s->last_exit_code);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Dependencies:  %u\n", s->dep_count);
+        shell_print(line);
+        for (uint8_t i = 0; i < s->dep_count; i++) {
+            snprintf(line, sizeof(line), "    - %s\n", s->dependencies[i]);
+            shell_print(line);
+        }
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "enable") == 0 || strcmp(subcmd, "disable") == 0) {
+        if (!arg1 || !*arg1) {
+            shell_print("Usage: service enable|disable <name>\n");
+            last_exit_code = 1;
+            return;
+        }
+        int rc = svcmgr_set_enabled(arg1, subcmd[0] == 'e');
+        if (rc == 0) {
+            shell_print(subcmd[0] == 'e' ? "Service enabled\n" : "Service disabled\n");
+            last_exit_code = 0;
+        } else {
+            shell_print("Failed\n");
+            last_exit_code = 1;
+        }
+        return;
+    }
+
+    if (strcmp(subcmd, "autostart") == 0) {
+        if (!arg1 || !*arg1 || !arg2 || !*arg2) {
+            shell_print("Usage: service autostart <name> <0|1>\n");
+            last_exit_code = 1;
+            return;
+        }
+        int v = atoi(arg2);
+        int rc = svcmgr_set_autostart(arg1, v ? 1 : 0);
+        if (rc == 0) {
+            shell_print("Autostart updated\n");
+            last_exit_code = 0;
+        } else {
+            shell_print("Failed\n");
+            last_exit_code = 1;
+        }
+        return;
+    }
+
+    if (strcmp(subcmd, "policy") == 0) {
+        if (!arg1 || !*arg1 || !arg2 || !*arg2) {
+            shell_print("Usage: service policy <name> <never|on_failure|always>\n");
+            last_exit_code = 1;
+            return;
+        }
+        svcmgr_restart_policy_t p;
+        if (strcmp(arg2, "never") == 0) p = SVCMGR_RESTART_NEVER;
+        else if (strcmp(arg2, "on_failure") == 0) p = SVCMGR_RESTART_ON_FAILURE;
+        else if (strcmp(arg2, "always") == 0) p = SVCMGR_RESTART_ALWAYS;
+        else {
+            shell_print("Invalid policy. Use: never | on_failure | always\n");
+            last_exit_code = 1;
+            return;
+        }
+        int rc = svcmgr_set_restart_policy(arg1, p);
+        if (rc == 0) {
+            shell_print("Restart policy updated\n");
+            last_exit_code = 0;
+        } else {
+            shell_print("Failed\n");
+            last_exit_code = 1;
+        }
+        return;
+    }
+
+    if (strcmp(subcmd, "history") == 0) {
+        svcmgr_history_t *hist = (svcmgr_history_t *)kmalloc(
+            sizeof(svcmgr_history_t) * SVCMGR_HISTORY_SIZE);
+        if (!hist) {
+            shell_print("service: out of memory\n");
+            last_exit_code = 1;
+            return;
+        }
+        uint32_t n = svcmgr_history_list(hist, SVCMGR_HISTORY_SIZE);
+        shell_print("SERVICE          START     STOP      EXIT  STATE\n");
+        shell_print("---------------- --------- --------- ----- --------\n");
+        for (uint32_t i = 0; i < n; i++) {
+            char line[256];
+            snprintf(line, sizeof(line), "%-16s %-9u %-9u %-5d %s\n",
+                     hist[i].service_name,
+                     hist[i].start_tick,
+                     hist[i].stop_tick,
+                     hist[i].exit_code,
+                     svcmgr_state_name(hist[i].state));
+            shell_print(line);
+        }
+        char summary[64];
+        snprintf(summary, sizeof(summary), "Total: %u record(s)\n", n);
+        shell_print(summary);
+        kfree(hist);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "stats") == 0) {
+        svcmgr_stats_t s;
+        svcmgr_get_stats(&s);
+        char line[128];
+        shell_print("Service Statistics:\n");
+        snprintf(line, sizeof(line), "  Total services: %u\n", s.total_services);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Running:         %u\n", s.running);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Stopped:         %u\n", s.stopped);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Failed:          %u\n", s.failed);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Total starts:    %u\n", s.total_starts);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Total stops:     %u\n", s.total_stops);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Total restarts:  %u\n", s.total_restarts);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Total failures:  %u\n", s.total_failures);
+        shell_print(line);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "startall") == 0) {
+        int n = svcmgr_start_all();
+        char buf[64];
+        snprintf(buf, sizeof(buf), "Started %d autostart service(s)\n", n);
+        shell_print(buf);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "stopall") == 0) {
+        int n = svcmgr_stop_all();
+        char buf[64];
+        snprintf(buf, sizeof(buf), "Stopped %d service(s)\n", n);
+        shell_print(buf);
+        last_exit_code = 0;
+        return;
+    }
+
+    shell_print("Unknown subcommand. Try 'service help'\n");
+    last_exit_code = 1;
+}
+
+/* ============================================================
+ * taskmgr - 任务管理器命令
+ *   taskmgr list                    列出所有进程
+ *   taskmgr top [n]                 Top-N CPU 占用（默认 10）
+ *   taskmgr summary                 系统汇总
+ *   taskmgr kill <pid> [reason]     终止进程（带审计）
+ *   taskmgr killname <name> [reason] 按名称终止
+ *   taskmgr killhistory              显示 kill 历史
+ *   taskmgr snapshot                保存快照到 FunDB
+ *   taskmgr help
+ * ============================================================ */
+static void cmd_taskmgr(const char *subcmd, const char *arg1, const char *arg2) {
+    (void)arg2;
+    if (!subcmd || !*subcmd || strcmp(subcmd, "help") == 0) {
+        shell_print("Usage: taskmgr <subcommand> [args]\n");
+        shell_print("  list                       List all processes\n");
+        shell_print("  top [n]                    Top-N CPU consumers\n");
+        shell_print("  summary                    Show system summary\n");
+        shell_print("  kill <pid> [reason]        Kill process (audited)\n");
+        shell_print("  killname <name> [reason]   Kill by name\n");
+        shell_print("  killhistory                Show kill history\n");
+        shell_print("  snapshot                   Save snapshot to FunDB\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "list") == 0) {
+        taskmgr_proc_t *procs = (taskmgr_proc_t *)kmalloc(
+            sizeof(taskmgr_proc_t) * TASKMGR_MAX_PROCS);
+        if (!procs) {
+            shell_print("taskmgr: out of memory\n");
+            last_exit_code = 1;
+            return;
+        }
+        uint32_t n = taskmgr_list_procs(procs, TASKMGR_MAX_PROCS);
+        shell_print("PID    PPID   NAME                STATE      TICKS   CPU   PRIO  NICE  TYPE\n");
+        shell_print("-----  -----  ------------------  ---------- ------- ----- ----- -----  ----\n");
+        for (uint32_t i = 0; i < n; i++) {
+            char line[256];
+            snprintf(line, sizeof(line), "%-5d  %-5d  %-18s  %-10s %-7u %-5u %-5u %-5u  %s\n",
+                     procs[i].pid,
+                     procs[i].parent_pid,
+                     procs[i].name,
+                     taskmgr_state_name(procs[i].state),
+                     procs[i].ticks_used,
+                     procs[i].cpu_time,
+                     procs[i].priority,
+                     procs[i].nice,
+                     procs[i].is_kernel ? "KERN" : "USER");
+            shell_print(line);
+        }
+        char summary[64];
+        snprintf(summary, sizeof(summary), "Total: %u process(es)\n", n);
+        shell_print(summary);
+        kfree(procs);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "top") == 0) {
+        uint32_t limit = 10;
+        if (arg1 && *arg1) limit = (uint32_t)atoi(arg1);
+        if (limit == 0 || limit > 50) limit = 10;
+
+        taskmgr_proc_t *procs = (taskmgr_proc_t *)kmalloc(
+            sizeof(taskmgr_proc_t) * limit);
+        if (!procs) {
+            shell_print("taskmgr: out of memory\n");
+            last_exit_code = 1;
+            return;
+        }
+        uint32_t n = taskmgr_get_top_cpu(procs, limit);
+        shell_print("Rank  PID    NAME                STATE      TICKS   PRIO  TYPE\n");
+        shell_print("-----  -----  ------------------  ---------- ------- ----- ----\n");
+        for (uint32_t i = 0; i < n; i++) {
+            char line[256];
+            snprintf(line, sizeof(line), "%-5u  %-5d  %-18s  %-10s %-7u %-5u %s\n",
+                     i + 1,
+                     procs[i].pid,
+                     procs[i].name,
+                     taskmgr_state_name(procs[i].state),
+                     procs[i].ticks_used,
+                     procs[i].priority,
+                     procs[i].is_kernel ? "KERN" : "USER");
+            shell_print(line);
+        }
+        kfree(procs);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "summary") == 0) {
+        taskmgr_summary_t s;
+        taskmgr_get_summary(&s);
+        char line[256];
+        shell_print("System Summary:\n");
+        snprintf(line, sizeof(line), "  Total processes: %u (kernel=%u, user=%u)\n",
+                 s.total_procs, s.kernel_procs, s.user_procs);
+        shell_print(line);
+        snprintf(line, sizeof(line), "    Running=%u  Ready=%u  Blocked=%u  Zombie=%u\n",
+                 s.running, s.ready, s.blocked, s.zombie);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Total threads: %u\n", s.total_threads);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Total ticks:    %llu\n", s.total_ticks);
+        shell_print(line);
+        snprintf(line, sizeof(line), "    User=%llu  Kernel=%llu  Idle=%llu\n",
+                 s.user_ticks, s.kernel_ticks, s.idle_ticks);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Context switches: %u\n", s.context_switches);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Memory: %u KB total / %u KB used / %u KB free\n",
+                 s.total_memory_kb, s.used_memory_kb, s.free_memory_kb);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  CPU load: %u%%\n", s.cpu_load_percent);
+        shell_print(line);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "kill") == 0) {
+        if (!arg1 || !*arg1) {
+            shell_print("Usage: taskmgr kill <pid> [reason]\n");
+            last_exit_code = 1;
+            return;
+        }
+        pid_t pid = (pid_t)atoi(arg1);
+        int rc = taskmgr_kill(pid, arg2 ? arg2 : "shell taskmgr kill");
+        if (rc == 0) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "Killed process %d\n", pid);
+            shell_print(buf);
+            last_exit_code = 0;
+        } else {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "Failed to kill process (rc=%d)\n", rc);
+            shell_print(buf);
+            last_exit_code = 1;
+        }
+        return;
+    }
+
+    if (strcmp(subcmd, "killname") == 0) {
+        if (!arg1 || !*arg1) {
+            shell_print("Usage: taskmgr killname <name> [reason]\n");
+            last_exit_code = 1;
+            return;
+        }
+        int n = taskmgr_kill_by_name(arg1, arg2 ? arg2 : "shell taskmgr killname");
+        if (n > 0) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "Killed %d process(es) named '%s'\n", n, arg1);
+            shell_print(buf);
+            last_exit_code = 0;
+        } else {
+            shell_print("No matching processes killed\n");
+            last_exit_code = 1;
+        }
+        return;
+    }
+
+    if (strcmp(subcmd, "killhistory") == 0) {
+        taskmgr_kill_record_t *hist = (taskmgr_kill_record_t *)kmalloc(
+            sizeof(taskmgr_kill_record_t) * TASKMGR_KILL_HISTORY);
+        if (!hist) {
+            shell_print("taskmgr: out of memory\n");
+            last_exit_code = 1;
+            return;
+        }
+        uint32_t n = taskmgr_kill_history(hist, TASKMGR_KILL_HISTORY);
+        shell_print("PID    NAME                REASON                       TIMESTAMP  RESULT\n");
+        shell_print("-----  ------------------  ---------------------------  ---------  ------\n");
+        for (uint32_t i = 0; i < n; i++) {
+            char line[256];
+            snprintf(line, sizeof(line), "%-5d  %-18s  %-28s %-9u  %s\n",
+                     hist[i].pid,
+                     hist[i].name,
+                     hist[i].reason,
+                     hist[i].timestamp,
+                     hist[i].success ? "OK" : "FAIL");
+            shell_print(line);
+        }
+        char summary[64];
+        snprintf(summary, sizeof(summary), "Total: %u record(s)\n", n);
+        shell_print(summary);
+        kfree(hist);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "snapshot") == 0) {
+        int rc = taskmgr_save_snapshot();
+        if (rc == 0) {
+            shell_print("Snapshot saved to FunDB\n");
+            last_exit_code = 0;
+        } else {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "Failed to save snapshot (rc=%d)\n", rc);
+            shell_print(buf);
+            last_exit_code = 1;
+        }
+        return;
+    }
+
+    shell_print("Unknown subcommand. Try 'taskmgr help'\n");
+    last_exit_code = 1;
+}
+
+/* ============================================================
+ * sysreport - 系统报告生成命令
+ *   sysreport [path]   生成系统报告并写入文件
+ * ============================================================ */
+static void cmd_sysreport(const char *arg) {
+    const char *path = (arg && *arg) ? arg : NULL;
+    int n = sysreport_generate(path);
+    if (n > 0) {
+        char buf[256];
+        if (path) {
+            snprintf(buf, sizeof(buf), "System report written to %s (%d bytes)\n", path, n);
+        } else {
+            snprintf(buf, sizeof(buf), "System report generated (%d bytes) in /var/crash/\n", n);
+        }
+        shell_print(buf);
+        last_exit_code = 0;
+    } else {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "Failed to generate system report (rc=%d)\n", n);
+        shell_print(buf);
+        last_exit_code = 1;
+    }
+}
+
+/* ============================================================
+ * ipc - IPC 子系统命令（msg + shm + sem）
+ *   ipc sem list                      列出信号量集
+ *   ipc sem create <key> <nsems>      创建信号量集
+ *   ipc sem getval <semid> <semnum>   获取值
+ *   ipc sem setval <semid> <semnum> <val>  设置值
+ *   ipc sem op <semid> <semnum> <op>  执行 semop
+ *   ipc sem remove <semid>            删除信号量集
+ *   ipc sem stats                     显示统计
+ *   ipc help
+ * ============================================================ */
+static void cmd_ipc(const char *subcmd, const char *arg1, const char *arg2) {
+    (void)arg2;
+    if (!subcmd || !*subcmd || strcmp(subcmd, "help") == 0) {
+        shell_print("Usage: ipc <subcommand> [args]\n");
+        shell_print("  sem list                       List semaphore sets\n");
+        shell_print("  sem create <key> <nsems>       Create a semaphore set\n");
+        shell_print("  sem getval <semid> <semnum>    Get semaphore value\n");
+        shell_print("  sem setval <semid> <semnum> <val>\n");
+        shell_print("  sem op <semid> <semnum> <op>   Perform semop (P=-1, V=+1)\n");
+        shell_print("  sem remove <semid>             Remove a semaphore set\n");
+        shell_print("  sem stats                      Show IPC statistics\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "sem") == 0) {
+        /* arg1 = sem 子命令 */
+        if (!arg1 || !*arg1) {
+            shell_print("Usage: ipc sem <list|create|getval|setval|op|remove|stats>\n");
+            last_exit_code = 1;
+            return;
+        }
+
+        if (strcmp(arg1, "list") == 0) {
+            semid_ds_t *sets = (semid_ds_t *)kmalloc(sizeof(semid_ds_t) * IPC_SEM_MAX_SETS);
+            if (!sets) {
+                shell_print("ipc: out of memory\n");
+                last_exit_code = 1;
+                return;
+            }
+            uint32_t n = ipc_sem_list(sets, IPC_SEM_MAX_SETS);
+            shell_print("SEMID  KEY     NSEMS  OWNER  CTIME    OTIME\n");
+            shell_print("-----  -------  -----  -----  -------- --------\n");
+            for (uint32_t i = 0; i < n; i++) {
+                char line[256];
+                snprintf(line, sizeof(line), "%-5u  %-7d  %-5u  %-5d  %-8u %-8u\n",
+                         i, sets[i].key, sets[i].nsems, sets[i].owner,
+                         sets[i].ctime, sets[i].otime);
+                shell_print(line);
+            }
+            char summary[64];
+            snprintf(summary, sizeof(summary), "Total: %u set(s)\n", n);
+            shell_print(summary);
+            kfree(sets);
+            last_exit_code = 0;
+            return;
+        }
+
+        if (strcmp(arg1, "create") == 0) {
+            /* arg2 = "key nsems" */
+            if (!arg2 || !*arg2) {
+                shell_print("Usage: ipc sem create <key> <nsems>\n");
+                last_exit_code = 1;
+                return;
+            }
+            int key = 0, nsems = 1;
+            /* 解析两个数字 */
+            const char *p = arg2;
+            while (*p && *p != ' ') p++;
+            if (*p) {
+                char numbuf[16];
+                uint32_t len = (uint32_t)(p - arg2);
+                if (len >= sizeof(numbuf)) len = sizeof(numbuf) - 1;
+                memcpy(numbuf, arg2, len);
+                numbuf[len] = '\0';
+                key = atoi(numbuf);
+                p++;
+                while (*p == ' ') p++;
+                nsems = atoi(p);
+            } else {
+                key = atoi(arg2);
+            }
+            int semid = ipc_semget(key, nsems, 0);
+            if (semid >= 0) {
+                char buf[64];
+                snprintf(buf, sizeof(buf), "Created semid=%d (key=%d nsems=%d)\n",
+                         semid, key, nsems);
+                shell_print(buf);
+                last_exit_code = 0;
+            } else {
+                char buf[64];
+                snprintf(buf, sizeof(buf), "Failed to create (rc=%d)\n", semid);
+                shell_print(buf);
+                last_exit_code = 1;
+            }
+            return;
+        }
+
+        if (strcmp(arg1, "getval") == 0) {
+            if (!arg2 || !*arg2) {
+                shell_print("Usage: ipc sem getval <semid> <semnum>\n");
+                last_exit_code = 1;
+                return;
+            }
+            int semid = 0, semnum = 0;
+            const char *p = arg2;
+            while (*p && *p != ' ') p++;
+            if (*p) {
+                char numbuf[16];
+                uint32_t len = (uint32_t)(p - arg2);
+                if (len >= sizeof(numbuf)) len = sizeof(numbuf) - 1;
+                memcpy(numbuf, arg2, len);
+                numbuf[len] = '\0';
+                semid = atoi(numbuf);
+                p++;
+                while (*p == ' ') p++;
+                semnum = atoi(p);
+            } else {
+                semid = atoi(arg2);
+            }
+            int val = ipc_semctl(semid, semnum, SEM_GETVAL, NULL);
+            char buf[64];
+            snprintf(buf, sizeof(buf), "semid=%d semnum=%d value=%d\n",
+                     semid, semnum, val);
+            shell_print(buf);
+            last_exit_code = val >= 0 ? 0 : 1;
+            return;
+        }
+
+        if (strcmp(arg1, "setval") == 0) {
+            if (!arg2 || !*arg2) {
+                shell_print("Usage: ipc sem setval <semid> <semnum> <val>\n");
+                last_exit_code = 1;
+                return;
+            }
+            int semid = 0, semnum = 0, val = 0;
+            int parsed = sscanf(arg2, "%d %d %d", &semid, &semnum, &val);
+            if (parsed < 3) {
+                shell_print("Invalid args\n");
+                last_exit_code = 1;
+                return;
+            }
+            int rc = ipc_semctl(semid, semnum, SEM_SETVAL, &val);
+            if (rc == 0) {
+                shell_print("Value set\n");
+                last_exit_code = 0;
+            } else {
+                shell_print("Failed\n");
+                last_exit_code = 1;
+            }
+            return;
+        }
+
+        if (strcmp(arg1, "op") == 0) {
+            if (!arg2 || !*arg2) {
+                shell_print("Usage: ipc sem op <semid> <semnum> <op>\n");
+                last_exit_code = 1;
+                return;
+            }
+            int semid = 0, semnum = 0, op = 0;
+            int parsed = sscanf(arg2, "%d %d %d", &semid, &semnum, &op);
+            if (parsed < 3) {
+                shell_print("Invalid args\n");
+                last_exit_code = 1;
+                return;
+            }
+            sembuf_t sb;
+            sb.sem_num = (uint16_t)semnum;
+            sb.sem_op = (int16_t)op;
+            sb.sem_flg = 0;
+            int rc = ipc_semop(semid, &sb, 1);
+            if (rc == 0) {
+                shell_print("semop succeeded\n");
+                last_exit_code = 0;
+            } else {
+                char buf[64];
+                snprintf(buf, sizeof(buf), "semop failed (rc=%d)\n", rc);
+                shell_print(buf);
+                last_exit_code = 1;
+            }
+            return;
+        }
+
+        if (strcmp(arg1, "remove") == 0) {
+            if (!arg2 || !*arg2) {
+                shell_print("Usage: ipc sem remove <semid>\n");
+                last_exit_code = 1;
+                return;
+            }
+            int semid = atoi(arg2);
+            int rc = ipc_semctl(semid, 0, SEM_RMID, NULL);
+            if (rc == 0) {
+                shell_print("Removed\n");
+                last_exit_code = 0;
+            } else {
+                shell_print("Failed\n");
+                last_exit_code = 1;
+            }
+            return;
+        }
+
+        if (strcmp(arg1, "stats") == 0) {
+            sem_stats_t s;
+            ipc_sem_get_stats(&s);
+            char line[128];
+            shell_print("IPC Semaphore Statistics:\n");
+            snprintf(line, sizeof(line), "  Total sets:    %u\n", s.total_sets);
+            shell_print(line);
+            snprintf(line, sizeof(line), "  Total sems:    %u\n", s.total_sems);
+            shell_print(line);
+            snprintf(line, sizeof(line), "  Total ops:     %u\n", s.total_ops);
+            shell_print(line);
+            snprintf(line, sizeof(line), "  Total blocks:  %u\n", s.total_blocks);
+            shell_print(line);
+            snprintf(line, sizeof(line), "  Total wakeups: %u\n", s.total_wakeups);
+            shell_print(line);
+            snprintf(line, sizeof(line), "  Total undo:    %u\n", s.total_undo_ops);
+            shell_print(line);
+            last_exit_code = 0;
+            return;
+        }
+
+        shell_print("Unknown sem subcommand. Try 'ipc help'\n");
+        last_exit_code = 1;
+        return;
+    }
+
+    shell_print("Unknown subcommand. Try 'ipc help'\n");
+    last_exit_code = 1;
+}
+
+/* ============================================================
+ * sigstat - 信号诊断命令
+ *   sigstat list                     列出各信号统计
+ *   sigstat history                  显示最近发送记录
+ *   sigstat send <pid> <signo> [reason]  发送信号（带审计）
+ *   sigstat reset                    重置统计
+ *   sigstat help
+ * ============================================================ */
+static void cmd_sigstat(const char *subcmd, const char *arg1, const char *arg2) {
+    if (!subcmd || !*subcmd || strcmp(subcmd, "help") == 0) {
+        shell_print("Usage: sigstat <subcommand> [args]\n");
+        shell_print("  list                          List signal statistics\n");
+        shell_print("  history                       Show recent signal records\n");
+        shell_print("  send <pid> <signo> [reason]   Send signal (audited)\n");
+        shell_print("  reset                         Reset statistics\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "list") == 0) {
+        sigdiag_stat_t s;
+        sigdiag_get_stats(&s);
+        shell_print("SIGNO    NAME       SENDS  DELIVERS  DROPS  IGN  DEFAULT USR\n");
+        shell_print("-------  ---------  -----  --------  -----  ---  ------- ---\n");
+        for (int i = 1; i < NSIG; i++) {
+            if (s.sends[i] == 0 && s.delivers[i] == 0 && s.drops[i] == 0) continue;
+            char line[256];
+            snprintf(line, sizeof(line), "%-7d  %-9s  %-5u  %-8u  %-5u  %-3u  %-7u %-3u\n",
+                     i, sigdiag_signal_name(i),
+                     s.sends[i], s.delivers[i], s.drops[i],
+                     s.ignored[i], s.default_actions[i], s.user_handlers[i]);
+            shell_print(line);
+        }
+        char summary[128];
+        snprintf(summary, sizeof(summary),
+                 "Totals: sends=%u delivers=%u drops=%u\n",
+                 s.total_sends, s.total_delivers, s.total_drops);
+        shell_print(summary);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "history") == 0) {
+        sigdiag_record_t *recs = (sigdiag_record_t *)kmalloc(
+            sizeof(sigdiag_record_t) * SIGDIAG_HISTORY_SIZE);
+        if (!recs) {
+            shell_print("sigstat: out of memory\n");
+            last_exit_code = 1;
+            return;
+        }
+        uint32_t n = sigdiag_history(recs, SIGDIAG_HISTORY_SIZE);
+        shell_print("ID     SENDER  TARGET  SIGNO  NAME       RESULT  TIMESTAMP  REASON\n");
+        shell_print("-----  ------  ------  -----  ---------  ------  ---------  ----------------\n");
+        for (uint32_t i = 0; i < n; i++) {
+            char line[256];
+            snprintf(line, sizeof(line), "%-5u  %-6d  %-6d  %-5d  %-9s  %-6s  %-9u  %s\n",
+                     recs[i].id,
+                     recs[i].sender,
+                     recs[i].target,
+                     recs[i].signo,
+                     sigdiag_signal_name(recs[i].signo),
+                     recs[i].result == 0 ? "OK" : "FAIL",
+                     recs[i].timestamp,
+                     recs[i].reason);
+            shell_print(line);
+        }
+        char summary[64];
+        snprintf(summary, sizeof(summary), "Total: %u record(s)\n", n);
+        shell_print(summary);
+        kfree(recs);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "send") == 0) {
+        if (!arg1 || !*arg1) {
+            shell_print("Usage: sigstat send <pid> <signo> [reason]\n");
+            last_exit_code = 1;
+            return;
+        }
+        /* arg1=pid, arg2="signo [reason]" */
+        pid_t pid = (pid_t)atoi(arg1);
+        if (!arg2 || !*arg2) {
+            shell_print("Usage: sigstat send <pid> <signo> [reason]\n");
+            last_exit_code = 1;
+            return;
+        }
+        int signo = 0;
+        const char *reason = "sigstat send";
+        const char *p = arg2;
+        while (*p && *p != ' ') p++;
+        if (*p) {
+            char numbuf[16];
+            uint32_t len = (uint32_t)(p - arg2);
+            if (len >= sizeof(numbuf)) len = sizeof(numbuf) - 1;
+            memcpy(numbuf, arg2, len);
+            numbuf[len] = '\0';
+            signo = atoi(numbuf);
+            p++;
+            while (*p == ' ') p++;
+            if (*p) reason = p;
+        } else {
+            signo = atoi(arg2);
+        }
+
+        /* 调用既有 signal.c 的 kill */
+        int rc = kill(pid, signo);
+        /* 记录到诊断层 */
+        pid_t sender = 0; /* 简化：当前 shell pid */
+        sigdiag_record_send(sender, pid, signo, rc, reason);
+        if (rc == 0) {
+            char buf[128];
+            snprintf(buf, sizeof(buf), "Sent signal %d to pid %d\n", signo, pid);
+            shell_print(buf);
+            last_exit_code = 0;
+        } else {
+            char buf[128];
+            snprintf(buf, sizeof(buf), "Failed to send signal (rc=%d)\n", rc);
+            shell_print(buf);
+            last_exit_code = 1;
+        }
+        return;
+    }
+
+    if (strcmp(subcmd, "reset") == 0) {
+        sigdiag_reset_stats();
+        shell_print("Signal statistics reset\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    shell_print("Unknown subcommand. Try 'sigstat help'\n");
+    last_exit_code = 1;
+}
+
+/* ============================================================
+ * quota_ext - 配额持久化扩展命令
+ *   quota sync                       同步内存表到 FunDB
+ *   quota load                       从 FunDB 加载到内存表
+ *   quota save user <uid>            保存指定用户配额到 FunDB
+ *   quota save group <gid>           保存指定组配额到 FunDB
+ *   quota query user <uid>           从 FunDB 查询用户配额
+ *   quota query group <gid>          从 FunDB 查询组配额
+ *   quota help
+ * ============================================================ */
+static void cmd_quota_ext(const char *subcmd, const char *arg1, const char *arg2) {
+    (void)arg2;
+    if (!subcmd || !*subcmd || strcmp(subcmd, "help") == 0) {
+        shell_print("Usage: quota <subcommand> [args] (extension layer)\n");
+        shell_print("  sync                       Sync in-memory quotas to FunDB\n");
+        shell_print("  load                       Load quotas from FunDB to memory\n");
+        shell_print("  save user <uid>            Save specific user quota\n");
+        shell_print("  save group <gid>           Save specific group quota\n");
+        shell_print("  query user <uid>           Query user quota from FunDB\n");
+        shell_print("  query group <gid>          Query group quota from FunDB\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "sync") == 0) {
+        int n = quota_db_sync();
+        char buf[64];
+        snprintf(buf, sizeof(buf), "Synced %d quota entries\n", n);
+        shell_print(buf);
+        last_exit_code = n >= 0 ? 0 : 1;
+        return;
+    }
+
+    if (strcmp(subcmd, "load") == 0) {
+        int n = quota_db_load_all();
+        char buf[64];
+        snprintf(buf, sizeof(buf), "Loaded %d quota entries\n", n);
+        shell_print(buf);
+        last_exit_code = n >= 0 ? 0 : 1;
+        return;
+    }
+
+    if (strcmp(subcmd, "save") == 0) {
+        if (!arg1 || !*arg1) {
+            shell_print("Usage: quota save <user|group> <id>\n");
+            last_exit_code = 1;
+            return;
+        }
+        /* arg2 = "uid" */
+        if (!arg2 || !*arg2) {
+            shell_print("Usage: quota save <user|group> <id>\n");
+            last_exit_code = 1;
+            return;
+        }
+        uint32_t id = (uint32_t)atoi(arg2);
+        int rc;
+        if (strcmp(arg1, "user") == 0) {
+            quota_entry_t *e = quota_get_user(id);
+            if (!e) {
+                shell_print("User quota not found in memory\n");
+                last_exit_code = 1;
+                return;
+            }
+            rc = quota_db_save_user(e);
+        } else if (strcmp(arg1, "group") == 0) {
+            quota_entry_t *e = quota_get_group(id);
+            if (!e) {
+                shell_print("Group quota not found in memory\n");
+                last_exit_code = 1;
+                return;
+            }
+            rc = quota_db_save_group(e);
+        } else {
+            shell_print("Invalid type. Use 'user' or 'group'\n");
+            last_exit_code = 1;
+            return;
+        }
+        if (rc == 0) {
+            shell_print("Saved to FunDB\n");
+            last_exit_code = 0;
+        } else {
+            shell_print("Failed to save\n");
+            last_exit_code = 1;
+        }
+        return;
+    }
+
+    if (strcmp(subcmd, "query") == 0 || strcmp(subcmd, "querydb") == 0) {
+        if (!arg1 || !*arg1 || !arg2 || !*arg2) {
+            shell_print("Usage: quota query <user|group> <id>\n");
+            last_exit_code = 1;
+            return;
+        }
+        uint32_t id = (uint32_t)atoi(arg2);
+        quota_entry_t e;
+        int rc;
+        if (strcmp(arg1, "user") == 0) {
+            rc = quota_db_query_user(id, &e);
+        } else if (strcmp(arg1, "group") == 0) {
+            rc = quota_db_query_group(id, &e);
+        } else {
+            shell_print("Invalid type\n");
+            last_exit_code = 1;
+            return;
+        }
+        if (rc != 0) {
+            shell_print("Not found in FunDB\n");
+            last_exit_code = 1;
+            return;
+        }
+        char line[256];
+        shell_print("Quota entry (from FunDB):\n");
+        snprintf(line, sizeof(line), "  ID:           %u\n", e.id);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Type:         %s\n",
+                 e.type == QUOTA_TYPE_USER ? "USER" : "GROUP");
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Blocks used:  %llu\n",
+                 (unsigned long long)e.blocks_used);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Blocks soft:  %llu\n",
+                 (unsigned long long)e.blocks_soft);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Blocks hard:  %llu\n",
+                 (unsigned long long)e.blocks_hard);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Inodes used:  %llu\n",
+                 (unsigned long long)e.inodes_used);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Inodes soft:  %llu\n",
+                 (unsigned long long)e.inodes_soft);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Inodes hard:  %llu\n",
+                 (unsigned long long)e.inodes_hard);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Flags:        0x%02x\n", e.flags);
+        shell_print(line);
+        last_exit_code = 0;
+        return;
+    }
+
+    shell_print("Unknown subcommand. Try 'quota help'\n");
+    last_exit_code = 1;
+}
+
+/* ============================================================
+ * logrotate_ext - 日志轮转扩展命令
+ *   logrotate auto [interval_ms]     启用自动轮转
+ *   logrotate stop                   停止自动轮转
+ *   logrotate checkall               手动检查所有文件
+ *   logrotate compress <file> <0|1>  设置压缩标志
+ *   logrotate stats                  显示统计
+ *   logrotate help
+ * ============================================================ */
+static void cmd_logrotate_ext(const char *subcmd, const char *arg1, const char *arg2) {
+    (void)arg2;
+    if (!subcmd || !*subcmd || strcmp(subcmd, "help") == 0) {
+        shell_print("Usage: logrotate <subcommand> [args] (extension layer)\n");
+        shell_print("  auto [interval_ms]          Start auto-rotation\n");
+        shell_print("  stop                        Stop auto-rotation\n");
+        shell_print("  checkall                    Check all configured files\n");
+        shell_print("  compress <file> <0|1>       Enable/disable compression\n");
+        shell_print("  stats                       Show extension statistics\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "auto") == 0) {
+        uint32_t interval = LOGROTATE_EXT_DEFAULT_INTERVAL_MS;
+        if (arg1 && *arg1) interval = (uint32_t)atoi(arg1);
+        int rc = logrotate_ext_start_auto(interval);
+        if (rc == 0) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "Auto-rotation started (%u ms)\n", interval);
+            shell_print(buf);
+            last_exit_code = 0;
+        } else {
+            shell_print("Failed to start auto-rotation\n");
+            last_exit_code = 1;
+        }
+        return;
+    }
+
+    if (strcmp(subcmd, "stop") == 0) {
+        logrotate_ext_stop_auto();
+        shell_print("Auto-rotation stopped\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "checkall") == 0) {
+        int n = logrotate_ext_check_all();
+        char buf[64];
+        snprintf(buf, sizeof(buf), "Rotated %d file(s)\n", n);
+        shell_print(buf);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "compress") == 0) {
+        if (!arg1 || !*arg1 || !arg2 || !*arg2) {
+            shell_print("Usage: logrotate compress <file> <0|1>\n");
+            last_exit_code = 1;
+            return;
+        }
+        int enable = atoi(arg2);
+        int rc = logrotate_ext_set_compress(arg1, enable);
+        if (rc == 0) {
+            shell_print("Compress flag updated\n");
+            last_exit_code = 0;
+        } else {
+            shell_print("File not found in logrotate config\n");
+            last_exit_code = 1;
+        }
+        return;
+    }
+
+    if (strcmp(subcmd, "stats") == 0 || strcmp(subcmd, "extstats") == 0) {
+        logrotate_ext_stats_t s;
+        logrotate_ext_get_stats(&s);
+        char line[128];
+        shell_print("Log Rotate Extension Statistics:\n");
+        snprintf(line, sizeof(line), "  Total checks:    %u\n", s.total_checks);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Total rotations: %u\n", s.total_rotations);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Total failed:    %u\n", s.total_failed);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Last check tick: %u\n", s.last_check_tick);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Last rotation:   %u\n", s.last_rotation_tick);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Check interval:  %u ms\n", s.check_interval_ms);
+        shell_print(line);
+        snprintf(line, sizeof(line), "  Auto enabled:    %s\n",
+                 s.auto_rotate_enabled ? "yes" : "no");
+        shell_print(line);
+        last_exit_code = 0;
+        return;
+    }
+
+    shell_print("Unknown subcommand. Try 'logrotate help'\n");
+    last_exit_code = 1;
+}
+
+
 static void cmd_taskset(const char *pid_str, const char *mask_str) {
     if (!pid_str || !*pid_str) {
         shell_print("Usage: taskset <pid> [mask]\n");
@@ -10599,40 +14099,40 @@ static void cmd_dumpstack(void) {
 
 /* sysctl - 系统控制参数 */
 static void cmd_sysctl(const char *name, const char *value) {
+    char buf[256];
     if (!name || !*name) {
-        shell_print("Usage: sysctl <param> [value]\n");
-        shell_print("Common parameters:\n");
-        shell_print("  kernel.ostype       - OS type\n");
-        shell_print("  kernel.osrelease    - OS release\n");
-        shell_print("  kernel.version      - Kernel version\n");
-        shell_print("  vm.swappiness       - Swap tendency\n");
-        shell_print("  fs.file-max         - Max open files\n");
-        last_exit_code = 1;
+        shell_print("Usage: sysctl <name>=<value> or sysctl -a (list all)\n");
+        sysctl_dump_all();
+        last_exit_code = 0;
+        return;
+    }
+    if (strcmp(name, "-a") == 0 || strcmp(name, "-A") == 0) {
+        sysctl_dump_all();
+        last_exit_code = 0;
         return;
     }
 
     if (value && *value) {
-        shell_print("sysctl: setting '"); shell_print(name);
-        shell_print("' = '"); shell_print(value); shell_print("'\n");
-        last_exit_code = 0;
-    } else {
-        if (strcmp(name, "kernel.ostype") == 0) {
-            shell_print("kernel.ostype = FunsOS\n");
-        } else if (strcmp(name, "kernel.osrelease") == 0) {
-            shell_print("kernel.osrelease = 1.0.0\n");
-        } else if (strcmp(name, "kernel.version") == 0) {
-            shell_print("kernel.version = #1 SMP\n");
-        } else if (strcmp(name, "vm.swappiness") == 0) {
-            shell_print("vm.swappiness = 60\n");
-        } else if (strcmp(name, "fs.file-max") == 0) {
-            shell_print("fs.file-max = 65536\n");
+        if (sysctl_set(name, value) == 0) {
+            snprintf(buf, sizeof(buf), "sysctl: set %s = %s\n", name, value);
+            shell_print(buf);
+            last_exit_code = 0;
         } else {
-            shell_print("sysctl: cannot stat /proc/sys/");
-            shell_print(name); shell_print("\n");
+            snprintf(buf, sizeof(buf), "sysctl: error setting '%s'\n", name);
+            shell_print(buf);
             last_exit_code = 1;
-            return;
         }
-        last_exit_code = 0;
+    } else {
+        char val_buf[128];
+        if (sysctl_get(name, val_buf, sizeof(val_buf)) == 0) {
+            snprintf(buf, sizeof(buf), "%s = %s\n", name, val_buf);
+            shell_print(buf);
+            last_exit_code = 0;
+        } else {
+            snprintf(buf, sizeof(buf), "sysctl: unknown key '%s'\n", name);
+            shell_print(buf);
+            last_exit_code = 1;
+        }
     }
 }
 
@@ -10817,15 +14317,22 @@ static void shell_auto_login(void) {
 
     logged_in = 1;
     login_tick = timer_get_ticks();
-    shell_print("  +------------------------------------------+\n");
-    shell_print("  |          FUNSOS Operating System         |\n");
-    shell_print("  |           Version 1.0 - Shell            |\n");
-    shell_print("  +------------------------------------------+\n\n");
+    shell_print("  +--------------------------------------------------+\n");
+    shell_print("  |              FUNSOS Operating System             |\n");
+    shell_print("  |               Version 1.0 - Shell                |\n");
+    shell_print("  +--------------------------------------------------+\n\n");
     shell_print("  Auto-logged in as ");
     shell_print(env_get("USER") ? env_get("USER") : "sover");
-    shell_print(".\n");
-    shell_print("  Type 'help' for available commands.\n");
-    shell_print("  Type 'login' to switch users.\n\n");
+    shell_print(".\n\n");
+    shell_print("  Quick start:\n");
+    shell_print("    Type 'apps'    - See all available applications\n");
+    shell_print("    Type 'games'   - Play games (Snake, 2048, Tetris, Minesweeper, Pong)\n");
+    shell_print("    Type 'acalc'   - Advanced calculator (expression parser)\n");
+    shell_print("    Type 'sysmon'  - System monitor\n");
+    shell_print("    Type 'clock'   - Digital clock\n");
+    shell_print("    Type 'cal'     - Calendar\n");
+    shell_print("    Type 'help'    - Complete command list\n");
+    shell_print("    Type 'login'   - Switch users\n\n");
 }
 
 void shell_run(void) {
@@ -11460,6 +14967,24 @@ static int shell_execute_single(const char *cmd) {
         while (*arg4 == ' ') arg4++;
     }
 
+    /* Extract fifth argument */
+    char *arg5 = arg4;
+    while (*arg5 && *arg5 != ' ') arg5++;
+    if (*arg5) {
+        *arg5 = '\0';
+        arg5++;
+        while (*arg5 == ' ') arg5++;
+    }
+
+    /* Extract sixth argument */
+    char *arg6 = arg5;
+    while (*arg6 && *arg6 != ' ') arg6++;
+    if (*arg6) {
+        *arg6 = '\0';
+        arg6++;
+        while (*arg6 == ' ') arg6++;
+    }
+
     /* Original commands */
     if (strcmp(line, "pt") == 0) {
         cmd_pt(arg);
@@ -11477,6 +15002,10 @@ static int shell_execute_single(const char *cmd) {
         cmd_help(arg);
     } else if (strcmp(line, "sysinfo") == 0) {
         cmd_sysinfo();
+    } else if (strcmp(line, "schedpolicy") == 0) {
+        cmd_schedpolicy();
+    } else if (strcmp(line, "mempolicy") == 0) {
+        cmd_mempolicy();
     } else if (strcmp(line, "reboot") == 0) {
         cmd_reboot();
     } else if (strcmp(line, "halt") == 0) {
@@ -11544,6 +15073,8 @@ static int shell_execute_single(const char *cmd) {
         cmd_set(arg, arg2);
     } else if (strcmp(line, "env") == 0) {
         cmd_env();
+    } else if (strcmp(line, "unset") == 0) {
+        cmd_unset(arg);
     } else if (strcmp(line, "run") == 0) {
         cmd_run(arg);
     }
@@ -11554,6 +15085,7 @@ static int shell_execute_single(const char *cmd) {
         cmd_kill(arg);
     } else if (strcmp(line, "top") == 0) {
         cmd_top();
+        vga_text_snapshot();
     } else if (strcmp(line, "free") == 0) {
         cmd_free();
     } else if (strcmp(line, "uptime") == 0) {
@@ -11562,6 +15094,7 @@ static int shell_execute_single(const char *cmd) {
         cmd_load();
     } else if (strcmp(line, "dmesg") == 0) {
         cmd_dmesg(arg);
+        vga_text_snapshot();
     } else if (strcmp(line, "ipcs") == 0) {
         cmd_ipcs();
     } else if (strcmp(line, "vmstat") == 0) {
@@ -11708,6 +15241,14 @@ static int shell_execute_single(const char *cmd) {
         cmd_mkfifo(arg);
     } else if (strcmp(line, "mknod") == 0) {
         cmd_mknod(arg, arg2, arg3, arg4);
+    } else if (strcmp(line, "env") == 0) {
+        cmd_env();
+    } else if (strcmp(line, "setenv") == 0) {
+        cmd_setenv(arg, arg2);
+    } else if (strcmp(line, "unsetenv") == 0) {
+        cmd_unsetenv(arg);
+    } else if (strcmp(line, "ulimit") == 0) {
+        cmd_ulimit(arg, arg2);
     }
     /* New network commands */
     else if (strcmp(line, "ifconfig") == 0) {
@@ -11797,7 +15338,7 @@ static int shell_execute_single(const char *cmd) {
     } else if (strcmp(line, "md5") == 0) {
         cmd_md5(arg);
     } else if (strcmp(line, "history") == 0) {
-        cmd_history();
+        cmd_history(arg);
     } else if (strcmp(line, "alias") == 0) {
         cmd_alias(arg);
     } else if (strcmp(line, "yes") == 0) {
@@ -11820,6 +15361,7 @@ static int shell_execute_single(const char *cmd) {
     /* Editor */
     else if (strcmp(line, "edit") == 0) {
         cmd_edit(arg);
+        vga_text_snapshot();
     }
     /* C Editor */
     else if (strcmp(line, "cedit") == 0) {
@@ -11843,10 +15385,6 @@ static int shell_execute_single(const char *cmd) {
     /* KVM virtualization */
     else if (strcmp(line, "kvm") == 0) {
         cmd_kvm();
-    }
-    /* Apps */
-    else if (strcmp(line, "apps") == 0) {
-        cmd_apps();
     }
     /* Run app */
     else if (strcmp(line, "run") == 0) {
@@ -11875,6 +15413,42 @@ static int shell_execute_single(const char *cmd) {
         cmd_pstree();
     } else if (strcmp(line, "crontab") == 0) {
         cmd_crontab(arg, arg2, arg3);
+    } else if (strcmp(line, "evlog") == 0) {
+        cmd_evlog(arg, arg2, arg3);
+    } else if (strcmp(line, "fim") == 0) {
+        cmd_fim(arg, arg2, arg3);
+    } else if (strcmp(line, "netmon") == 0) {
+        cmd_netmon(arg, arg2, arg3);
+    } else if (strcmp(line, "sysacct") == 0) {
+        cmd_sysacct(arg, arg2, arg3);
+    } else if (strcmp(line, "service") == 0) {
+        cmd_service(arg, arg2, arg3);
+    } else if (strcmp(line, "taskmgr") == 0) {
+        cmd_taskmgr(arg, arg2, arg3);
+    } else if (strcmp(line, "sysreport") == 0) {
+        cmd_sysreport(arg);
+    } else if (strcmp(line, "ipc") == 0) {
+        cmd_ipc(arg, arg2, arg3);
+    } else if (strcmp(line, "sigstat") == 0) {
+        cmd_sigstat(arg, arg2, arg3);
+    } else if (strcmp(line, "quota") == 0) {
+        /* 优先使用扩展版（先检查特殊子命令） */
+        if (arg && (strcmp(arg, "sync") == 0 || strcmp(arg, "load") == 0 ||
+                    strcmp(arg, "save") == 0 || strcmp(arg, "query") == 0 ||
+                    strcmp(arg, "querydb") == 0)) {
+            cmd_quota_ext(arg, arg2, arg3);
+        } else {
+            cmd_quota(arg, arg2, arg3, arg4, arg5, arg6);
+        }
+    } else if (strcmp(line, "logrotate") == 0) {
+        /* 扩展子命令优先 */
+        if (arg && (strcmp(arg, "auto") == 0 || strcmp(arg, "stop") == 0 ||
+                    strcmp(arg, "checkall") == 0 || strcmp(arg, "compress") == 0 ||
+                    strcmp(arg, "stats") == 0 || strcmp(arg, "extstats") == 0)) {
+            cmd_logrotate_ext(arg, arg2, arg3);
+        } else {
+            cmd_logrotate(arg);
+        }
     } else if (strcmp(line, "nohup") == 0) {
         cmd_nohup(arg);
     } else if (strcmp(line, "watch") == 0) {
@@ -11893,8 +15467,6 @@ static int shell_execute_single(const char *cmd) {
         cmd_install(arg, arg2);
     } else if (strcmp(line, "which") == 0) {
         cmd_which(arg);
-    } else if (strcmp(line, "logrotate") == 0) {
-        cmd_logrotate(arg);
     }
     /* 文件管理高级命令 */
     else if (strcmp(line, "snapshot") == 0) {
@@ -12026,10 +15598,96 @@ static int shell_execute_single(const char *cmd) {
         cmd_cgroup(arg, arg2, arg3);
     } else if (strcmp(line, "kprobe") == 0) {
         cmd_kprobe(arg, arg2, arg3);
+    } else if (strcmp(line, "namespace") == 0) {
+        cmd_namespace();
+    } else if (strcmp(line, "tracepoint") == 0 || strcmp(line, "tp") == 0) {
+        cmd_tracepoint();
+    } else if (strcmp(line, "uprobe") == 0) {
+        cmd_uprobe();
+    } else if (strcmp(line, "kmod") == 0) {
+        cmd_kmod();
+    } else if (strcmp(line, "firmware") == 0 || strcmp(line, "fwldr") == 0) {
+        cmd_firmware();
+    } else if (strcmp(line, "remoteproc") == 0 || strcmp(line, "rproc") == 0) {
+        cmd_remoteproc();
+    } else if (strcmp(line, "rpmsg") == 0) {
+        cmd_rpmsg();
+    } else if (strcmp(line, "virtio") == 0) {
+        cmd_virtio();
     } else if (strcmp(line, "dumpstack") == 0 || strcmp(line, "stacktrace") == 0) {
         cmd_dumpstack();
+    } else if (strcmp(line, "iosched") == 0) {
+        cmd_iosched();
+    } else if (strcmp(line, "softirq") == 0) {
+        cmd_softirq();
+    } else if (strcmp(line, "oom") == 0) {
+        cmd_oom();
     } else if (strcmp(line, "sysctl") == 0) {
         cmd_sysctl(arg, arg2);
+    } else if (strcmp(line, "sysrq") == 0) {
+        cmd_sysrq();
+    } else if (strcmp(line, "workqueue") == 0 || strcmp(line, "wq") == 0) {
+        cmd_workqueue();
+    } else if (strcmp(line, "rcu") == 0) {
+        cmd_rcu();
+    } else if (strcmp(line, "hrtimer") == 0 || strcmp(line, "timers") == 0) {
+        cmd_hrtimer();
+    } else if (strcmp(line, "slab") == 0) {
+        cmd_slab();
+    } else if (strcmp(line, "watchdog") == 0 || strcmp(line, "wdt") == 0) {
+        cmd_watchdog();
+    } else if (strcmp(line, "crypto") == 0) {
+        cmd_crypto();
+    } else if (strcmp(line, "cpufreq") == 0) {
+        cmd_cpufreq();
+    } else if (strcmp(line, "cpuidle") == 0) {
+        cmd_cpuidle();
+    } else if (strcmp(line, "regmap") == 0) {
+        cmd_regmap();
+    } else if (strcmp(line, "hwmon") == 0) {
+        cmd_hwmon();
+    } else if (strcmp(line, "ftrace") == 0) {
+        cmd_ftrace();
+    } else if (strcmp(line, "dmabuf") == 0) {
+        cmd_dmabuf();
+    } else if (strcmp(line, "iio") == 0 || strcmp(line, "pwm") == 0 ||
+               strcmp(line, "led") == 0 || strcmp(line, "gpio") == 0 ||
+               strcmp(line, "i2c") == 0 || strcmp(line, "spi") == 0 ||
+               strcmp(line, "pinctrl") == 0 || strcmp(line, "dmaengine") == 0 ||
+               strcmp(line, "clk") == 0 || strcmp(line, "mfd") == 0 ||
+               strcmp(line, "adc") == 0 || strcmp(line, "can") == 0) {
+        { char _msg[96]; snprintf(_msg, sizeof(_msg), "%s: hardware subsystem not available on this system\n", line); shell_print(_msg); }
+        last_exit_code = 1;
+    } else if (strcmp(line, "rtc") == 0) {
+        cmd_rtc();
+    } else if (strcmp(line, "devtmpfs") == 0) {
+        cmd_devtmpfs();
+    } else if (strcmp(line, "sysfs") == 0) {
+        cmd_sysfs();
+    } else if (strcmp(line, "netns") == 0) {
+        cmd_netns();
+    } else if (strcmp(line, "netfilter") == 0) {
+        cmd_netfilter();
+    } else if (strcmp(line, "seccomp") == 0) {
+        cmd_seccomp();
+    } else if (strcmp(line, "apparmor") == 0) {
+        cmd_apparmor();
+    } else if (strcmp(line, "keyring") == 0) {
+        cmd_keyring();
+    } else if (strcmp(line, "audit") == 0) {
+        cmd_audit();
+    } else if (strcmp(line, "vmalloc") == 0 || strcmp(line, "vmap") == 0) {
+        cmd_vmalloc();
+    } else if (strcmp(line, "percpu") == 0) {
+        cmd_percpu();
+    } else if (strcmp(line, "kfence") == 0) {
+        cmd_kfence();
+    } else if (strcmp(line, "debugobj") == 0) {
+        cmd_debugobj();
+    } else if (strcmp(line, "lockdep") == 0) {
+        cmd_lockdep();
+    } else if (strcmp(line, "irqdomain") == 0) {
+        cmd_irqdomain();
     } else if (strcmp(line, "strace") == 0) {
         cmd_strace(arg);
     } else if (strcmp(line, "lsof") == 0) {
@@ -12046,6 +15704,30 @@ static int shell_execute_single(const char *cmd) {
         cmd_health();
     } else if (strcmp(line, "notifier") == 0) {
         cmd_notifier(arg);
+    } else if (strcmp(line, "fsstat") == 0) {
+        cmd_fsstat();
+    } else if (strcmp(line, "flock") == 0) {
+        cmd_flock(arg, arg2, arg3, arg4);
+    } else if (strcmp(line, "mount2") == 0) {
+        cmd_mount2(arg, arg2, arg3, arg4);
+    } else if (strcmp(line, "dcache") == 0) {
+        cmd_dcache(arg);
+    } else if (strcmp(line, "icache") == 0) {
+        cmd_icache(arg);
+    } else if (strcmp(line, "pagecache") == 0) {
+        cmd_pagecache(arg);
+    } else if (strcmp(line, "readahead") == 0) {
+        cmd_readahead_stat(arg);
+    } else if (strcmp(line, "syncstat") == 0) {
+        cmd_syncstat(arg);
+    } else if (strcmp(line, "ktrace") == 0) {
+        cmd_ktrace(arg, arg2, arg3);
+    } else if (strcmp(line, "kwork") == 0) {
+        cmd_kwork(arg, arg2, arg3);
+    } else if (strcmp(line, "reg") == 0) {
+        cmd_reg(arg, arg2, arg3);
+    } else if (strcmp(line, "apps") == 0) {
+        cmd_apps(arg, arg2, arg3);
     }
     /* VM state commands */
     else if (strcmp(line, "save") == 0) {
@@ -12067,8 +15749,35 @@ static int shell_execute_single(const char *cmd) {
         char *av[2] = { "paint", 0 };
         app_paint_main(1, av);
     } else if (strcmp(line, "snake") == 0) {
-        char *av[2] = { "snake", 0 };
-        app_snake_main(1, av);
+        snake_game_run();
+        vga_text_snapshot();
+    } else if (strcmp(line, "2048") == 0) {
+        game_2048_run();
+        vga_text_snapshot();
+    } else if (strcmp(line, "tetris") == 0) {
+        tetris_run();
+        vga_text_snapshot();
+    } else if (strcmp(line, "mine") == 0 || strcmp(line, "minesweeper") == 0) {
+        minesweeper_run();
+        vga_text_snapshot();
+    } else if (strcmp(line, "pong") == 0) {
+        pong_run();
+        vga_text_snapshot();
+    } else if (strcmp(line, "games") == 0) {
+        game_menu_run();
+        vga_text_snapshot();
+    } else if (strcmp(line, "acalc") == 0) {
+        calc_interactive_run();
+        vga_text_snapshot();
+    } else if (strcmp(line, "sysmon") == 0) {
+        sysmon_run();
+        vga_text_snapshot();
+    } else if (strcmp(line, "clock") == 0) {
+        clock_run();
+        vga_text_snapshot();
+    } else if (strcmp(line, "matrix") == 0) {
+        matrix_run();
+        vga_text_snapshot();
     } else if (strcmp(line, "desktop") == 0) {
         char *av[2] = { "desktop", 0 };
         app_desktop_main(1, av);
@@ -12078,6 +15787,96 @@ static int shell_execute_single(const char *cmd) {
     } else if (strcmp(line, "filemgr") == 0) {
         char *av[2] = { "filemgr", 0 };
         app_filemgr_main(1, av);
+    } else if (strcmp(line, "apps") == 0) {
+        cmd_applist(arg);
+    } else if (strcmp(line, "settings") == 0) {
+        gui_app_settings();
+    } else if (strcmp(line, "sysinfo") == 0) {
+        gui_app_sysinfo();
+    }
+    /* New text-mode apps from more_apps */
+    else if (strcmp(line, "life") == 0) {
+        life_run();
+        vga_text_snapshot();
+    } else if (strcmp(line, "sokoban") == 0) {
+        sokoban_run();
+        vga_text_snapshot();
+    } else if (strcmp(line, "typing") == 0) {
+        typing_run();
+        vga_text_snapshot();
+    } else if (strcmp(line, "ascii") == 0) {
+        ascii_table_run();
+        vga_text_snapshot();
+    } else if (strcmp(line, "cowsay") == 0) {
+        cowsay_run(arg);
+    } else if (strcmp(line, "fortune") == 0) {
+        fortune_run();
+    } else if (strcmp(line, "primes") == 0) {
+        primes_run(arg);
+    } else if (strcmp(line, "banner") == 0) {
+        banner_run(arg);
+    } else if (strcmp(line, "mktemp") == 0) {
+        mktemp_run();
+    } else if (strcmp(line, "rain") == 0 || strcmp(line, "matrix-rain") == 0) {
+        rain_run();
+        vga_text_snapshot();
+    } else if (strcmp(line, "snow") == 0) {
+        snow_run();
+        vga_text_snapshot();
+    } else if (strcmp(line, "fire") == 0) {
+        fire_run();
+        vga_text_snapshot();
+    } else if (strcmp(line, "rot13") == 0) {
+        rot13_run(arg);
+    } else if (strcmp(line, "tty") == 0) {
+        tty_run();
+    } else if (strcmp(line, "number") == 0) {
+        number_run(arg);
+    } else if (strcmp(line, "reset") == 0) {
+        reset_run();
+    } else if (strcmp(line, "wc") == 0) {
+        wc_run(arg);
+    } else if (strcmp(line, "file") == 0) {
+        file_run(arg);
+    } else if (strcmp(line, "head") == 0) {
+        head_run(arg, 0);
+    } else if (strcmp(line, "tail") == 0) {
+        tail_run(arg, 0);
+    } else if (strcmp(line, "plasma") == 0) {
+        plasma_run();
+        vga_text_snapshot();
+    } else if (strcmp(line, "errstr") == 0 || strcmp(line, "perror") == 0) {
+        if (!arg || !*arg) {
+            shell_print("Usage: errstr <errno>\n");
+            shell_print("  Display error message for errno number.\n");
+            shell_print("  Common: 2=ENOENT 12=ENOMEM 13=EACCES 22=EINVAL 28=ENOSPC 30=EROFS\n");
+        } else {
+            int num = atoi(arg);
+            char buf[128];
+            snprintf(buf, sizeof(buf), "errno %d: %s\n", num, strerror(num));
+            shell_print(buf);
+        }
+        last_exit_code = 0;
+    } else if (strcmp(line, "errno_list") == 0) {
+        shell_print("Errno codes (common):\n");
+        shell_print("   1 EPERM  Operation not permitted\n");
+        shell_print("   2 ENOENT No such file or directory\n");
+        shell_print("   5 EIO    I/O error\n");
+        shell_print("   9 EBADF  Bad file descriptor\n");
+        shell_print("  12 ENOMEM Out of memory\n");
+        shell_print("  13 EACCES Permission denied\n");
+        shell_print("  17 EEXIST File exists\n");
+        shell_print("  20 ENOTDIR Not a directory\n");
+        shell_print("  21 EISDIR Is a directory\n");
+        shell_print("  22 EINVAL Invalid argument\n");
+        shell_print("  28 ENOSPC No space left on device\n");
+        shell_print("  30 EROFS  Read-only filesystem\n");
+        shell_print("  38 ENOSYS Function not implemented\n");
+        shell_print("  39 ENOTEMPTY Directory not empty\n");
+        shell_print(" 110 ETIMEDOUT Connection timed out\n");
+        shell_print(" 111 ECONNREFUSED Connection refused\n");
+        shell_print(" 300+ App/SDK errors: use 'errstr <num>' for details\n");
+        last_exit_code = 0;
     }
     else {
         shell_err_unknown(line);
@@ -13684,30 +17483,17 @@ static void cmd_health(void) {
  * ============================================================ */
 static void cmd_notifier(const char *subcmd) {
     if (!subcmd || !*subcmd || strcmp(subcmd, "list") == 0) {
-        shell_print("=== Notifier Chains ===\n");
-        const char *names[] = {
-            "net_dev", "block_dev", "fs", "process",
-            "memory", "power", "thermal", "cpu"
-        };
-        for (int i = 0; i < NOTIFIER_MAX_CHAINS; i++) {
-            shell_print("  ");
-            shell_print(names[i]);
-            shell_print(": ");
-            char buf[16];
-            itoa(notifier_count(i), buf, 10);
-            shell_print(buf);
-            shell_print(" callbacks\n");
-        }
+        knotifier_print_stats();
         last_exit_code = 0;
         return;
     }
 
     if (strcmp(subcmd, "test") == 0) {
-        shell_print("Sending test notification to process chain...\n");
-        int ret = notifier_call_chain(NOTIFIER_PROCESS, NOTIFY_EVENT_CHANGE, NULL);
-        shell_print("Notification result: ");
+        shell_print("Sending test notification to panic chain...\n");
+        int ret = atomic_knotifier_call_chain(&panic_knotifier_list, 0, NULL);
         char buf[16];
         itoa(ret, buf, 10);
+        shell_print("Notification result: ");
         shell_print(buf);
         shell_print("\n");
         last_exit_code = 0;
@@ -13718,6 +17504,2058 @@ static void cmd_notifier(const char *subcmd) {
     last_exit_code = 1;
 }
 
+/* ============================================================
+ * quota - 文件系统配额管理命令
+ * ============================================================ */
+static void cmd_quota(const char *subcmd, const char *arg1, const char *arg2,
+                      const char *arg3, const char *arg4, const char *arg5) {
+    (void)arg4;
+    (void)arg5;
+
+    if (!subcmd || !*subcmd || strcmp(subcmd, "help") == 0) {
+        shell_print("Usage:\n");
+        shell_print("  quota enable                 - Enable quota system\n");
+        shell_print("  quota disable                - Disable quota system\n");
+        shell_print("  quota status                 - Show quota status\n");
+        shell_print("  quota setuser <uid> <bsoft> <bhard> <isoft> <ihard>\n");
+        shell_print("  quota setgroup <gid> <bsoft> <bhard> <isoft> <ihard>\n");
+        shell_print("  quota getuser <uid>          - Show user quota\n");
+        shell_print("  quota getgroup <gid>         - Show group quota\n");
+        shell_print("  quota deluser <uid>          - Delete user quota\n");
+        shell_print("  quota delgroup <gid>         - Delete group quota\n");
+        shell_print("  quota resetuser <uid>        - Reset user usage\n");
+        shell_print("  quota resetgroup <gid>       - Reset group usage\n");
+        shell_print("  quota list [user|group]      - List all quotas\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "enable") == 0) {
+        quota_enable(1);
+        shell_print("Quota system enabled\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "disable") == 0) {
+        quota_enable(0);
+        shell_print("Quota system disabled\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "status") == 0) {
+        quota_stats_t stats;
+        if (quota_get_stats(&stats) != 0) {
+            shell_print("quota: failed to get stats\n");
+            last_exit_code = 1;
+            return;
+        }
+        shell_print("=== Quota Status ===\n");
+        shell_print("Enabled: ");
+        shell_print(stats.enabled ? "yes" : "no");
+        shell_print("\n");
+        char buf[32];
+        shell_print("User entries: ");
+        itoa(stats.user_entries, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+        shell_print("Group entries: ");
+        itoa(stats.group_entries, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+        shell_print("Total blocks used: ");
+        itoa((uint32_t)stats.total_blocks, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+        shell_print("Total inodes used: ");
+        itoa((uint32_t)stats.total_inodes, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "setuser") == 0) {
+        if (!arg1 || !arg2 || !arg3 || !arg4 || !arg5) {
+            shell_print("Usage: quota setuser <uid> <bsoft> <bhard> <isoft> <ihard>\n");
+            last_exit_code = 1;
+            return;
+        }
+        uint32_t uid = atoi(arg1);
+        uint64_t bsoft = (uint64_t)atoi(arg2);
+        uint64_t bhard = (uint64_t)atoi(arg3);
+        uint64_t isoft = (uint64_t)atoi(arg4);
+        uint64_t ihard = (uint64_t)atoi(arg5);
+        int ret = quota_set_user(uid, bsoft, bhard, isoft, ihard);
+        if (ret == 0) {
+            shell_print("User quota set successfully\n");
+            last_exit_code = 0;
+        } else {
+            shell_print("Failed to set user quota\n");
+            last_exit_code = 1;
+        }
+        return;
+    }
+
+    if (strcmp(subcmd, "setgroup") == 0) {
+        if (!arg1 || !arg2 || !arg3 || !arg4 || !arg5) {
+            shell_print("Usage: quota setgroup <gid> <bsoft> <bhard> <isoft> <ihard>\n");
+            last_exit_code = 1;
+            return;
+        }
+        uint32_t gid = atoi(arg1);
+        uint64_t bsoft = (uint64_t)atoi(arg2);
+        uint64_t bhard = (uint64_t)atoi(arg3);
+        uint64_t isoft = (uint64_t)atoi(arg4);
+        uint64_t ihard = (uint64_t)atoi(arg5);
+        int ret = quota_set_group(gid, bsoft, bhard, isoft, ihard);
+        if (ret == 0) {
+            shell_print("Group quota set successfully\n");
+            last_exit_code = 0;
+        } else {
+            shell_print("Failed to set group quota\n");
+            last_exit_code = 1;
+        }
+        return;
+    }
+
+    if (strcmp(subcmd, "getuser") == 0) {
+        if (!arg1) {
+            shell_print("Usage: quota getuser <uid>\n");
+            last_exit_code = 1;
+            return;
+        }
+        uint32_t uid = atoi(arg1);
+        quota_entry_t *entry = quota_get_user(uid);
+        if (!entry) {
+            shell_print("No quota for user ");
+            char buf[32];
+            itoa(uid, buf, 10);
+            shell_print(buf);
+            shell_print("\n");
+            last_exit_code = 1;
+            return;
+        }
+        char buf[64];
+        shell_print("=== User Quota (uid=");
+        itoa(entry->id, buf, 10);
+        shell_print(buf);
+        shell_print(") ===\n");
+        shell_print("Blocks: used=");
+        itoa((uint32_t)entry->blocks_used, buf, 10);
+        shell_print(buf);
+        shell_print(" soft=");
+        itoa((uint32_t)entry->blocks_soft, buf, 10);
+        shell_print(buf);
+        shell_print(" hard=");
+        itoa((uint32_t)entry->blocks_hard, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+        shell_print("Inodes: used=");
+        itoa((uint32_t)entry->inodes_used, buf, 10);
+        shell_print(buf);
+        shell_print(" soft=");
+        itoa((uint32_t)entry->inodes_soft, buf, 10);
+        shell_print(buf);
+        shell_print(" hard=");
+        itoa((uint32_t)entry->inodes_hard, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "getgroup") == 0) {
+        if (!arg1) {
+            shell_print("Usage: quota getgroup <gid>\n");
+            last_exit_code = 1;
+            return;
+        }
+        uint32_t gid = atoi(arg1);
+        quota_entry_t *entry = quota_get_group(gid);
+        if (!entry) {
+            shell_print("No quota for group ");
+            char buf[32];
+            itoa(gid, buf, 10);
+            shell_print(buf);
+            shell_print("\n");
+            last_exit_code = 1;
+            return;
+        }
+        char buf[64];
+        shell_print("=== Group Quota (gid=");
+        itoa(entry->id, buf, 10);
+        shell_print(buf);
+        shell_print(") ===\n");
+        shell_print("Blocks: used=");
+        itoa((uint32_t)entry->blocks_used, buf, 10);
+        shell_print(buf);
+        shell_print(" soft=");
+        itoa((uint32_t)entry->blocks_soft, buf, 10);
+        shell_print(buf);
+        shell_print(" hard=");
+        itoa((uint32_t)entry->blocks_hard, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+        shell_print("Inodes: used=");
+        itoa((uint32_t)entry->inodes_used, buf, 10);
+        shell_print(buf);
+        shell_print(" soft=");
+        itoa((uint32_t)entry->inodes_soft, buf, 10);
+        shell_print(buf);
+        shell_print(" hard=");
+        itoa((uint32_t)entry->inodes_hard, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "deluser") == 0) {
+        if (!arg1) {
+            shell_print("Usage: quota deluser <uid>\n");
+            last_exit_code = 1;
+            return;
+        }
+        uint32_t uid = atoi(arg1);
+        int ret = quota_remove_user(uid);
+        if (ret == 0) {
+            shell_print("User quota deleted\n");
+            last_exit_code = 0;
+        } else {
+            shell_print("Failed to delete user quota\n");
+            last_exit_code = 1;
+        }
+        return;
+    }
+
+    if (strcmp(subcmd, "delgroup") == 0) {
+        if (!arg1) {
+            shell_print("Usage: quota delgroup <gid>\n");
+            last_exit_code = 1;
+            return;
+        }
+        uint32_t gid = atoi(arg1);
+        int ret = quota_remove_group(gid);
+        if (ret == 0) {
+            shell_print("Group quota deleted\n");
+            last_exit_code = 0;
+        } else {
+            shell_print("Failed to delete group quota\n");
+            last_exit_code = 1;
+        }
+        return;
+    }
+
+    if (strcmp(subcmd, "resetuser") == 0) {
+        if (!arg1) {
+            shell_print("Usage: quota resetuser <uid>\n");
+            last_exit_code = 1;
+            return;
+        }
+        uint32_t uid = atoi(arg1);
+        int ret = quota_reset_user(uid);
+        if (ret == 0) {
+            shell_print("User quota usage reset\n");
+            last_exit_code = 0;
+        } else {
+            shell_print("Failed to reset user quota\n");
+            last_exit_code = 1;
+        }
+        return;
+    }
+
+    if (strcmp(subcmd, "resetgroup") == 0) {
+        if (!arg1) {
+            shell_print("Usage: quota resetgroup <gid>\n");
+            last_exit_code = 1;
+            return;
+        }
+        uint32_t gid = atoi(arg1);
+        int ret = quota_reset_group(gid);
+        if (ret == 0) {
+            shell_print("Group quota usage reset\n");
+            last_exit_code = 0;
+        } else {
+            shell_print("Failed to reset group quota\n");
+            last_exit_code = 1;
+        }
+        return;
+    }
+
+    if (strcmp(subcmd, "list") == 0) {
+        uint8_t type = QUOTA_TYPE_USER;
+        if (arg1 && strcmp(arg1, "group") == 0) {
+            type = QUOTA_TYPE_GROUP;
+        }
+
+        quota_entry_t entries[32];
+        int count = quota_list(entries, 32, type);
+        if (count < 0) {
+            shell_print("Failed to list quotas\n");
+            last_exit_code = 1;
+            return;
+        }
+
+        shell_print("=== ");
+        shell_print(type == QUOTA_TYPE_USER ? "User" : "Group");
+        shell_print(" Quota List ===\n");
+        shell_print("ID     Blocks(used/soft/hard)   Inodes(used/soft/hard)\n");
+
+        for (int i = 0; i < count; i++) {
+            char buf[32];
+            itoa(entries[i].id, buf, 10);
+            shell_print(buf);
+            shell_print("    ");
+
+            itoa((uint32_t)entries[i].blocks_used, buf, 10);
+            shell_print(buf);
+            shell_print("/");
+            itoa((uint32_t)entries[i].blocks_soft, buf, 10);
+            shell_print(buf);
+            shell_print("/");
+            itoa((uint32_t)entries[i].blocks_hard, buf, 10);
+            shell_print(buf);
+            shell_print("    ");
+
+            itoa((uint32_t)entries[i].inodes_used, buf, 10);
+            shell_print(buf);
+            shell_print("/");
+            itoa((uint32_t)entries[i].inodes_soft, buf, 10);
+            shell_print(buf);
+            shell_print("/");
+            itoa((uint32_t)entries[i].inodes_hard, buf, 10);
+            shell_print(buf);
+            shell_print("\n");
+        }
+
+        last_exit_code = 0;
+        return;
+    }
+
+    shell_print("Unknown quota command. Try 'quota help'\n");
+    last_exit_code = 1;
+}
+
+/* ============================================================
+ * fsstat - 文件系统统计命令
+ * ============================================================ */
+static void cmd_fsstat(void) {
+    fs_stats_t stats;
+    fs_stat_get(&stats);
+
+    char buf[64];
+    shell_print("=== Filesystem Statistics ===\n");
+
+    /* I/O 统计 */
+    shell_print("\n--- I/O Stats ---\n");
+    shell_print("Reads: ");
+    itoa((uint32_t)stats.io.reads, buf, 10);
+    shell_print(buf);
+    shell_print(" (");
+    itoa((uint32_t)(stats.io.read_bytes / 1024), buf, 10);
+    shell_print(buf);
+    shell_print(" KB)\n");
+
+    shell_print("Writes: ");
+    itoa((uint32_t)stats.io.writes, buf, 10);
+    shell_print(buf);
+    shell_print(" (");
+    itoa((uint32_t)(stats.io.write_bytes / 1024), buf, 10);
+    shell_print(buf);
+    shell_print(" KB)\n");
+
+    shell_print("Read errors: ");
+    itoa((uint32_t)stats.io.read_errors, buf, 10);
+    shell_print(buf);
+    shell_print("  Write errors: ");
+    itoa((uint32_t)stats.io.write_errors, buf, 10);
+    shell_print(buf);
+    shell_print("\n");
+
+    /* 操作统计 */
+    shell_print("\n--- Operation Stats ---\n");
+    shell_print("Opens: ");
+    itoa((uint32_t)stats.ops.opens, buf, 10);
+    shell_print(buf);
+    shell_print("  Closes: ");
+    itoa((uint32_t)stats.ops.closes, buf, 10);
+    shell_print(buf);
+    shell_print("\n");
+
+    shell_print("Creates: ");
+    itoa((uint32_t)stats.ops.creates, buf, 10);
+    shell_print(buf);
+    shell_print("  Deletes: ");
+    itoa((uint32_t)stats.ops.deletes, buf, 10);
+    shell_print(buf);
+    shell_print("  Mkdirs: ");
+    itoa((uint32_t)stats.ops.mkdirs, buf, 10);
+    shell_print(buf);
+    shell_print("\n");
+
+    shell_print("Mounts: ");
+    itoa((uint32_t)stats.ops.mounts, buf, 10);
+    shell_print(buf);
+    shell_print("  Umounts: ");
+    itoa((uint32_t)stats.ops.umounts, buf, 10);
+    shell_print(buf);
+    shell_print("\n");
+
+    shell_print("Lookups: ");
+    itoa((uint32_t)stats.ops.lookups, buf, 10);
+    shell_print(buf);
+    shell_print("  Cache hit rate: ");
+    itoa(fs_stat_cache_hit_rate(), buf, 10);
+    shell_print(buf);
+    shell_print("%\n");
+
+    /* 文件统计 */
+    shell_print("\n--- File Stats ---\n");
+    shell_print("Currently open: ");
+    itoa((uint32_t)stats.total_files, buf, 10);
+    shell_print(buf);
+    shell_print("  Max open: ");
+    itoa((uint32_t)stats.max_files, buf, 10);
+    shell_print(buf);
+    shell_print("\n");
+
+    /* 错误统计 */
+    shell_print("\n--- Error Stats ---\n");
+    shell_print("ENOENT: ");
+    itoa((uint32_t)stats.errors.enoent, buf, 10);
+    shell_print(buf);
+    shell_print("  ENOSPC: ");
+    itoa((uint32_t)stats.errors.enospc, buf, 10);
+    shell_print(buf);
+    shell_print("  EIO: ");
+    itoa((uint32_t)stats.errors.eio, buf, 10);
+    shell_print(buf);
+    shell_print("\n");
+    shell_print("Other errors: ");
+    itoa((uint32_t)stats.errors.other, buf, 10);
+    shell_print(buf);
+    shell_print("\n");
+
+    last_exit_code = 0;
+}
+
+/* ============================================================
+ * flock - 文件锁管理命令
+ * ============================================================ */
+static void cmd_flock(const char *subcmd, const char *arg1, const char *arg2,
+                      const char *arg3) {
+    if (!subcmd || !*subcmd || strcmp(subcmd, "help") == 0) {
+        shell_print("Usage:\n");
+        shell_print("  flock stats              - Show file lock statistics\n");
+        shell_print("  flock test <type>        - Test file locking\n");
+        shell_print("  flock reset              - Reset statistics\n");
+        shell_print("  Types: shared | exclusive\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "stats") == 0) {
+        lock_stats_t stats;
+        flock_get_stats(&stats);
+
+        char buf[32];
+        shell_print("=== File Lock Statistics ===\n");
+        shell_print("Total locks: ");
+        itoa(stats.total_locks, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+        shell_print("Read locks: ");
+        itoa(stats.read_locks, buf, 10);
+        shell_print(buf);
+        shell_print("  Write locks: ");
+        itoa(stats.write_locks, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+        shell_print("Max locks: ");
+        itoa(stats.max_locks, buf, 10);
+        shell_print(buf);
+        shell_print("\n\n");
+
+        shell_print("Acquires: ");
+        itoa((uint32_t)stats.lock_acquires, buf, 10);
+        shell_print(buf);
+        shell_print("  Releases: ");
+        itoa((uint32_t)stats.lock_releases, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+        shell_print("Conflicts: ");
+        itoa((uint32_t)stats.lock_conflicts, buf, 10);
+        shell_print(buf);
+        shell_print("  Waits: ");
+        itoa((uint32_t)stats.lock_waits, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "test") == 0) {
+        file_lock_t fl;
+        memset(&fl, 0, sizeof(fl));
+        fl.l_pid = 1;
+        fl.l_start = 0;
+        fl.l_len = 100;
+
+        const char *type = arg1 ? arg1 : "shared";
+        if (strcmp(type, "shared") == 0) {
+            fl.l_type = F_RDLCK;
+        } else if (strcmp(type, "exclusive") == 0) {
+            fl.l_type = F_WRLCK;
+        } else {
+            shell_print("Unknown lock type\n");
+            last_exit_code = 1;
+            return;
+        }
+
+        int ret = flock_set(0, 1, &fl, 1);
+        if (ret == 0) {
+            shell_print("Lock acquired successfully\n");
+            last_exit_code = 0;
+        } else {
+            shell_print("Failed to acquire lock (");
+            char buf[16];
+            itoa(-ret, buf, 10);
+            shell_print(buf);
+            shell_print(")\n");
+            last_exit_code = 1;
+        }
+        return;
+    }
+
+    if (strcmp(subcmd, "reset") == 0) {
+        flock_reset_stats();
+        shell_print("Statistics reset\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    shell_print("Unknown flock command. Try 'flock help'\n");
+    last_exit_code = 1;
+}
+
+/* ============================================================
+ * mount2 - 增强挂载命令
+ * ============================================================ */
+static void cmd_mount2(const char *subcmd, const char *arg1, const char *arg2,
+                       const char *arg3) {
+    (void)arg3;
+
+    if (!subcmd || !*subcmd || strcmp(subcmd, "help") == 0) {
+        shell_print("Usage:\n");
+        shell_print("  mount2 list                - List all mounts\n");
+        shell_print("  mount2 remount <path> ro   - Remount read-only\n");
+        shell_print("  mount2 remount <path> rw   - Remount read-write\n");
+        shell_print("  mount2 flags <path>        - Show mount flags\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "list") == 0) {
+        vfs_mount_info_t mounts[16];
+        int count = vfs_list_mounts(mounts, 16);
+        if (count < 0) {
+            shell_print("Failed to list mounts\n");
+            last_exit_code = 1;
+            return;
+        }
+
+        char buf[64];
+        shell_print("=== Mount Points ===\n");
+        for (int i = 0; i < count; i++) {
+            shell_print(mounts[i].mount_point);
+            shell_print("  [");
+            shell_print(mounts[i].fs_type);
+            shell_print("]  ");
+
+            uint64_t total_mb = mounts[i].total_blocks * 4 / 1024;
+            uint64_t free_mb = mounts[i].free_blocks * 4 / 1024;
+            itoa((uint32_t)total_mb, buf, 10);
+            shell_print(buf);
+            shell_print("MB total, ");
+            itoa((uint32_t)free_mb, buf, 10);
+            shell_print(buf);
+            shell_print("MB free");
+
+            if (mounts[i].read_only) {
+                shell_print("  (ro)");
+            }
+            shell_print("\n");
+        }
+
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "remount") == 0) {
+        if (!arg1 || !arg2) {
+            shell_print("Usage: mount2 remount <path> ro|rw\n");
+            last_exit_code = 1;
+            return;
+        }
+
+        uint32_t current_flags = vfs_get_mount_flags(arg1);
+        uint32_t new_flags = current_flags;
+
+        if (strcmp(arg2, "ro") == 0) {
+            new_flags |= MS_RDONLY;
+        } else if (strcmp(arg2, "rw") == 0) {
+            new_flags &= ~MS_RDONLY;
+        } else {
+            shell_print("Unknown mode: ");
+            shell_print(arg2);
+            shell_print("\n");
+            last_exit_code = 1;
+            return;
+        }
+
+        int ret = vfs_remount(arg1, new_flags);
+        if (ret == 0) {
+            shell_print("Remount successful\n");
+            last_exit_code = 0;
+        } else {
+            shell_print("Remount failed\n");
+            last_exit_code = 1;
+        }
+        return;
+    }
+
+    if (strcmp(subcmd, "flags") == 0) {
+        if (!arg1) {
+            shell_print("Usage: mount2 flags <path>\n");
+            last_exit_code = 1;
+            return;
+        }
+
+        uint32_t flags = vfs_get_mount_flags(arg1);
+        char buf[32];
+
+        shell_print("Mount flags for ");
+        shell_print(arg1);
+        shell_print(":\n");
+        shell_print("  RDONLY: ");
+        shell_print((flags & MS_RDONLY) ? "yes" : "no");
+        shell_print("\n");
+        shell_print("  NOSUID: ");
+        shell_print((flags & MS_NOSUID) ? "yes" : "no");
+        shell_print("\n");
+        shell_print("  NOEXEC: ");
+        shell_print((flags & MS_NOEXEC) ? "yes" : "no");
+        shell_print("\n");
+        shell_print("  NOATIME: ");
+        shell_print((flags & MS_NOATIME) ? "yes" : "no");
+        shell_print("\n");
+        shell_print("  Raw: 0x");
+        itoa((uint32_t)flags, buf, 16);
+        shell_print(buf);
+        shell_print("\n");
+
+        last_exit_code = 0;
+        return;
+    }
+
+    shell_print("Unknown mount2 command. Try 'mount2 help'\n");
+    last_exit_code = 1;
+}
+
+/* ============================================================
+ * dcache - 目录项缓存管理命令
+ * ============================================================ */
+static void cmd_dcache(const char *subcmd) {
+    if (!subcmd || !*subcmd || strcmp(subcmd, "help") == 0) {
+        shell_print("Usage:\n");
+        shell_print("  dcache stats     - Show dcache statistics\n");
+        shell_print("  dcache reset     - Reset statistics\n");
+        shell_print("  dcache dump      - Dump dcache entries\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "stats") == 0) {
+        dcache_stats_t stats;
+        dcache_get_stats(&stats);
+
+        char buf[32];
+        shell_print("=== dcache Statistics ===\n");
+        shell_print("Current entries: ");
+        itoa(stats.total_entries, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+        shell_print("Max entries: ");
+        itoa(stats.max_entries, buf, 10);
+        shell_print(buf);
+        shell_print("\n\n");
+
+        shell_print("Lookups: ");
+        itoa((uint32_t)stats.lookups, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+        shell_print("Hits: ");
+        itoa((uint32_t)stats.hits, buf, 10);
+        shell_print(buf);
+        shell_print("  Misses: ");
+        itoa((uint32_t)stats.misses, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+
+        if (stats.lookups > 0) {
+            uint32_t hit_rate = (stats.hits * 100) / stats.lookups;
+            shell_print("Hit rate: ");
+            itoa(hit_rate, buf, 10);
+            shell_print(buf);
+            shell_print("%\n");
+        }
+
+        shell_print("Reclaims: ");
+        itoa((uint32_t)stats.reclaims, buf, 10);
+        shell_print(buf);
+        shell_print("  Invalidations: ");
+        itoa((uint32_t)stats.invalidations, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "reset") == 0) {
+        dcache_reset_stats();
+        shell_print("dcache statistics reset\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "dump") == 0) {
+        dcache_dump();
+        last_exit_code = 0;
+        return;
+    }
+
+    shell_print("Unknown dcache command. Try 'dcache help'\n");
+    last_exit_code = 1;
+}
+
+/* ============================================================
+ * icache - inode 缓存统计命令
+ * ============================================================ */
+static void cmd_icache(const char *subcmd) {
+    if (!subcmd || !*subcmd || strcmp(subcmd, "help") == 0) {
+        shell_print("Usage:\n");
+        shell_print("  icache stats     - Show icache statistics\n");
+        shell_print("  icache reset     - Reset statistics\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "stats") == 0) {
+        icache_stats_t stats;
+        icache_get_stats(&stats);
+
+        char buf[32];
+        shell_print("=== icache Statistics ===\n");
+        shell_print("Current entries: ");
+        itoa(stats.total_entries, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+        shell_print("Max entries: ");
+        itoa(stats.max_entries, buf, 10);
+        shell_print(buf);
+        shell_print("\n\n");
+
+        shell_print("Lookups: ");
+        itoa((uint32_t)stats.lookups, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+        shell_print("Hits: ");
+        itoa((uint32_t)stats.hits, buf, 10);
+        shell_print(buf);
+        shell_print("  Misses: ");
+        itoa((uint32_t)stats.misses, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+
+        if (stats.lookups > 0) {
+            uint32_t hit_rate = (stats.hits * 100) / stats.lookups;
+            shell_print("Hit rate: ");
+            itoa(hit_rate, buf, 10);
+            shell_print(buf);
+            shell_print("%\n");
+        }
+
+        shell_print("Reclaims: ");
+        itoa((uint32_t)stats.reclaims, buf, 10);
+        shell_print(buf);
+        shell_print("  Invalidations: ");
+        itoa((uint32_t)stats.invalidations, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "reset") == 0) {
+        icache_reset_stats();
+        shell_print("icache statistics reset\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    shell_print("Unknown icache command. Try 'icache help'\n");
+    last_exit_code = 1;
+}
+
+/* ============================================================
+ * pagecache - 页缓存统计命令
+ * ============================================================ */
+static void cmd_pagecache(const char *subcmd) {
+    if (!subcmd || !*subcmd || strcmp(subcmd, "help") == 0) {
+        shell_print("Usage:\n");
+        shell_print("  pagecache stats    - Show page cache statistics\n");
+        shell_print("  pagecache reset    - Reset statistics\n");
+        shell_print("  pagecache flush    - Writeback all dirty pages\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "stats") == 0) {
+        page_cache_stats_t stats;
+        page_cache_get_stats(&stats);
+
+        char buf[32];
+        shell_print("=== Page Cache Statistics ===\n");
+        shell_print("Current pages: ");
+        itoa(stats.total_pages, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+        shell_print("Max pages: ");
+        itoa(stats.max_pages, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+        shell_print("Dirty pages: ");
+        itoa(stats.dirty_pages, buf, 10);
+        shell_print(buf);
+        shell_print("\n\n");
+
+        shell_print("Lookups: ");
+        itoa((uint32_t)stats.lookups, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+        shell_print("Hits: ");
+        itoa((uint32_t)stats.hits, buf, 10);
+        shell_print(buf);
+        shell_print("  Misses: ");
+        itoa((uint32_t)stats.misses, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+
+        if (stats.lookups > 0) {
+            uint32_t hit_rate = (stats.hits * 100) / stats.lookups;
+            shell_print("Hit rate: ");
+            itoa(hit_rate, buf, 10);
+            shell_print(buf);
+            shell_print("%\n");
+        }
+
+        shell_print("Reclaims: ");
+        itoa((uint32_t)stats.reclaims, buf, 10);
+        shell_print(buf);
+        shell_print("  Writebacks: ");
+        itoa((uint32_t)stats.writebacks, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "reset") == 0) {
+        page_cache_reset_stats();
+        shell_print("Page cache statistics reset\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "flush") == 0) {
+        uint32_t written = page_cache_writeback_all();
+        char buf[32];
+        shell_print("Flushed ");
+        itoa(written, buf, 10);
+        shell_print(buf);
+        shell_print(" dirty pages\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    shell_print("Unknown pagecache command. Try 'pagecache help'\n");
+    last_exit_code = 1;
+}
+
+/* ============================================================
+ * readahead - 预读统计命令
+ * ============================================================ */
+static void cmd_readahead_stat(const char *subcmd) {
+    if (!subcmd || !*subcmd || strcmp(subcmd, "help") == 0) {
+        shell_print("Usage:\n");
+        shell_print("  readahead stats   - Show readahead statistics\n");
+        shell_print("  readahead reset   - Reset statistics\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "stats") == 0) {
+        readahead_stats_t stats;
+        readahead_get_stats(&stats);
+
+        char buf[32];
+        shell_print("=== Readahead Statistics ===\n");
+        shell_print("Readahead calls: ");
+        itoa((uint32_t)stats.readahead_calls, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+        shell_print("Pages readahead: ");
+        itoa((uint32_t)stats.pages_readahead, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+        shell_print("Seq detections: ");
+        itoa((uint32_t)stats.seq_detections, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+        shell_print("Cache hits: ");
+        itoa((uint32_t)stats.cache_hits, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "reset") == 0) {
+        readahead_reset_stats();
+        shell_print("Readahead statistics reset\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    shell_print("Unknown readahead command. Try 'readahead help'\n");
+    last_exit_code = 1;
+}
+
+/* ============================================================
+ * syncstat - 文件系统同步统计命令
+ * ============================================================ */
+static void cmd_syncstat(const char *subcmd) {
+    if (!subcmd || !*subcmd || strcmp(subcmd, "help") == 0) {
+        shell_print("Usage:\n");
+        shell_print("  syncstat show     - Show sync statistics\n");
+        shell_print("  syncstat reset    - Reset statistics\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "show") == 0 || strcmp(subcmd, "") == 0) {
+        fs_sync_stats_t stats;
+        fs_sync_get_stats(&stats);
+
+        char buf[32];
+        shell_print("=== File System Sync Statistics ===\n");
+        shell_print("Dirty inodes: ");
+        itoa((uint32_t)stats.dirty_inodes, buf, 10);
+        shell_print(buf);
+        shell_print("  (max: ");
+        itoa((uint32_t)stats.max_dirty_inodes, buf, 10);
+        shell_print(buf);
+        shell_print(")\n\n");
+
+        shell_print("sync() calls: ");
+        itoa((uint32_t)stats.sync_calls, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+        shell_print("fsync() calls: ");
+        itoa((uint32_t)stats.fsync_calls, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+        shell_print("fdatasync() calls: ");
+        itoa((uint32_t)stats.fdatasync_calls, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+        shell_print("syncfs() calls: ");
+        itoa((uint32_t)stats.syncfs_calls, buf, 10);
+        shell_print(buf);
+        shell_print("\n\n");
+
+        shell_print("Inodes synced: ");
+        itoa((uint32_t)stats.inodes_synced, buf, 10);
+        shell_print(buf);
+        shell_print("\n");
+
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "reset") == 0) {
+        fs_sync_reset_stats();
+        shell_print("Sync statistics reset\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    shell_print("Unknown syncstat command. Try 'syncstat help'\n");
+    last_exit_code = 1;
+}
+
+/* ============================================================
+ * ktrace - 内核跟踪子系统管理命令
+ *
+ * 用法：
+ *   ktrace                       显示状态与统计
+ *   ktrace help                  显示帮助
+ *   ktrace on  [cat...]          启用类别（默认全部）
+ *   ktrace off [cat...]         关闭类别（默认全部）
+ *   ktrace mask <hex>           直接设置类别掩码
+ *   ktrace level <0..3>         设置最低级别（0=DBG 1=INF 2=WRN 3=ERR）
+ *   ktrace emit <cat> <msg>     手动注入一条事件（测试用）
+ *   ktrace show [N]             显示缓冲区中最近 N 条事件（默认 16）
+ *   ktrace dump [N]             转储最近 N 条到 klog（dmesg 可见）
+ *   ktrace reset                重置统计计数器（不清缓冲区）
+ *   ktrace clear                清空环形缓冲区
+ *   ktrace resize <N>           调整缓冲区容量（必须是 2 的幂，>=4）
+ *
+ * 类别名称：sched fs net mem irq syscall proc timer all
+ * ============================================================ */
+
+static uint32_t ktrace_parse_cats(const char *s) {
+    uint32_t mask = 0;
+    if (!s || !*s) return KTRACE_CAT_ALL;
+    /* 接受以 + 或 , 分隔的多个类别名 */
+    char buf[128];
+    strncpy(buf, s, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+    char *tok = buf;
+    char *p = buf;
+    while (1) {
+        if (*p == '+' || *p == ',' || *p == '\0') {
+            int last = (*p == '\0');
+            *p = '\0';
+            if (*tok) {
+                if (strcmp(tok, "sched") == 0)        mask |= KTRACE_CAT_SCHED;
+                else if (strcmp(tok, "fs") == 0)      mask |= KTRACE_CAT_FS;
+                else if (strcmp(tok, "net") == 0)     mask |= KTRACE_CAT_NET;
+                else if (strcmp(tok, "mem") == 0)     mask |= KTRACE_CAT_MEM;
+                else if (strcmp(tok, "irq") == 0)     mask |= KTRACE_CAT_IRQ;
+                else if (strcmp(tok, "syscall") == 0) mask |= KTRACE_CAT_SYSCALL;
+                else if (strcmp(tok, "proc") == 0)    mask |= KTRACE_CAT_PROC;
+                else if (strcmp(tok, "timer") == 0)   mask |= KTRACE_CAT_TIMER;
+                else if (strcmp(tok, "all") == 0)     mask |= KTRACE_CAT_ALL;
+                else return 0xFFFFFFFFu; /* 表示有未知类别 */
+            }
+            tok = p + 1;
+            if (last) break;
+        }
+        p++;
+    }
+    return mask;
+}
+
+static void cmd_ktrace_show_stats(void) {
+    ktrace_stats_t st;
+    ktrace_get_stats(&st);
+    char line[160];
+
+    shell_print("=== ktrace Statistics ===\n");
+
+    snprintf(line, sizeof(line),
+             "Enabled mask : 0x%08X\n", st.enabled_mask);
+    shell_print(line);
+    snprintf(line, sizeof(line),
+             "Min level    : %u (0=DBG 1=INF 2=WRN 3=ERR)\n", st.min_level);
+    shell_print(line);
+    snprintf(line, sizeof(line),
+             "Buffer cap   : %u events\n", st.buffer_capacity);
+    shell_print(line);
+    snprintf(line, sizeof(line),
+             "In buffer    : %u events (peak %u)\n",
+             st.events_in_buffer, st.max_buffered);
+    shell_print(line);
+    shell_print("\n");
+
+    /* 用 %llu 截断为 32 位显示，避免 itoa 不支持 64 位 */
+    snprintf(line, sizeof(line),
+             "Total events : %u\n", (uint32_t)st.total_events);
+    shell_print(line);
+    snprintf(line, sizeof(line),
+             "Dropped      : %u\n", (uint32_t)st.dropped_events);
+    shell_print(line);
+    shell_print("\n  Per-category events:\n");
+    {
+        static const struct { uint32_t cat; const char *name; } cats[] = {
+            { KTRACE_CAT_SCHED,   "sched  " },
+            { KTRACE_CAT_FS,      "fs     " },
+            { KTRACE_CAT_NET,     "net    " },
+            { KTRACE_CAT_MEM,     "mem    " },
+            { KTRACE_CAT_IRQ,     "irq    " },
+            { KTRACE_CAT_SYSCALL, "syscall" },
+            { KTRACE_CAT_PROC,    "proc   " },
+            { KTRACE_CAT_TIMER,   "timer  " },
+        };
+        uint32_t i;
+        for (i = 0; i < sizeof(cats) / sizeof(cats[0]); i++) {
+            int idx = -1;
+            switch (cats[i].cat) {
+                case KTRACE_CAT_SCHED:   idx = 0; break;
+                case KTRACE_CAT_FS:      idx = 1; break;
+                case KTRACE_CAT_NET:     idx = 2; break;
+                case KTRACE_CAT_MEM:     idx = 3; break;
+                case KTRACE_CAT_IRQ:     idx = 4; break;
+                case KTRACE_CAT_SYSCALL: idx = 5; break;
+                case KTRACE_CAT_PROC:    idx = 6; break;
+                case KTRACE_CAT_TIMER:   idx = 7; break;
+            }
+            if (idx < 0) continue;
+            snprintf(line, sizeof(line), "    %s  %u\n",
+                     cats[i].name, (uint32_t)st.events_per_cat[idx]);
+            shell_print(line);
+        }
+    }
+}
+
+static void cmd_ktrace_show_events(uint32_t count) {
+    ktrace_event_t evs[32];
+    uint32_t avail;
+    uint32_t i;
+    char line[192];
+
+    if (count > 32) count = 32;
+    avail = ktrace_read(evs, count);
+    if (avail == 0) {
+        shell_print("ktrace: buffer is empty\n");
+        return;
+    }
+
+    snprintf(line, sizeof(line),
+             "=== ktrace: %u most recent events ===\n", avail);
+    shell_print(line);
+
+    for (i = 0; i < avail; i++) {
+        ktrace_event_t *e = &evs[i];
+        snprintf(line, sizeof(line),
+                 "[%u] tsc=%u pid=%u %s/%s: %s\n",
+                 (uint32_t)i,
+                 (uint32_t)e->timestamp,
+                 e->pid,
+                 ktrace_cat_name(e->category),
+                 ktrace_level_name(e->level),
+                 e->msg);
+        shell_print(line);
+    }
+}
+
+static void cmd_ktrace(const char *subcmd, const char *arg1, const char *arg2) {
+    if (!subcmd || !*subcmd || strcmp(subcmd, "help") == 0) {
+        shell_print("Usage:\n");
+        shell_print("  ktrace                   Show status and statistics\n");
+        shell_print("  ktrace on  [cat...]      Enable categories (sched/fs/net/mem/irq/syscall/proc/timer/all)\n");
+        shell_print("  ktrace off [cat...]      Disable categories\n");
+        shell_print("  ktrace mask <hex>        Set category mask directly\n");
+        shell_print("  ktrace level <0..3>      Set min level (0=DBG 1=INF 2=WRN 3=ERR)\n");
+        shell_print("  ktrace emit <cat> <msg>  Inject a test event (single-word message)\n");
+        shell_print("  ktrace show [N]          Show last N events (default 16)\n");
+        shell_print("  ktrace dump [N]          Dump last N events to klog\n");
+        shell_print("  ktrace reset             Reset statistics\n");
+        shell_print("  ktrace clear             Clear ring buffer\n");
+        shell_print("  ktrace resize <N>        Resize buffer (power of 2, >= 4)\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "on") == 0) {
+        uint32_t m = ktrace_parse_cats(arg1);
+        if (m == 0xFFFFFFFFu) {
+            shell_print("ktrace: unknown category in '");
+            shell_print(arg1 ? arg1 : "");
+            shell_print("'\n");
+            last_exit_code = 1;
+            return;
+        }
+        ktrace_enable(m);
+        shell_print("ktrace: enabled mask 0x");
+        {
+            char buf[12];
+            itoa((int)ktrace_get_mask(), buf, 16);
+            shell_print(buf);
+        }
+        shell_print("\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "off") == 0) {
+        uint32_t m = ktrace_parse_cats(arg1);
+        if (m == 0xFFFFFFFFu) {
+            shell_print("ktrace: unknown category\n");
+            last_exit_code = 1;
+            return;
+        }
+        ktrace_disable(m);
+        shell_print("ktrace: disabled, mask now 0x");
+        {
+            char buf[12];
+            itoa((int)ktrace_get_mask(), buf, 16);
+            shell_print(buf);
+        }
+        shell_print("\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "mask") == 0) {
+        if (!arg1 || !*arg1) {
+            shell_print("Usage: ktrace mask <hex>\n");
+            last_exit_code = 1;
+            return;
+        }
+        uint32_t m = (uint32_t)strtol(arg1, NULL, 0);
+        ktrace_set_mask(m);
+        shell_print("ktrace: mask set to 0x");
+        {
+            char buf[12];
+            itoa((int)m, buf, 16);
+            shell_print(buf);
+        }
+        shell_print("\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "level") == 0) {
+        if (!arg1 || !*arg1) {
+            shell_print("Usage: ktrace level <0..3>\n");
+            last_exit_code = 1;
+            return;
+        }
+        uint32_t lvl = (uint32_t)strtol(arg1, NULL, 10);
+        if (lvl > 3) {
+            shell_print("ktrace: level must be 0..3\n");
+            last_exit_code = 1;
+            return;
+        }
+        ktrace_set_level(lvl);
+        shell_print("ktrace: min level set to ");
+        {
+            char buf[12];
+            itoa((int)lvl, buf, 10);
+            shell_print(buf);
+        }
+        shell_print("\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "emit") == 0) {
+        /* arg1 = category name (single word), arg2 = message (single word) */
+        if (!arg1 || !*arg1 || !arg2 || !*arg2) {
+            shell_print("Usage: ktrace emit <cat> <msg>\n");
+            last_exit_code = 1;
+            return;
+        }
+        uint32_t m = ktrace_parse_cats(arg1);
+        if (m == 0xFFFFFFFFu || m == 0) {
+            shell_print("ktrace: unknown category '");
+            shell_print(arg1);
+            shell_print("'\n");
+            last_exit_code = 1;
+            return;
+        }
+        ktrace_event(m, KTRACE_LEVEL_INFO, arg2);
+        shell_print("ktrace: event injected\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "show") == 0) {
+        uint32_t n = 16;
+        if (arg1 && *arg1) {
+            n = (uint32_t)strtol(arg1, NULL, 10);
+            if (n == 0) n = 16;
+            if (n > 32) n = 32;
+        }
+        cmd_ktrace_show_events(n);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "dump") == 0) {
+        uint32_t n = 0;
+        if (arg1 && *arg1) {
+            n = (uint32_t)strtol(arg1, NULL, 10);
+        }
+        ktrace_dump(n);
+        shell_print("ktrace: events dumped to klog (use 'dmesg' to view)\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "reset") == 0) {
+        ktrace_reset_stats();
+        shell_print("ktrace: statistics reset\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "clear") == 0) {
+        ktrace_clear();
+        shell_print("ktrace: ring buffer cleared\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "resize") == 0) {
+        if (!arg1 || !*arg1) {
+            shell_print("Usage: ktrace resize <N> (power of 2, >= 4)\n");
+            last_exit_code = 1;
+            return;
+        }
+        uint32_t n = (uint32_t)strtol(arg1, NULL, 10);
+        int rc = ktrace_resize(n);
+        if (rc != 0) {
+            shell_print("ktrace: resize failed (must be power of 2, >= 4)\n");
+            last_exit_code = 1;
+        } else {
+            shell_print("ktrace: buffer resized to ");
+            char buf[12];
+            itoa((int)n, buf, 10);
+            shell_print(buf);
+            shell_print(" events\n");
+            last_exit_code = 0;
+        }
+        return;
+    }
+
+    /* Default: show status & stats */
+    cmd_ktrace_show_stats();
+    last_exit_code = 0;
+}
+
+/* ============================================================
+ * kwork - 内核工作队列管理命令
+ *
+ * 用法：
+ *   kwork                       显示统计
+ *   kwork help                   显示帮助
+ *   kwork test                   排队一个测试工作项（立即执行）
+ *   kwork delayed <ms>           排队一个延迟 ms 毫秒的测试工作项
+ *   kwork periodic <ms>          排队一个周期性测试工作项（每 ms 毫秒）
+ *   kwork cancel                 取消正在排队的测试工作项
+ *   kwork flush                  等待所有工作完成
+ *   kwork dump                   转储队列状态到 klog
+ *   kwork reset                  重置统计计数器
+ * ============================================================ */
+
+/* 测试用工作项与回调 */
+static kwork_t g_kwork_test_item;
+static volatile uint32_t g_kwork_test_count = 0;
+
+static void kwork_test_cb(void *data) {
+    uint32_t n = ++g_kwork_test_count;
+    klog_info("kwork: test callback #%u fired (data=%p)", n, data);
+}
+
+static void cmd_kwork(const char *subcmd, const char *arg1, const char *arg2) {
+    (void)arg2;  /* 暂未使用 */
+    if (!subcmd || !*subcmd || strcmp(subcmd, "help") == 0) {
+        shell_print("Usage:\n");
+        shell_print("  kwork                 Show workqueue statistics\n");
+        shell_print("  kwork test            Queue a test work item (immediate)\n");
+        shell_print("  kwork delayed <ms>    Queue a delayed test work item\n");
+        shell_print("  kwork periodic <ms>   Queue a periodic test work item\n");
+        shell_print("  kwork cancel          Cancel the test work item\n");
+        shell_print("  kwork flush            Wait for all queued work to finish\n");
+        shell_print("  kwork dump            Dump queue state to klog\n");
+        shell_print("  kwork reset           Reset statistics\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "test") == 0) {
+        kwork_init_work(&g_kwork_test_item, kwork_test_cb, (void *)0x1234);
+        int rc = kwork_queue_work(&g_kwork_test_item);
+        if (rc == 0) {
+            shell_print("kwork: test work queued\n");
+        } else {
+            shell_print("kwork: queue failed\n");
+            last_exit_code = 1;
+        }
+        return;
+    }
+
+    if (strcmp(subcmd, "delayed") == 0) {
+        if (!arg1 || !*arg1) {
+            shell_print("Usage: kwork delayed <ms>\n");
+            last_exit_code = 1;
+            return;
+        }
+        uint32_t ms = (uint32_t)strtol(arg1, NULL, 10);
+        if (ms == 0) {
+            shell_print("kwork: delay must be > 0\n");
+            last_exit_code = 1;
+            return;
+        }
+        kwork_init_work(&g_kwork_test_item, kwork_test_cb, (void *)0x5678);
+        int rc = kwork_queue_delayed_work(&g_kwork_test_item, ms);
+        if (rc == 0) {
+            shell_print("kwork: delayed work queued (");
+            char buf[16];
+            itoa((int)ms, buf, 10);
+            shell_print(buf);
+            shell_print(" ms)\n");
+        } else {
+            shell_print("kwork: queue failed\n");
+            last_exit_code = 1;
+        }
+        return;
+    }
+
+    if (strcmp(subcmd, "periodic") == 0) {
+        if (!arg1 || !*arg1) {
+            shell_print("Usage: kwork periodic <ms>\n");
+            last_exit_code = 1;
+            return;
+        }
+        uint32_t ms = (uint32_t)strtol(arg1, NULL, 10);
+        if (ms == 0) {
+            shell_print("kwork: period must be > 0\n");
+            last_exit_code = 1;
+            return;
+        }
+        kwork_init_work(&g_kwork_test_item, kwork_test_cb, (void *)0x9abc);
+        int rc = kwork_queue_periodic_work(&g_kwork_test_item, ms);
+        if (rc == 0) {
+            shell_print("kwork: periodic work queued (every ");
+            char buf[16];
+            itoa((int)ms, buf, 10);
+            shell_print(buf);
+            shell_print(" ms)\n");
+        } else {
+            shell_print("kwork: queue failed\n");
+            last_exit_code = 1;
+        }
+        return;
+    }
+
+    if (strcmp(subcmd, "cancel") == 0) {
+        int rc = kwork_cancel_work(&g_kwork_test_item);
+        if (rc == 0) {
+            shell_print("kwork: test work cancelled\n");
+        } else {
+            shell_print("kwork: cancel failed (not queued?)\n");
+            last_exit_code = 1;
+        }
+        return;
+    }
+
+    if (strcmp(subcmd, "flush") == 0) {
+        shell_print("kwork: flushing...\n");
+        kwork_flush();
+        shell_print("kwork: flush complete\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "dump") == 0) {
+        kwork_dump(kwork_get_default());
+        shell_print("kwork: state dumped to klog (use 'dmesg' to view)\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "reset") == 0) {
+        kwork_reset_stats();
+        g_kwork_test_count = 0;
+        shell_print("kwork: statistics reset\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    /* Default: show stats */
+    {
+        kwork_stats_t st;
+        kwork_get_stats(&st);
+        char line[160];
+
+        shell_print("=== kwork Statistics ===\n");
+        snprintf(line, sizeof(line),
+                 "Worker alive : %s\n",
+                 st.worker_alive ? "yes" : "no");
+        shell_print(line);
+        snprintf(line, sizeof(line),
+                 "Immediate    : %u pending\n", st.immediate_pending);
+        shell_print(line);
+        snprintf(line, sizeof(line),
+                 "Delayed      : %u pending\n", st.delayed_pending);
+        shell_print(line);
+        snprintf(line, sizeof(line),
+                 "Total queued : %u\n", (uint32_t)st.queued);
+        shell_print(line);
+        snprintf(line, sizeof(line),
+                 "Total exec   : %u\n", (uint32_t)st.executed);
+        shell_print(line);
+        snprintf(line, sizeof(line),
+                 "Errors       : %u\n", (uint32_t)st.errors);
+        shell_print(line);
+        snprintf(line, sizeof(line),
+                 "Cancelled    : %u\n", (uint32_t)st.cancelled);
+        shell_print(line);
+        snprintf(line, sizeof(line),
+                 "Max depth    : %u\n", (uint32_t)st.max_queue_depth);
+        shell_print(line);
+        snprintf(line, sizeof(line),
+                 "Test fires   : %u\n", g_kwork_test_count);
+        shell_print(line);
+        last_exit_code = 0;
+    }
+}
+
+/* ============================================================
+ * reg - 系统注册表管理命令
+ *
+ * 用法：
+ *   reg                              显示根键列表与统计
+ *   reg help                         显示帮助
+ *   reg query <path>                 查询键的子键与值
+ *   reg add <path>                   创建键
+ *   reg set <path> <name> <data>    设置字符串值
+ *   reg setdw <path> <name> <num>   设置 DWORD 值
+ *   reg get <path> <name>            获取值
+ *   reg del <path> [name]            删除键或值
+ *   reg export [path]                导出（默认全部）
+ *   reg stats                        显示统计
+ *   reg roots                        列出根键
+ *
+ * 路径格式：HKLM\System\Kernel  （反斜杠或正斜杠均可）
+ * ============================================================ */
+
+static void cmd_reg_print_subtree(reg_handle_t key, int depth) {
+    char indent[64];
+    int i;
+    char line[400];
+
+    for (i = 0; i < depth && i < 30; i++) indent[i] = ' ';
+    indent[i] = '\0';
+
+    /* 打印键名 */
+    snprintf(line, sizeof(line), "%s%s/\n", indent, key->name);
+    shell_print(line);
+
+    /* 打印值 */
+    reg_value_t *v = key->values;
+    while (v) {
+        snprintf(line, sizeof(line), "%s  \"%s\" = %s : %s\n",
+                 indent, v->name, reg_type_name(v->type), v->data);
+        shell_print(line);
+        v = v->next;
+    }
+
+    /* 递归子键 */
+    reg_key_t *c = key->children;
+    while (c) {
+        cmd_reg_print_subtree(c, depth + 1);
+        c = c->next_sibling;
+    }
+}
+
+static void cmd_reg(const char *subcmd, const char *arg1, const char *arg2) {
+    (void)arg2;
+    char line[512];
+    static const char *reg_roots[HKEY_COUNT] = {
+        HKLM_SHORT, HKCU_SHORT, HKCR_SHORT, HKU_SHORT, HKCC_SHORT
+    };
+
+    if (!subcmd || !*subcmd || strcmp(subcmd, "help") == 0) {
+        shell_print("Usage:\n");
+        shell_print("  reg                 Show root keys and stats\n");
+        shell_print("  reg query <path>    Query subkeys and values of a key\n");
+        shell_print("  reg add <path>      Create a key\n");
+        shell_print("  reg set <path> <name> <data>      Set a string value\n");
+        shell_print("  reg setdw <path> <name> <num>    Set a DWORD value\n");
+        shell_print("  reg get <path> <name>             Get a value\n");
+        shell_print("  reg del <path> [name]             Delete key or value\n");
+        shell_print("  reg export [path]   Export registry (default: all)\n");
+        shell_print("  reg stats           Show statistics\n");
+        shell_print("  reg roots           List root keys\n");
+        shell_print("\nPaths: HKLM\\System\\Kernel  HKCU\\Desktop  HKCR\\.txt\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "roots") == 0) {
+        int i;
+        for (i = 0; i < HKEY_COUNT; i++) {
+            snprintf(line, sizeof(line), "  %-6s  %s\n",
+                     reg_roots[i], reg_root_name((uint32_t)i));
+            shell_print(line);
+        }
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "stats") == 0) {
+        reg_stats_t st;
+        reg_get_stats(&st);
+        shell_print("=== Registry Statistics ===\n");
+        snprintf(line, sizeof(line), "Total keys   : %u\n", st.total_keys);
+        shell_print(line);
+        snprintf(line, sizeof(line), "Total values : %u\n", st.total_values);
+        shell_print(line);
+        shell_print("\n  Per-root:\n");
+        int i;
+        for (i = 0; i < HKEY_COUNT; i++) {
+            snprintf(line, sizeof(line), "    %-6s  keys=%u  values=%u\n",
+                     reg_roots[i],
+                     st.per_root_keys[i], st.per_root_values[i]);
+            shell_print(line);
+        }
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "query") == 0) {
+        if (!arg1 || !*arg1) {
+            shell_print("Usage: reg query <path>\n");
+            last_exit_code = 1;
+            return;
+        }
+        reg_handle_t h = reg_open_path(arg1);
+        if (!h) {
+            shell_print("reg: key not found\n");
+            last_exit_code = 1;
+            return;
+        }
+        cmd_reg_print_subtree(h, 0);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "add") == 0) {
+        if (!arg1 || !*arg1) {
+            shell_print("Usage: reg add <path>\n");
+            last_exit_code = 1;
+            return;
+        }
+        reg_handle_t h = reg_create_path(arg1);
+        if (!h) {
+            shell_print("reg: failed to create key\n");
+            last_exit_code = 1;
+            return;
+        }
+        shell_print("reg: key created/exists\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "set") == 0) {
+        /* arg1 = path, arg2 = "name value" - 但我们只有 arg1/arg2
+         * 实际：subcmd=set, arg1=path, arg2=name
+         * 需要 arg3=value - 但 shell 只给到 arg3
+         * 这里用 arg1=path, arg2=name, 然后 value 缺失
+         * 简化：arg1 形如 "path\\name value" 太复杂
+         * 改为：reg set <path> <name>=<value>
+         * 但 shell 解析为 arg1=path, arg2=name=value
+         */
+        if (!arg1 || !*arg1 || !arg2 || !*arg2) {
+            shell_print("Usage: reg set <path> <name> <value>\n");
+            last_exit_code = 1;
+            return;
+        }
+        /* arg2 可能是 "name value" 或 "name" (value 在 arg3) */
+        char name[REG_MAX_NAME];
+        char value[REG_MAX_DATA];
+        /* 尝试在 arg2 中找空格分割 */
+        const char *sp = arg2;
+        while (*sp && *sp != ' ') sp++;
+        if (*sp) {
+            uint32_t nl = (uint32_t)(sp - arg2);
+            if (nl >= sizeof(name)) nl = sizeof(name) - 1;
+            memcpy(name, arg2, nl);
+            name[nl] = '\0';
+            sp++;
+            while (*sp == ' ') sp++;
+            strncpy(value, sp, sizeof(value) - 1);
+            value[sizeof(value) - 1] = '\0';
+        } else {
+            /* arg2 是 name，value 缺失 */
+            strncpy(name, arg2, sizeof(name) - 1);
+            name[sizeof(name) - 1] = '\0';
+            value[0] = '\0';
+        }
+        reg_handle_t h = reg_create_path(arg1);
+        if (!h) {
+            shell_print("reg: invalid path\n");
+            last_exit_code = 1;
+            return;
+        }
+        int rc = reg_set_string(h, name, value);
+        if (rc == REG_OK) {
+            shell_print("reg: value set\n");
+            last_exit_code = 0;
+        } else {
+            shell_print("reg: set failed\n");
+            last_exit_code = 1;
+        }
+        return;
+    }
+
+    if (strcmp(subcmd, "setdw") == 0) {
+        if (!arg1 || !*arg1 || !arg2 || !*arg2) {
+            shell_print("Usage: reg setdw <path> <name> <num>\n");
+            last_exit_code = 1;
+            return;
+        }
+        char name[REG_MAX_NAME];
+        const char *sp = arg2;
+        while (*sp && *sp != ' ') sp++;
+        uint32_t nl = (uint32_t)(sp - arg2);
+        if (nl >= sizeof(name)) nl = sizeof(name) - 1;
+        memcpy(name, arg2, nl);
+        name[nl] = '\0';
+        uint32_t val = 0;
+        if (*sp) {
+            sp++;
+            while (*sp == ' ') sp++;
+            val = (uint32_t)strtol(sp, NULL, 10);
+        }
+        reg_handle_t h = reg_create_path(arg1);
+        if (!h) {
+            shell_print("reg: invalid path\n");
+            last_exit_code = 1;
+            return;
+        }
+        int rc = reg_set_dword(h, name, val);
+        if (rc == REG_OK) {
+            shell_print("reg: dword set\n");
+            last_exit_code = 0;
+        } else {
+            shell_print("reg: set failed\n");
+            last_exit_code = 1;
+        }
+        return;
+    }
+
+    if (strcmp(subcmd, "get") == 0) {
+        if (!arg1 || !*arg1 || !arg2 || !*arg2) {
+            shell_print("Usage: reg get <path> <name>\n");
+            last_exit_code = 1;
+            return;
+        }
+        reg_handle_t h = reg_open_path(arg1);
+        if (!h) {
+            shell_print("reg: key not found\n");
+            last_exit_code = 1;
+            return;
+        }
+        uint32_t type = 0;
+        char data[REG_MAX_DATA];
+        uint32_t size = sizeof(data);
+        int rc = reg_get_value(h, arg2, &type, data, &size);
+        if (rc != REG_OK) {
+            shell_print("reg: value not found\n");
+            last_exit_code = 1;
+            return;
+        }
+        snprintf(line, sizeof(line), "%s : %s\n", reg_type_name(type), data);
+        shell_print(line);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "del") == 0) {
+        if (!arg1 || !*arg1) {
+            shell_print("Usage: reg del <path> [name]\n");
+            last_exit_code = 1;
+            return;
+        }
+        if (arg2 && *arg2) {
+            /* 删除值 */
+            reg_handle_t h = reg_open_path(arg1);
+            if (!h) {
+                shell_print("reg: key not found\n");
+                last_exit_code = 1;
+                return;
+            }
+            int rc = reg_delete_value(h, arg2);
+            if (rc == REG_OK) {
+                shell_print("reg: value deleted\n");
+            } else {
+                shell_print("reg: value not found\n");
+                last_exit_code = 1;
+            }
+        } else {
+            /* 删除键 */
+            const char *sub;
+            int root = reg_parse_root(arg1, &sub);
+            if (root < 0) {
+                shell_print("reg: invalid path\n");
+                last_exit_code = 1;
+                return;
+            }
+            int rc = reg_delete_key((uint32_t)root, sub);
+            if (rc == REG_OK) {
+                shell_print("reg: key deleted\n");
+            } else {
+                shell_print("reg: delete failed\n");
+                last_exit_code = 1;
+            }
+        }
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "export") == 0) {
+        if (!arg1 || !*arg1) {
+            /* 导出全部到 klog */
+            reg_dump_all();
+            shell_print("reg: full registry dumped to klog\n");
+        } else {
+            reg_handle_t h = reg_open_path(arg1);
+            if (!h) {
+                shell_print("reg: key not found\n");
+                last_exit_code = 1;
+                return;
+            }
+            static char buf[8192];
+            buf[0] = '\0';
+            reg_export(h, buf, sizeof(buf));
+            shell_print(buf);
+        }
+        last_exit_code = 0;
+        return;
+    }
+
+    /* 默认：显示根键与统计 */
+    {
+        int i;
+        shell_print("=== System Registry ===\n");
+        shell_print("Root keys:\n");
+        for (i = 0; i < HKEY_COUNT; i++) {
+            snprintf(line, sizeof(line), "  %-6s  %s\n",
+                     reg_roots[i], reg_root_name((uint32_t)i));
+            shell_print(line);
+        }
+        shell_print("\nUse 'reg query HKLM\\System' to browse.\n");
+        shell_print("Use 'reg help' for full usage.\n");
+        reg_stats_t st;
+        reg_get_stats(&st);
+        snprintf(line, sizeof(line), "\nKeys: %u  Values: %u\n",
+                 st.total_keys, st.total_values);
+        shell_print(line);
+        last_exit_code = 0;
+    }
+}
+
+/* ============================================================
+ * apps - 内置应用浏览器与启动器
+ *
+ * 用法：
+ *   apps                  列出所有已注册应用
+ *   apps help             显示帮助
+ *   apps list             列出所有应用（表格）
+ *   apps info <id>        显示应用详情
+ *   apps run <id>         启动应用
+ *   apps cat <category>   按类别筛选（System/Utility/Application/Game）
+ * ============================================================ */
+
+static void cmd_apps_list(const char *category_filter) {
+    reg_handle_t apps_root = reg_open_path("HKLM\\Software\\Apps");
+    if (!apps_root) {
+        shell_print("apps: no applications registered\n");
+        return;
+    }
+
+    char line[256];
+    if (category_filter && *category_filter) {
+        snprintf(line, sizeof(line),
+                 "=== Applications [%s] ===\n", category_filter);
+    } else {
+        snprintf(line, sizeof(line),
+                 "=== Installed Applications ===\n");
+    }
+    shell_print(line);
+    shell_print("ID            Name              Category    Version\n");
+    shell_print("------------  ----------------  ----------  -------\n");
+
+    reg_key_t *c = apps_root->children;
+    uint32_t count = 0;
+    while (c) {
+        reg_value_t *name_v = NULL;
+        reg_value_t *cat_v = NULL;
+        reg_value_t *ver_v = NULL;
+        reg_value_t *v = c->values;
+        while (v) {
+            if (strcmp(v->name, "name") == 0) name_v = v;
+            else if (strcmp(v->name, "category") == 0) cat_v = v;
+            else if (strcmp(v->name, "version") == 0) ver_v = v;
+            v = v->next;
+        }
+        const char *cat = cat_v ? cat_v->data : "?";
+        if (!category_filter || !*category_filter ||
+            strcmp(cat, category_filter) == 0) {
+            snprintf(line, sizeof(line), "%-12s  %-16s  %-10s  %s\n",
+                     c->name,
+                     name_v ? name_v->data : c->name,
+                     cat,
+                     ver_v ? ver_v->data : "?");
+            shell_print(line);
+            count++;
+        }
+        c = c->next_sibling;
+    }
+    snprintf(line, sizeof(line), "\n%u application(s) found.\n", count);
+    shell_print(line);
+}
+
+static void cmd_apps(const char *subcmd, const char *arg1, const char *arg2) {
+    (void)arg2;
+    char line[512];
+
+    if (!subcmd || !*subcmd || strcmp(subcmd, "help") == 0) {
+        shell_print("Usage:\n");
+        shell_print("  apps             List all installed applications\n");
+        shell_print("  apps list        List all apps (table format)\n");
+        shell_print("  apps info <id>   Show application details\n");
+        shell_print("  apps run <id>    Launch an application\n");
+        shell_print("  apps cat <name>  Filter by category (System/Utility/Application/Game)\n");
+        shell_print("\nCategories: System, Utility, Application, Game\n");
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "list") == 0) {
+        cmd_apps_list(NULL);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "cat") == 0) {
+        if (!arg1 || !*arg1) {
+            shell_print("Usage: apps cat <category>\n");
+            last_exit_code = 1;
+            return;
+        }
+        cmd_apps_list(arg1);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "info") == 0) {
+        if (!arg1 || !*arg1) {
+            shell_print("Usage: apps info <id>\n");
+            last_exit_code = 1;
+            return;
+        }
+        char path[128];
+        snprintf(path, sizeof(path), "HKLM\\Software\\Apps\\%s", arg1);
+        reg_handle_t h = reg_open_path(path);
+        if (!h) {
+            shell_print("apps: application not found\n");
+            last_exit_code = 1;
+            return;
+        }
+        shell_print("=== Application Details ===\n");
+        snprintf(line, sizeof(line), "ID: %s\n", arg1);
+        shell_print(line);
+        reg_value_t *v = h->values;
+        while (v) {
+            snprintf(line, sizeof(line), "%-12s : %s\n",
+                     v->name, v->data);
+            shell_print(line);
+            v = v->next;
+        }
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "run") == 0) {
+        if (!arg1 || !*arg1) {
+            shell_print("Usage: apps run <id>\n");
+            last_exit_code = 1;
+            return;
+        }
+        /* 使用 appexec 服务获取应用信息 */
+        appexec_app_info_t info;
+        if (appexec_get_info(arg1, &info) != 0) {
+            shell_print("apps: application not found\n");
+            last_exit_code = 1;
+            return;
+        }
+
+        /* 确定要执行的命令 */
+        const char *cmd = info.command;
+        if (!cmd || !*cmd) cmd = info.path;
+        if (!cmd || !*cmd) cmd = info.id;
+
+        char buf[320];
+        snprintf(buf, sizeof(buf), "apps: launching '%s' (id=%s, cmd=%s)\n",
+                 info.name, arg1, cmd);
+        shell_print(buf);
+
+        /* 记录启动 */
+        int hidx = appexec_record_launch(arg1, info.name, cmd);
+
+        /* 实际执行 */
+        shell_execute(cmd);
+
+        /* 记录结果（shell_execute 无返回值，假设 last_exit_code） */
+        appexec_record_result(hidx, last_exit_code);
+
+        snprintf(buf, sizeof(buf), "apps: '%s' completed (exit=%d)\n",
+                 info.name, last_exit_code);
+        shell_print(buf);
+        last_exit_code = 0;
+        return;
+    }
+
+    if (strcmp(subcmd, "history") == 0) {
+        uint32_t count = appexec_history_count();
+        if (count == 0) {
+            shell_print("No app launch history.\n");
+            last_exit_code = 0;
+            return;
+        }
+        appexec_history_t *hist = (appexec_history_t *)kmalloc(
+            sizeof(appexec_history_t) * count);
+        if (!hist) {
+            shell_print("apps: out of memory\n");
+            last_exit_code = 1;
+            return;
+        }
+        uint32_t n = appexec_history(hist, count);
+        shell_print("App                     ID            Exit  Duration  Command\n");
+        shell_print("----------------------  ------------  ----  --------  -------\n");
+        for (uint32_t i = 0; i < n; i++) {
+            char line[512];
+            snprintf(line, sizeof(line), "%-22s  %-12s  %4d  %7u  %s\n",
+                     hist[i].name, hist[i].id,
+                     hist[i].completed ? hist[i].exit_code : -1,
+                     hist[i].duration_ms,
+                     hist[i].command);
+            shell_print(line);
+        }
+        kfree(hist);
+        last_exit_code = 0;
+        return;
+    }
+
+    /* 默认：列出所有 */
+    cmd_apps_list(NULL);
+    last_exit_code = 0;
+}
+
 void shell_init(void) {
     current_dir[0] = '/';
     current_dir[1] = '\0';
@@ -13725,6 +19563,8 @@ void shell_init(void) {
     history_count = 0;
     history_pos = 0;
     alias_count = 0;
+    /* 注册 cron 命令执行器，使定时任务可执行任意 shell 命令 */
+    cron_set_executor(cron_shell_executor);
 }
 
 

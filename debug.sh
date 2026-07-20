@@ -1,6 +1,6 @@
 #!/bin/bash
 echo "=========================================="
-echo "  Funs Core v0.5 - Debug Script"
+echo "  Funs Core v0.8 - Debug Script"
 echo "=========================================="
 echo
 

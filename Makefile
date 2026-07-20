@@ -39,7 +39,8 @@ LIB_ASM    = lib/memops.asm lib/atomic.asm lib/string_asm.asm lib/setjmp.asm
 ALL_ASM = $(KERNEL_ASM) $(LIB_ASM)
 
 # Driver C sources (all subdirs except gpu, which is added separately)
-DRIVER_C = $(wildcard drivers/*.c) $(wildcard drivers/block/*.c) $(wildcard drivers/char/*.c) $(filter-out drivers/net/wifi_stub.c,$(wildcard drivers/net/*.c)) $(wildcard drivers/usb/*.c) $(wildcard drivers/video/*.c)
+# Exclude rtc.c, gpio.c, i2c.c - full driver frameworks are now in kernel/
+DRIVER_C = $(filter-out drivers/rtc.c drivers/gpio.c drivers/i2c.c,$(wildcard drivers/*.c)) $(wildcard drivers/block/*.c) $(wildcard drivers/char/*.c) $(filter-out drivers/net/wifi_stub.c,$(wildcard drivers/net/*.c)) $(wildcard drivers/usb/*.c) $(wildcard drivers/video/*.c)
 DRIVERS_GPU_C = $(wildcard drivers/gpu/*.c)
 DRIVERS_NET_C = $(wildcard drivers/net/*.c)
 DRIVERS_AUDIO_C = $(wildcard drivers/audio/*.c)
@@ -166,7 +167,7 @@ debug: all
 # --- Package for distribution ---
 package: all
 	@echo "Creating package..."
-	@mkdir -p funs-core-0.5/boot funs-core-0.5/kernel
-	@cp build/os.img funs-core-0.5/boot/
-	@cp build/kernel.elf funs-core-0.5/kernel/
-	@echo "Package created in funs-core-0.5/"
+	@mkdir -p funs-core-0.8/boot funs-core-0.8/kernel
+	@cp build/os.img funs-core-0.8/boot/
+	@cp build/kernel.elf funs-core-0.8/kernel/
+	@echo "Package created in funs-core-0.8/"
