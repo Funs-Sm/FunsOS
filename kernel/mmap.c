@@ -6,6 +6,8 @@
 #include "vmm.h"
 #include "vfs.h"
 #include "process.h"
+#include "sched.h"
+#include "../fs/file_desc.h"
 
 /* Start of mmap region in virtual address space */
 #define MMAP_REGION_START 0x40000000
@@ -14,6 +16,16 @@
 static mmap_region_t *region_list = NULL;
 static spinlock_t mmap_lock;
 static uint32_t next_vaddr = MMAP_REGION_START;
+
+/* syscall shim: the kernel mmap() needs fd+offset but the syscall ABI only has
+ * 5 args.  We store them here before delegating to the real mmap(). */
+static uint32_t g_sys_mmap_fd = 0xFFFFFFFF;
+static uint32_t g_sys_mmap_offset = 0;
+
+void sys_mmap_set_fd_offset(uint32_t fd, uint32_t offset) {
+    g_sys_mmap_fd = fd;
+    g_sys_mmap_offset = offset;
+}
 
 void mmap_init(void) {
     region_list = NULL;
@@ -111,13 +123,22 @@ void *mmap(void *addr, uint32_t length, uint32_t prot, uint32_t flags,
     region->file_offset = (uint64_t)offset;
     region->pid = 0;  /* Will be set by caller if needed */
 
-    /* For file-backed mapping, store the inode number */
+    /* For file-backed mapping, store the inode number and file path.
+     * When called from the syscall, fd/offset may be 0xFFFFFFFF/0 if the
+     * caller didn't provide them (old ABI).  In that case, fall back to
+     * the values set by sys_mmap_set_fd_offset(). */
     if (!(flags & MAP_ANONYMOUS) && fd != 0xFFFFFFFF) {
-        /* In a full implementation, we'd look up the inode from fd.
-           For now, store fd as inode_num placeholder. */
         region->inode_num = fd;
+        region->path = NULL;
+    } else if (!(flags & MAP_ANONYMOUS) && g_sys_mmap_fd != 0xFFFFFFFF) {
+        region->inode_num = g_sys_mmap_fd;
+        region->file_offset = g_sys_mmap_offset;
+        region->path = NULL;
+        g_sys_mmap_fd = 0xFFFFFFFF;
+        g_sys_mmap_offset = 0;
     } else {
         region->inode_num = 0;
+        region->path = NULL;
     }
 
     /* Pages are mapped lazily on page fault, so no page table changes here */
@@ -276,16 +297,26 @@ void mmap_handle_page_fault(uint32_t vaddr, uint32_t pid) {
             /* Zero the page first */
             memset((void *)((uint32_t)phys + KERNEL_BASE), 0, PAGE_SIZE);
 
-            /* For file-backed mappings, read from file */
+            /* For file-backed mappings, read file content into the page.
+             * inode_num stores the fd number from when mmap was called. */
             if (!(cur->flags & MAP_ANONYMOUS) && cur->inode_num != 0) {
                 uint32_t page_offset = vaddr - cur->start_vaddr;
-                uint64_t file_off = cur->file_offset + page_offset;
+                uint32_t file_off = (uint32_t)(cur->file_offset + page_offset);
 
-                /* Open the file and read the relevant page */
-                /* In a full implementation, we would use the inode to
-                   locate and read the file data. For now, the page
-                   remains zero-filled for anonymous or as a fallback. */
-                (void)file_off;  /* Suppress unused warning */
+                /* Get the current process and look up the file by fd */
+                pcb_t *proc = sched_get_current();
+                if (proc) {
+                    file_descriptor_t *fdesc = fd_get_file(proc, (int32_t)cur->inode_num);
+                    if (fdesc) {
+                        file_t *file = (file_t *)fdesc->private_data;
+                        if (file) {
+                            int32_t bytes_read = vfs_pread(file,
+                                (void *)((uint32_t)phys + KERNEL_BASE),
+                                PAGE_SIZE, file_off);
+                            (void)bytes_read;
+                        }
+                    }
+                }
             }
 
             /* Map the page into the process's address space */

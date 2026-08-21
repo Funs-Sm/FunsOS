@@ -7,6 +7,9 @@ extern dentry_t *root_dentry;
 extern dentry_t *cwd_dentry;
 extern mount_t *mount_list;
 
+/* Forward decl for debug printk */
+extern void serial_print(uint16_t port, const char *s);
+
 int32_t path_normalize(const char *path, char *out, uint32_t out_size) {
     if (!path || !out || out_size == 0) return -1;
 
@@ -241,7 +244,17 @@ restart:
 
         dentry_t *child = current->child;
         dentry_t *found = NULL;
-        while (child) {
+        /* Safety: limit child list traversal to avoid infinite loops from
+         * corrupted next_sibling pointers.  A typical directory has < 100
+         * entries, so 512 is plenty. */
+        int child_iter_count = 0;
+        #define CHILD_MAX_ITER 512
+        while (child && child_iter_count < CHILD_MAX_ITER) {
+            child_iter_count++;
+            /* SAFETY: bail out if child looks bogus */
+            if ((uintptr_t)child < 0xC0000000u) {
+                break;
+            }
             if (memcmp(child->name, component, comp_len) == 0 && child->name[comp_len] == '\0') {
                 found = child;
                 break;

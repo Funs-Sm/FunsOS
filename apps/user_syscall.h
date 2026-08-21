@@ -45,6 +45,7 @@
 #define SYS_GET_TICKS     140
 #define SYS_MOUNT         42
 #define SYS_EXECVE        43
+#define SYS_FLOCK         225
 
 #define O_RDONLY      0
 #define O_WRONLY      1
@@ -337,6 +338,17 @@ static inline int sys_sendfile(int out_fd, int in_fd, unsigned long long *offset
 static inline uint32_t sys_get_ticks(void)
 {
     return (uint32_t)syscall0(SYS_GET_TICKS);
+}
+
+/* File locking (BSD flock) */
+#define LOCK_SH   1
+#define LOCK_EX   2
+#define LOCK_UN   3
+#define LOCK_NB   4
+
+static inline int sys_flock(int fd, int operation)
+{
+    return syscall2(SYS_FLOCK, fd, operation);
 }
 
 #endif

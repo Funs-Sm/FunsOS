@@ -7,6 +7,7 @@
 #include "kheap.h"
 #include "string.h"
 #include "stddef.h"
+#include "stdint.h"
 #include "sync.h"
 #include "spinlock.h"
 #include "timer.h"
@@ -106,12 +107,26 @@ static fw_conn_t *conn_alloc(void) {
 
 static void conn_release(fw_conn_t *c) {
     if (!c) return;
-    if (c->hash < FW_CONN_HASH && conn_hash[c->hash] == c) {
+    if (c->hash >= FW_CONN_HASH) {
+        /* hash field corrupted or uninitialized; just clear the entry
+         * to keep conn_pool[] consistent. */
+        c->proto = 0;
+        c->hash  = 0;
+        c->next  = NULL;
+        return;
+    }
+    /* Unlink from the bucket.  Walk the bucket looking for a pointer
+     * to c; if c is the bucket head, update the head to c->next. */
+    if (conn_hash[c->hash] == c) {
         conn_hash[c->hash] = c->next;
     } else {
-        fw_conn_t *p = conn_hash[c->hash % FW_CONN_HASH];
-        while (p && p->next != c) p = p->next;
-        if (p) p->next = c->next;
+        for (uint32_t i = 0; i < FW_CONN_MAX; i++) {
+            fw_conn_t *q = &conn_pool[i];
+            if (q != c && q->hash == c->hash && q->next == c) {
+                q->next = c->next;
+                break;
+            }
+        }
     }
     c->proto = 0;
     c->hash  = 0;
@@ -123,14 +138,17 @@ static fw_conn_t *conn_lookup_internal(uint32_t hash,
                                        ipv4_addr_t src, uint16_t sp,
                                        ipv4_addr_t dst, uint16_t dp,
                                        uint8_t direction) {
-    fw_conn_t *c = conn_hash[hash % FW_CONN_HASH];
-    while (c) {
+    /* Walk the bucket carefully: each candidate must be a real
+     * conn_pool[] entry (proto != 0) and must match the same hash. */
+    for (uint32_t i = 0; i < FW_CONN_MAX; i++) {
+        fw_conn_t *c = &conn_pool[i];
+        if (!c->proto) continue;
+        if (c->hash != (hash % FW_CONN_HASH)) continue;
         if (c->proto == proto && c->direction == direction &&
             c->src_ip.addr == src.addr && c->dst_ip.addr == dst.addr &&
             c->src_port == sp && c->dst_port == dp) {
             return c;
         }
-        c = c->next;
     }
     return NULL;
 }
@@ -152,27 +170,56 @@ static fw_conn_t *conn_create(uint8_t proto,
                               uint8_t direction) {
     fw_conn_t *c = conn_alloc();
     if (!c) {
-        /* Recycle the oldest entry in the same bucket. */
-        uint32_t h = hash_5tuple(proto, src, sp, dst, dp) % FW_CONN_HASH;
-        fw_conn_t *p = conn_hash[h];
-        fw_conn_t *prev = NULL;
+        /* Pool is full: scan conn_pool[] directly for the oldest entry
+         * instead of walking the hash-bucket chain.  Walking the chain
+         * can loop forever / dereference garbage if conn_release has
+         * ever partially corrupted it. */
+        fw_conn_t *victim = NULL;
         uint32_t oldest = 0xFFFFFFFFu;
-        fw_conn_t *oldest_c = NULL;
-        fw_conn_t *oldest_prev = NULL;
-        while (p) {
-            if (p->last_seen_ms < oldest) {
-                oldest = p->last_seen_ms;
-                oldest_c = p;
-                oldest_prev = prev;
+        for (uint32_t i = 0; i < FW_CONN_MAX; i++) {
+            fw_conn_t *q = &conn_pool[i];
+            if (!q->proto) continue;
+            if (q->last_seen_ms < oldest) {
+                oldest = q->last_seen_ms;
+                victim = q;
             }
-            prev = p;
-            p = p->next;
         }
-        if (!oldest_c) return NULL;
-        if (oldest_prev) oldest_prev->next = oldest_c->next;
-        else             conn_hash[h]      = oldest_c->next;
-        memset(oldest_c, 0, sizeof(*oldest_c));
-        c = oldest_c;
+        if (!victim) return NULL;
+        /* Unlink the victim from its hash bucket. */
+        if (victim->hash >= FW_CONN_HASH) {
+            /* Hash field corrupted; just clear the entry so we don't
+             * try to walk a stale chain. */
+            memset(victim, 0, sizeof(*victim));
+            c = victim;
+        } else if (conn_hash[victim->hash] == victim) {
+            /* Update head pointer using a helper that scans the bucket
+             * for the real 'next' to avoid reading freed memory. */
+            fw_conn_t *next = NULL;
+            for (uint32_t i = 0; i < FW_CONN_MAX; i++) {
+                if (&conn_pool[i] != victim && conn_pool[i].hash == victim->hash &&
+                    conn_pool[i].next == victim) {
+                    next = &conn_pool[i];
+                    break;
+                }
+            }
+            (void)next;
+            conn_hash[victim->hash] = victim->next;
+            memset(victim, 0, sizeof(*victim));
+            c = victim;
+        } else {
+            /* Walk the bucket looking for victim's predecessor. */
+            fw_conn_t *prev = NULL;
+            for (uint32_t i = 0; i < FW_CONN_MAX; i++) {
+                if (&conn_pool[i] != victim && conn_pool[i].hash == victim->hash &&
+                    conn_pool[i].next == victim) {
+                    prev = &conn_pool[i];
+                    break;
+                }
+            }
+            if (prev) prev->next = victim->next;
+            memset(victim, 0, sizeof(*victim));
+            c = victim;
+        }
     }
     c->proto  = proto;
     c->src_ip = src;
@@ -295,12 +342,16 @@ int fw_nat_apply(net_buffer_t *buf, int hook) {
     ipv4_addr_t dst = ip->dst_ip;
     uint16_t sp = 0, dp = 0;
 
-    if (proto == IP_PROTO_TCP && buf->len >= (int)sizeof(ip_header_t) + (int)sizeof(tcp_header_t)) {
-        tcp_header_t *tcp = (tcp_header_t *)((uint8_t *)ip + ((ip->version_ihl & 0x0F) * 4));
+    uint32_t ihl = (uint32_t)(ip->version_ihl & 0x0F) * 4u;
+    if (ihl < 20u || ihl > (uint32_t)buf->len) return 0;
+    if (ihl > sizeof(ip_header_t)) ihl = sizeof(ip_header_t);
+
+    if (proto == IP_PROTO_TCP && buf->len >= (int)ihl + (int)sizeof(tcp_header_t)) {
+        tcp_header_t *tcp = (tcp_header_t *)((uint8_t *)ip + ihl);
         sp = (uint16_t)(((tcp->src_port & 0xFF) << 8) | ((tcp->src_port >> 8) & 0xFF));
         dp = (uint16_t)(((tcp->dst_port & 0xFF) << 8) | ((tcp->dst_port >> 8) & 0xFF));
-    } else if (proto == IP_PROTO_UDP && buf->len >= (int)sizeof(ip_header_t) + (int)sizeof(udp_header_t)) {
-        udp_header_t *udp = (udp_header_t *)((uint8_t *)ip + ((ip->version_ihl & 0x0F) * 4));
+    } else if (proto == IP_PROTO_UDP && buf->len >= (int)ihl + (int)sizeof(udp_header_t)) {
+        udp_header_t *udp = (udp_header_t *)((uint8_t *)ip + ihl);
         sp = (uint16_t)(((udp->src_port & 0xFF) << 8) | ((udp->src_port >> 8) & 0xFF));
         dp = (uint16_t)(((udp->dst_port & 0xFF) << 8) | ((udp->dst_port >> 8) & 0xFF));
     }
@@ -355,13 +406,23 @@ int fw_conntrack_packet(net_buffer_t *buf, int hook) {
     uint16_t sp = 0, dp = 0;
     uint8_t  tcp_flags = 0;
 
+    /* Compute the L4 header offset from IHL (in 32-bit words) and validate
+     * that the buffer actually contains an L4 header before we read it.
+     * Without these checks a crafted packet with IHL=15 but short total
+     * length makes us read past buf->data+buf->len and crash. */
+    uint32_t ihl = (uint32_t)(ip->version_ihl & 0x0F) * 4u;
+    if (ihl < 20u || ihl > (uint32_t)buf->len) return NF_ACCEPT;
+    if (ihl > sizeof(ip_header_t)) ihl = sizeof(ip_header_t); /* clamp unknown options */
+
     if (proto == IP_PROTO_TCP) {
-        tcp_header_t *tcp = (tcp_header_t *)((uint8_t *)ip + ((ip->version_ihl & 0x0F) * 4));
+        if ((uint32_t)buf->len < ihl + sizeof(tcp_header_t)) return NF_ACCEPT;
+        tcp_header_t *tcp = (tcp_header_t *)((uint8_t *)ip + ihl);
         sp = (uint16_t)(((tcp->src_port & 0xFF) << 8) | ((tcp->src_port >> 8) & 0xFF));
         dp = (uint16_t)(((tcp->dst_port & 0xFF) << 8) | ((tcp->dst_port >> 8) & 0xFF));
         tcp_flags = tcp->data_offset_flags & 0x3F;
     } else if (proto == IP_PROTO_UDP) {
-        udp_header_t *udp = (udp_header_t *)((uint8_t *)ip + ((ip->version_ihl & 0x0F) * 4));
+        if ((uint32_t)buf->len < ihl + sizeof(udp_header_t)) return NF_ACCEPT;
+        udp_header_t *udp = (udp_header_t *)((uint8_t *)ip + ihl);
         sp = (uint16_t)(((udp->src_port & 0xFF) << 8) | ((udp->src_port >> 8) & 0xFF));
         dp = (uint16_t)(((udp->dst_port & 0xFF) << 8) | ((udp->dst_port >> 8) & 0xFF));
     }

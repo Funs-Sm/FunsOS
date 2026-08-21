@@ -1,118 +1,95 @@
-#ifndef NAMESPACE_H
-#define NAMESPACE_H
+#ifndef NS_NS_H
+#define NS_NS_H
 
 #include "stdint.h"
-#include "kernel_types.h"
+#include "capability.h"   /* for cred_t */
 
-/* ============================================================
- * Namespaces 命名空间子系统
+/* Namespace isolation.
  *
- * 提供进程资源隔离机制，支持六种命名空间：
- *   - PID:    进程ID隔离
- *   - Mount:  文件系统挂载点隔离
- *   - Net:    网络栈隔离 (复用netns)
- *   - UTS:    主机名/域名隔离
- *   - IPC:    System V IPC隔离
- *   - User:   用户/组ID隔离
- * ============================================================ */
+ * Per-task namespaces decouple the view of a particular global resource
+ * so different tasks see different instances. Each namespace has
+ * refcounts and methods to enter / leave.
+ *
+ * Supported types (subset):
+ *   - MNT  : Mount namespace (filesystem hierarchy)
+ *   - UTS  : Hostname / domain
+ *   - PID  : Process ID space
+ *   - NET  : Network stack
+ *   - IPC  : SysV IPC and Posix mqueue
+ *   - USER : User/group ID mappings
+ *   - TIME : Clock/boottime view
+ */
 
-#define NAMESPACE_MAX_PROXIES    32
-#define NAMESPACE_UTSNAME_MAX    65
-#define NAMESPACE_MAX_MOUNTS     16
-#define NAMESPACE_MAX_PIDMAPS    16
+#define NS_TYPE_MNT      1
+#define NS_TYPE_UTS      2
+#define NS_TYPE_PID      3
+#define NS_TYPE_NET      4
+#define NS_TYPE_IPC      5
+#define NS_TYPE_USER     6
+#define NS_TYPE_TIME     7
 
-struct net;
-struct uts_namespace;
-struct ipc_namespace;
-struct mnt_namespace;
-struct pid_namespace;
-struct user_namespace;
+#define NS_MAX_TYPES     8
+#define NS_MAX_LEVELS    64
 
-/* UTS 命名空间 (UNIX Time-sharing System) */
-typedef struct uts_namespace {
-    int    used;
-    uint32_t refcount;
-    char   sysname[NAMESPACE_UTSNAME_MAX];
-    char   nodename[NAMESPACE_UTSNAME_MAX];
-    char   domainname[NAMESPACE_UTSNAME_MAX];
-    char   release[NAMESPACE_UTSNAME_MAX];
-    char   version[NAMESPACE_UTSNAME_MAX];
-    char   machine[NAMESPACE_UTSNAME_MAX];
+struct ns_common {
+    int   type;
+    int   level;
+    uint32_t ref_count;
+    uint64_t owner_cred_uid;
+    struct ns_common *parent;
+};
+
+/* Each namespace type embeds this struct at the start. */
+#define NS_COMMON \
+    struct ns_common _ns_common;
+
+typedef struct {
+    NS_COMMON
+    /* Mount-specific state. */
+    char hostname[64];
+    char domainname[64];
+    /* Number of mounts visible inside. */
+    uint32_t mount_count;
 } uts_ns_t;
 
-/* PID 命名空间 */
-typedef struct pid_namespace {
-    int    used;
-    uint32_t refcount;
-    uint32_t level;
-    pid_t  last_pid;
-    uint32_t pid_allocated;
-    struct pid_namespace *parent;
+typedef struct {
+    NS_COMMON
+    uint32_t max_pids;
+    uint32_t active_pids;
+    uint32_t next_pid;
+    int      is_first_pid_ns;
 } pid_ns_t;
 
-/* Mount 命名空间 */
-typedef struct mnt_namespace {
-    int    used;
-    uint32_t refcount;
-    uint32_t mount_count;
-    uint32_t root_mnt;
-} mnt_ns_t;
+typedef struct {
+    NS_COMMON
+    void *net_state;
+} net_ns_t;
 
-/* IPC 命名空间 */
-typedef struct ipc_namespace {
-    int    used;
-    uint32_t refcount;
-    uint32_t sem_ids;
-    uint32_t msg_ids;
-    uint32_t shm_ids;
-} ipc_ns_t;
-
-/* User 命名空间 */
-typedef struct user_namespace {
-    int    used;
-    uint32_t refcount;
-    uint32_t level;
-    uint32_t owner;
-    struct user_namespace *parent;
-} user_ns_t;
-
-/* Namespace proxy - 一个进程持有的命名空间集合 */
+/* nsproxy - holder of all namespaces for a task. */
 typedef struct nsproxy {
-    int              used;
-    uint32_t         refcount;
-    pid_ns_t        *pid_ns;
-    mnt_ns_t        *mnt_ns;
-    struct net      *net_ns;
-    uts_ns_t        *uts_ns;
-    ipc_ns_t        *ipc_ns;
-    user_ns_t       *user_ns;
-    uint64_t         created_time;
+    struct ns_common *ns[NS_MAX_TYPES];
+    uint32_t ref_count;
 } nsproxy_t;
 
-/* ============================================================
- * 初始化
- * ============================================================ */
-int namespace_init(void);
+struct task_struct;
+struct cred;
 
-/* ============================================================
- * 核心 API
- * ============================================================ */
+int            ns_init(void);
+int            namespace_init(void);
+nsproxy_t     *nsproxy_create(struct task_struct *tsk);
+int            nsproxy_copy(nsproxy_t *dst, nsproxy_t *src, struct task_struct *tsk);
+void           nsproxy_put(nsproxy_t *np);
+int            ns_set_owner(nsproxy_t *np, const cred_t *cred);
 
-nsproxy_t *nsproxy_get(void);
-int copy_namespaces(unsigned long flags, nsproxy_t *old, nsproxy_t **newp);
-int create_new_namespace(unsigned long flags, nsproxy_t **newp);
-void get_nsproxy(nsproxy_t *ns);
-void put_nsproxy(nsproxy_t *ns);
+int            ns_enter(struct ns_common *ns, struct task_struct *tsk);
+int            ns_clone(struct ns_common *ns);
+int            ns_unshare(struct task_struct *tsk, int which);
+struct ns_common *ns_find(int type, struct ns_common *parent, int level);
+void           namespace_print_stats(void);
 
-uts_ns_t *uts_ns_create(void);
-pid_ns_t *pid_ns_create(pid_ns_t *parent);
-mnt_ns_t *mnt_ns_create(void);
-ipc_ns_t *ipc_ns_create(void);
-user_ns_t *user_ns_create(user_ns_t *parent, uint32_t owner);
+nsproxy_t     *nsproxy_default(void);
+struct ns_common *ns_find(int type, struct ns_common *parent, int level);
 
-/* ============================================================
- * 统计与调试
- * ============================================================ */
-void namespace_print_stats(void);
+const char    *ns_type_name(int type);
 
-#endif /* NAMESPACE_H */
+#endif

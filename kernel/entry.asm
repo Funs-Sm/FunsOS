@@ -44,6 +44,11 @@ _start:
     XOR EAX, EAX
     REP STOSB
 
+    ; DBG: marker M - BSS zeroed
+    MOV DX, 0x3F8
+    MOV AL, 'M'
+    OUT DX, AL
+
     ; Do NOT load GDT/IDT here - the BSS was just zeroed, so
     ; gdt_ptr/idt_ptr are 0.  Loading them would set up invalid
     ; tables.  init_gdt() and init_idt() in C will set them up
@@ -52,6 +57,15 @@ _start:
     ; from the loader's GDT, which is valid until init_gdt() replaces it.
 
     CALL _kernel_main
+
+    ; DBG-D
+    MOV DX, 0x3F8
+    MOV AL, 'D'
+    OUT DX, AL
+    MOV AL, 13
+    OUT DX, AL
+    MOV AL, 10
+    OUT DX, AL
 
     MOV EDI, 0xC00B8000
     MOV ESI, msg_returned
@@ -104,5 +118,5 @@ message_canary: DB 'FATAL: Stack buffer overflow detected!', 0
 [SECTION .bss]
 
 ALIGN 16
-resb 32768
+resb 131072
 stack_top:

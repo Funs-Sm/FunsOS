@@ -4,6 +4,7 @@
 #include "string.h"
 #include "kheap.h"
 #include "klog.h"
+#include "stddef.h"
 
 #define PASSWD_PATH "/etc/passwd"
 #define GROUP_PATH  "/etc/group"
@@ -34,40 +35,8 @@ static uint32_t str_to_uint(const char *s, int *consumed) {
     return val;
 }
 
-static int uint_to_hex(uint32_t val, char *buf) {
-    const char *hex = "0123456789abcdef";
-    if (val == 0) { buf[0] = '0'; buf[1] = '\0'; return 1; }
-    char tmp[16];
-    int t = 0;
-    while (val > 0) {
-        tmp[t++] = hex[val & 0xF];
-        val >>= 4;
-    }
-    int len = t;
-    for (int i = 0; i < t; i++) buf[i] = tmp[t - 1 - i];
-    buf[len] = '\0';
-    return len;
-}
-
-static uint32_t hex_to_uint(const char *s, int *consumed) {
-    uint32_t val = 0;
-    int i = 0;
-    while (1) {
-        char c = s[i];
-        if (c >= '0' && c <= '9') { val = (val << 4) | (c - '0'); i++; }
-        else if (c >= 'a' && c <= 'f') { val = (val << 4) | (c - 'a' + 10); i++; }
-        else if (c >= 'A' && c <= 'F') { val = (val << 4) | (c - 'A' + 10); i++; }
-        else break;
-    }
-    if (consumed) *consumed = i;
-    return val;
-}
-
 void user_persist_init(void) {
-    vfs_mkdir("/etc", 0755);
-    vfs_mkdir("/home", 0755);
-    vfs_mkdir("/root", 0700);
-    vfs_mkdir("/home/admin", 0755);
+    /* /home and /home/admin are already created by main.c/fs_build_layout. */
 }
 
 int user_persist_save(void) {
@@ -82,8 +51,9 @@ int user_persist_save(void) {
         if (!u || !u->is_active) continue;
 
         int pos = 0;
+        /* Format: username:uid:gid:isAdmin:credential:home:shell\n */
         const char *p = u->username;
-        while (*p && pos < 300) line_buf[pos++] = *p++;
+        while (*p && pos < 100) line_buf[pos++] = *p++;
         line_buf[pos++] = ':';
         pos += uint_to_str(u->uid, line_buf + pos);
         line_buf[pos++] = ':';
@@ -91,7 +61,8 @@ int user_persist_save(void) {
         line_buf[pos++] = ':';
         line_buf[pos++] = u->is_admin ? '1' : '0';
         line_buf[pos++] = ':';
-        pos += uint_to_hex(u->password_hash, line_buf + pos);
+        p = u->credential;
+        while (*p && pos < 400) line_buf[pos++] = *p++;
         line_buf[pos++] = ':';
         p = u->home;
         while (*p && pos < 450) line_buf[pos++] = *p++;
@@ -144,6 +115,7 @@ int user_persist_load(void) {
         if (pos == line_start) { pos++; continue; }
         data[pos] = '\0';
 
+        /* Split into up to 7 fields by ':' */
         char *fields[7];
         int field_count = 0;
         int fpos = line_start;
@@ -163,14 +135,15 @@ int user_persist_load(void) {
             uint32_t uid = str_to_uint(fields[1], &consumed);
             uint32_t gid = str_to_uint(fields[2], &consumed);
             uint8_t is_admin = (fields[3][0] == '1') ? 1 : 0;
-            uint32_t password_hash = hex_to_uint(fields[4], &consumed);
+            const char *credential = fields[4];
 
             user_t *existing = user_find_by_name(username);
             if (existing) {
                 existing->uid = uid;
                 existing->gid = gid;
                 existing->is_admin = is_admin;
-                existing->password_hash = password_hash;
+                strncpy(existing->credential, credential, USER_HASH_BUF_LEN - 1);
+                existing->credential[USER_HASH_BUF_LEN - 1] = '\0';
                 existing->is_active = 1;
                 if (field_count >= 6 && fields[5][0]) {
                     strncpy(existing->home, fields[5], 127);
@@ -184,7 +157,8 @@ int user_persist_load(void) {
                 if (user_create(username, uid, gid, is_admin) == 0) {
                     user_t *u = user_find_by_name(username);
                     if (u) {
-                        u->password_hash = password_hash;
+                        strncpy(u->credential, credential, USER_HASH_BUF_LEN - 1);
+                        u->credential[USER_HASH_BUF_LEN - 1] = '\0';
                         u->is_active = 1;
                         if (field_count >= 6 && fields[5][0]) {
                             strncpy(u->home, fields[5], 127);

@@ -161,30 +161,81 @@ void kernel_panic(const char *msg, const char *file, int line)
         uint32_t depth = 0;
         asm volatile("mov %%ebp, %0" : "=r"(ebp));
         serial_print(COM1, "Stack trace:\n");
-        while (ebp && depth < 16) {
-            uint32_t ret_addr = *(ebp + 1);
-            serial_print(COM1, "  [");
-            {
-                char dbuf[12]; int di = 0; uint32_t dv = depth;
-                if (dv == 0) dbuf[di++] = '0';
-                else { char dr[12]; int dri = 0;
-                    while (dv > 0) { dr[dri++] = '0' + (dv % 10); dv /= 10; }
-                    while (dri > 0) dbuf[di++] = dr[--dri];
-                }
-                dbuf[di] = 0;
-                serial_print(COM1, dbuf);
-            }
-            serial_print(COM1, "] 0x");
-            {
-                char hbuf[9]; const char hex[] = "0123456789abcdef";
-                for (int hi = 7; hi >= 0; hi--) { hbuf[hi] = hex[ret_addr & 0xF]; ret_addr >>= 4; }
-                hbuf[8] = 0;
-                int start = 0; while (start < 7 && hbuf[start] == '0') start++;
-                serial_print(COM1, hbuf + start);
-            }
+
+        /* Sanity check EBP: a valid kernel stack frame pointer must
+         * be inside the kernel stack range (typically 0xC0000000 -
+         * 0xD0000000 in this kernel).  If EBP is outside that range
+         * the saved EBP chain is gone and all the trace entries would
+         * be garbage.  In that case, instead of chasing a corrupted
+         * chain, dump the raw stack around ESP so we can spot the
+         * actual caller. */
+        int ebp_sane = ((uintptr_t)ebp >= 0xC0000000u && (uintptr_t)ebp < 0xE0000000u);
+
+        if (!ebp_sane) {
+            uint32_t esp_val;
+            asm volatile("mov %%esp, %0" : "=r"(esp_val));
+            serial_print(COM1, "  EBP=0x");
+            char hb[9]; const char HX[] = "0123456789abcdef";
+            uint32_t v = (uint32_t)(uintptr_t)ebp;
+            for (int hi = 7; hi >= 0; hi--) { hb[hi] = HX[v & 0xF]; v >>= 4; }
+            hb[8] = 0; int s = 0; while (s < 7 && hb[s] == '0') s++;
+            serial_print(COM1, hb + s);
+            serial_print(COM1, " looks INVALID - dumping raw stack around ESP=0x");
+            v = esp_val;
+            for (int hi = 7; hi >= 0; hi--) { hb[hi] = HX[v & 0xF]; v >>= 4; }
+            hb[8] = 0; s = 0; while (s < 7 && hb[s] == '0') s++;
+            serial_print(COM1, hb + s);
             serial_print(COM1, "\n");
-            ebp = (uint32_t *)*ebp;
-            depth++;
+
+            /* Dump 16 words starting at ESP - the caller return
+             * address (or some of them) will usually be visible. */
+            uint32_t *sp = (uint32_t *)(uintptr_t)esp_val;
+            for (int i = 0; i < 24; i++) {
+                uint32_t val;
+                /* Only dereference if it looks safe */
+                if ((uintptr_t)&sp[i] >= 0xC0000000u && (uintptr_t)&sp[i] < 0xF0000000u) {
+                    val = sp[i];
+                } else {
+                    val = 0xDEADBEEF;
+                }
+                serial_print(COM1, "  ESP+");
+                v = i * 4;
+                for (int hi = 7; hi >= 0; hi--) { hb[hi] = HX[(v) & 0xF]; (v) >>= 4; }
+                hb[8] = 0; s = 0; while (s < 7 && hb[s] == '0') s++;
+                serial_print(COM1, hb + s);
+                serial_print(COM1, ": 0x");
+                v = val;
+                for (int hi = 7; hi >= 0; hi--) { hb[hi] = HX[v & 0xF]; v >>= 4; }
+                hb[8] = 0; s = 0; while (s < 7 && hb[s] == '0') s++;
+                serial_print(COM1, hb + s);
+                serial_print(COM1, "\n");
+            }
+        } else {
+            while (ebp && depth < 16) {
+                uint32_t ret_addr = *(ebp + 1);
+                serial_print(COM1, "  [");
+                {
+                    char dbuf[12]; int di = 0; uint32_t dv = depth;
+                    if (dv == 0) dbuf[di++] = '0';
+                    else { char dr[12]; int dri = 0;
+                        while (dv > 0) { dr[dri++] = '0' + (dv % 10); dv /= 10; }
+                        while (dri > 0) dbuf[di++] = dr[--dri];
+                    }
+                    dbuf[di] = 0;
+                    serial_print(COM1, dbuf);
+                }
+                serial_print(COM1, "] 0x");
+                {
+                    char hbuf[9]; const char hex[] = "0123456789abcdef";
+                    for (int hi = 7; hi >= 0; hi--) { hbuf[hi] = hex[ret_addr & 0xF]; ret_addr >>= 4; }
+                    hbuf[8] = 0;
+                    int start = 0; while (start < 7 && hbuf[start] == '0') start++;
+                    serial_print(COM1, hbuf + start);
+                }
+                serial_print(COM1, "\n");
+                ebp = (uint32_t *)*ebp;
+                depth++;
+            }
         }
     }
 

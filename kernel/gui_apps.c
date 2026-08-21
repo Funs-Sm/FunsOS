@@ -1,3 +1,24 @@
+/*
+ * gui_apps.c — 内嵌 GUI 应用集合:系统设置面板 + 应用启动器覆盖层
+ *
+ * 这是 v0.8 早期为开箱即用体验提供的"轻量面板":
+ *   - settings_event_handler(): 主题切换(深/浅)、显示信息、关于内核版本
+ *   - sysinfo_show():     系统信息窗口(版本/CPU/内存/编译时间)
+ *   - gui_app_applist():  内置应用启动器(只在窗口里显示文本菜单,不真正启动)
+ *
+ * 注意:本文件**不是** `os/apps/settings.c` 的替代;`os/apps/settings.c` 是完整的设置应用,
+ * 这里只是一个 380×300 的快捷面板。
+ *
+ * 入口:  `kernel/main.c` 在桌面启动后调用 `gui_app_applist()` 自动弹出一次;
+ *        或者用户在 shell 输入 `gui_settings` 触发。
+ *
+ * 重构注意:
+ *   - 本文件直接调用 gui/window.h、gui/widget.h、gui/font.h、gui/theme.h、gui/gfx.h,
+ *     **绕过**了 os/desktop/window_mgr.c。Phase D 应改为走 window_mgr。
+ *   - 字体使用 `gui/font.c` 的内置字体,与 kernel/font_engine.c 无关。
+ *   - 不调用 renderer/*(走的是 gui/ 直绘路径)。
+ */
+
 #include "gui_apps.h"
 #include "window.h"
 #include "widget.h"
@@ -17,6 +38,17 @@
 #include "path.h"
 #include "dentry.h"
 #include "rtc.h"
+
+/* The "real" GUI apps live under os/apps/.  The launcher stubs in this
+ * file delegate to their *_run() entry points so that clicking an app
+ * icon actually launches the app, instead of just opening the catalog. */
+extern void calculator_run(void);
+extern void text_editor_run(void);
+extern void terminal_main(int argc, char **argv);
+extern int  file_manager_init(void);
+extern void file_manager_run(void);
+extern void settings_run(void);
+extern void snake_game_run(void);
 
 /* ------------------------------------------------------------------ */
 /*  Settings Application                                               */
@@ -423,11 +455,15 @@ void gui_app_applist(void) {
 /* ------------------------------------------------------------------ */
 
 void gui_app_calculator(void) {
-    gui_app_applist();
+    /* Delegate to the real calculator implementation in os/apps/. */
+    calculator_run();
 }
 
 void gui_app_terminal(void) {
-    gui_app_applist();
+    /* The terminal app lives in os/apps/terminal.c and spins up its own
+     * window with an embedded shell.  Pass no arguments. */
+    char *argv[1] = { (char *)"terminal" };
+    terminal_main(1, argv);
 }
 
 void gui_app_paint(void) {
@@ -450,9 +486,13 @@ void gui_app_paint(void) {
 }
 
 void gui_app_notepad(void) {
-    gui_app_applist();
+    /* Delegate to the real text editor in os/apps/text_editor.c. */
+    text_editor_run();
 }
 
 void gui_app_snake(void) {
-    gui_app_applist();
+    /* The snake game lives in kernel/games.c (text mode).  Launching it
+     * from the GUI gives the same single-process experience as running
+     * the `snake` command in the shell. */
+    snake_game_run();
 }

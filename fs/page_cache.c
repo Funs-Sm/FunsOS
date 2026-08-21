@@ -2,6 +2,7 @@
 #include "spinlock.h"
 #include "kheap.h"
 #include "../kernel/klog.h"
+#include "vfs.h"
 #include <string.h>
 
 /* 页缓存条目 */
@@ -340,18 +341,28 @@ uint32_t page_cache_writeback_inode(inode_t *inode) {
 
     uint32_t written = 0;
 
-    /* 遍历该 inode 的所有页 */
+    /* 遍历该 inode 的所有脏页，逐页写回磁盘 */
     for (uint32_t i = 0; i < PAGE_CACHE_HASH_BUCKETS; i++) {
         pc_page_t *page = g_hash_table[i];
         while (page) {
             pc_page_t *next = page->hash_next;
             if (page->inode == inode && (page->flags & PC_PAGE_DIRTY)) {
-                /* 标记为干净（模拟写回）
-                 * 实际系统中这里会调用块设备写入 */
-                page->flags &= ~PC_PAGE_DIRTY;
-                g_stats.dirty_pages--;
+                /* 通过文件系统的 superblock 操作来写回数据。
+                 * 文件系统知道如何将 (inode, offset, size) 转换为
+                 * 物理块地址并调用块设备写入。 */
+                uint32_t offset = page->page_index * PAGE_CACHE_SIZE;
+                int32_t ret = -1;
+                if (inode->sb && inode->sb->ops &&
+                    inode->sb->ops->write_data) {
+                    ret = inode->sb->ops->write_data(
+                        inode, offset, PAGE_CACHE_SIZE, page->data);
+                }
+                if (ret > 0) {
+                    page->flags &= ~PC_PAGE_DIRTY;
+                    g_stats.dirty_pages--;
+                    written++;
+                }
                 g_stats.writebacks++;
-                written++;
             }
             page = next;
         }
@@ -372,10 +383,20 @@ uint32_t page_cache_writeback_all(void) {
     while (page != &g_lru_head) {
         pc_page_t *next = page->lru_next;
         if (page->flags & PC_PAGE_DIRTY) {
-            page->flags &= ~PC_PAGE_DIRTY;
-            g_stats.dirty_pages--;
+            uint32_t offset = page->page_index * PAGE_CACHE_SIZE;
+            int32_t ret = -1;
+            if (page->inode && page->inode->sb &&
+                page->inode->sb->ops &&
+                page->inode->sb->ops->write_data) {
+                ret = page->inode->sb->ops->write_data(
+                    page->inode, offset, PAGE_CACHE_SIZE, page->data);
+            }
+            if (ret > 0) {
+                page->flags &= ~PC_PAGE_DIRTY;
+                g_stats.dirty_pages--;
+                written++;
+            }
             g_stats.writebacks++;
-            written++;
         }
         page = next;
     }

@@ -92,12 +92,18 @@ void irq_handler(regs_t *regs) {
         void *data = irq_handler_data[irq];
         spinlock_unlock(&irq_lock);
 
+        /* EOI *before* running the device handler: the timer handler can
+         * preempt the current thread and switch away mid-IRQ, leaving this
+         * handler's tail (and its EOI) parked in the victim's context.  If
+         * that thread is then killed before being resumed, the PIC line
+         * stays in-service forever and every later interrupt is lost.
+         * The PICs are edge-triggered here, so an early EOI is safe. */
+        pic_eoi(irq);
+
         if (handler) {
             handler(regs);
         }
         (void)data;
-
-        pic_eoi(irq);
     }
     /* If irq >= 16, ignore (spurious or invalid) - do NOT send EOI */
 }

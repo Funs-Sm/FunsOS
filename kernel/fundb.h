@@ -49,6 +49,7 @@ typedef struct {
     void **values;           /* 每列的值指针 */
     uint32_t *sizes;         /* 每列值的大小 */
     uint32_t *types;         /* 每列的类型 */
+    uint32_t col_count;      /* 列数量(冗余,用于 WAL 回放) */
 } fundb_row_t;
 
 /* 结果集 */

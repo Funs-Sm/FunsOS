@@ -26,6 +26,12 @@ static net_buffer_t *rx_queue_head;
 static net_buffer_t *rx_queue_tail;
 static mutex_t       net_lock;
 static net_stats_t   net_stats;
+static net_perf_stats_t net_perf_stats;
+static uint32_t last_perf_tick_ms = 0;
+static uint32_t last_rx_bytes = 0;
+static uint32_t last_tx_bytes = 0;
+static uint32_t last_rx_packets = 0;
+static uint32_t last_tx_packets = 0;
 
 void net_init(void) {
     for (uint32_t i = 0; i < NET_MAX_INTERFACES; i++) {
@@ -36,6 +42,12 @@ void net_init(void) {
     rx_queue_head = NULL;
     rx_queue_tail = NULL;
     memset(&net_stats, 0, sizeof(net_stats));
+    memset(&net_perf_stats, 0, sizeof(net_perf_stats));
+    last_perf_tick_ms = 0;
+    last_rx_bytes = 0;
+    last_tx_bytes = 0;
+    last_rx_packets = 0;
+    last_tx_packets = 0;
 
     /* Bring up the loopback interface first so that userland can
      * always talk to itself, even when no NIC driver is loaded. */
@@ -199,9 +211,139 @@ void net_tick(uint32_t now_ms) {
     igmp_tick(now_ms);
     ipv6_tick(now_ms);
     bridge_tick(now_ms);
+    net_perf_tick(now_ms);
     (void)now_ms;
 }
 
 const net_stats_t *net_get_stats(void) { return &net_stats; }
 
 void net_reset_stats(void) { memset(&net_stats, 0, sizeof(net_stats)); }
+
+const net_perf_stats_t *net_get_perf_stats(void) {
+    return &net_perf_stats;
+}
+
+void net_perf_stats_reset(void) {
+    mutex_lock(&net_lock);
+    memset(&net_perf_stats, 0, sizeof(net_perf_stats));
+    last_rx_bytes = net_stats.rx_bytes;
+    last_tx_bytes = net_stats.tx_bytes;
+    last_rx_packets = net_stats.rx_packets;
+    last_tx_packets = net_stats.tx_packets;
+    mutex_unlock(&net_lock);
+}
+
+void net_perf_tick(uint32_t now_ms) {
+    if (last_perf_tick_ms == 0) {
+        last_perf_tick_ms = now_ms;
+        last_rx_bytes = net_stats.rx_bytes;
+        last_tx_bytes = net_stats.tx_bytes;
+        last_rx_packets = net_stats.rx_packets;
+        last_tx_packets = net_stats.tx_packets;
+        return;
+    }
+
+    uint32_t delta_ms = now_ms - last_perf_tick_ms;
+    if (delta_ms < 1000) return;
+
+    mutex_lock(&net_lock);
+
+    uint32_t rx_bytes_delta = net_stats.rx_bytes - last_rx_bytes;
+    uint32_t tx_bytes_delta = net_stats.tx_bytes - last_tx_bytes;
+    uint32_t rx_pkts_delta = net_stats.rx_packets - last_rx_packets;
+    uint32_t tx_pkts_delta = net_stats.tx_packets - last_tx_packets;
+
+    uint32_t seconds = delta_ms / 1000;
+    if (seconds == 0) seconds = 1;
+
+    net_perf_stats.rx_bps = (rx_bytes_delta * 8) / seconds;
+    net_perf_stats.tx_bps = (tx_bytes_delta * 8) / seconds;
+    net_perf_stats.rx_pps = rx_pkts_delta / seconds;
+    net_perf_stats.tx_pps = tx_pkts_delta / seconds;
+
+    net_perf_stats.rx_bytes_total += rx_bytes_delta;
+    net_perf_stats.tx_bytes_total += tx_bytes_delta;
+    net_perf_stats.rx_packets_total += rx_pkts_delta;
+    net_perf_stats.tx_packets_total += tx_pkts_delta;
+
+    if (net_perf_stats.rx_bps > net_perf_stats.peak_rx_bps)
+        net_perf_stats.peak_rx_bps = net_perf_stats.rx_bps;
+    if (net_perf_stats.tx_bps > net_perf_stats.peak_tx_bps)
+        net_perf_stats.peak_tx_bps = net_perf_stats.tx_bps;
+    if (net_perf_stats.rx_pps > net_perf_stats.peak_rx_pps)
+        net_perf_stats.peak_rx_pps = net_perf_stats.rx_pps;
+    if (net_perf_stats.tx_pps > net_perf_stats.peak_tx_pps)
+        net_perf_stats.tx_pps = net_perf_stats.peak_tx_pps;
+
+    last_rx_bytes = net_stats.rx_bytes;
+    last_tx_bytes = net_stats.tx_bytes;
+    last_rx_packets = net_stats.rx_packets;
+    last_tx_packets = net_stats.tx_packets;
+    last_perf_tick_ms = now_ms;
+
+    mutex_unlock(&net_lock);
+}
+
+int net_get_iface_stats(const char *iface_name, net_stats_t *out) {
+    if (!iface_name || !out) return -1;
+    net_interface_t *iface = net_get_interface_by_name(iface_name);
+    if (!iface) return -1;
+    out->rx_packets = iface->rx_packets;
+    out->tx_packets = iface->tx_packets;
+    out->rx_bytes = iface->rx_bytes;
+    out->tx_bytes = iface->tx_bytes;
+    out->rx_errors = iface->rx_errors;
+    out->tx_errors = iface->tx_errors;
+    out->rx_dropped = 0;
+    out->tx_dropped = 0;
+    return 0;
+}
+
+uint32_t net_get_iface_mtu(const char *iface_name) {
+    net_interface_t *iface = net_get_interface_by_name(iface_name);
+    if (!iface) return 0;
+    return iface->mtu;
+}
+
+int net_set_iface_mtu(const char *iface_name, uint32_t mtu) {
+    net_interface_t *iface = net_get_interface_by_name(iface_name);
+    if (!iface) return -1;
+    if (mtu == 0 || mtu > 9000) return -1;
+    iface->mtu = mtu;
+    return 0;
+}
+
+int net_iface_up(const char *iface_name) {
+    net_interface_t *iface = net_get_interface_by_name(iface_name);
+    if (!iface) return -1;
+    net_set_interface_flags(iface, iface->flags | IFF_UP | IFF_RUNNING);
+    route_install_iface_defaults(iface);
+    return 0;
+}
+
+int net_iface_down(const char *iface_name) {
+    net_interface_t *iface = net_get_interface_by_name(iface_name);
+    if (!iface) return -1;
+    net_set_interface_flags(iface, iface->flags & ~(IFF_UP | IFF_RUNNING));
+    return 0;
+}
+
+int net_get_iface_link(const char *iface_name) {
+    net_interface_t *iface = net_get_interface_by_name(iface_name);
+    if (!iface) return -1;
+    return (iface->flags & IFF_RUNNING) ? 1 : 0;
+}
+
+uint32_t net_get_iface_speed(const char *iface_name) {
+    net_interface_t *iface = net_get_interface_by_name(iface_name);
+    if (!iface) return 0;
+    if (iface->flags & IFF_LOOPBACK) return 1000;
+    return 100;
+}
+
+const char *net_get_iface_duplex(const char *iface_name) {
+    net_interface_t *iface = net_get_interface_by_name(iface_name);
+    if (!iface) return "unknown";
+    if (iface->flags & IFF_LOOPBACK) return "full";
+    return "full";
+}

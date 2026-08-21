@@ -8,7 +8,9 @@
 #include "string.h"
 #include "stdio.h"
 #include "stddef.h"
+#include "inttypes.h"
 #include "fpu.h"
+#include "klog.h"
 
 /* Assembly context switch: saves callee-saved regs, switches ESP, restores */
 extern void context_switch(uint32_t *old_esp, uint32_t new_esp);
@@ -40,6 +42,17 @@ void process_first_run(void) {
 static sched_state_t sched;
 static pcb_t *process_list = NULL;
 
+/* Scheduler AIO tick hook: if set, called once every 8 scheduler ticks
+ * to drive the async I/O subsystem forward without blocking the scheduler. */
+static aio_tick_fn_t g_aio_tick_fn = NULL;
+#define SCHED_AIO_TICK_DIV  8   /* process one AIO request every 8 ticks */
+
+/* MLFQ aging: every SCHED_BOOST_INTERVAL ticks every NORMAL process is
+ * moved back to the top queue.  Without this rule a CPU-bound job sinks
+ * to the lowest queue and starves whenever higher-queue work exists
+ * (classic MLFQ starvation; OSTEP rule 5). */
+#define SCHED_BOOST_INTERVAL 500   /* ticks (~5s at 100 Hz) */
+
 static void queue_add(sched_queue_t *queue, pcb_t *proc) {
     proc->queue_next = NULL;
     proc->queue_prev = queue->tail;
@@ -55,6 +68,13 @@ static void queue_add(sched_queue_t *queue, pcb_t *proc) {
 
 static pcb_t *queue_remove(sched_queue_t *queue, pcb_t *proc) {
     if (!proc) return NULL;
+
+    /* Membership guard: a process that is not linked into this queue
+     * (e.g. the currently RUNNING process, or a ZOMBIE being removed)
+     * must not touch head/tail, otherwise the queue is corrupted. */
+    if (queue->head != proc && !proc->queue_prev && !proc->queue_next) {
+        return proc;
+    }
 
     if (proc->queue_prev) {
         proc->queue_prev->queue_next = proc->queue_next;
@@ -120,6 +140,30 @@ static pcb_t *pick_next_process(void) {
     return sched.idle_task;
 }
 
+/* Priority boost: reset every NORMAL process to the top MLFQ queue.
+ * READY processes are re-linked into queue 0; RUNNING/BLOCKED ones are
+ * not linked anywhere, so only their level is reset and the next
+ * enqueue (schedule/sleep wakeup) lands in queue 0. */
+static void sched_boost_all(void) {
+    uint32_t flags = spinlock_irq_save(&sched.lock);
+
+    pcb_t *proc = process_list;
+    while (proc) {
+        if ((proc->sched_policy & PROCESS_NORMAL) && proc->queue_level != 0) {
+            if (proc->state == PROCESS_READY) {
+                queue_remove(&sched.mlfq_queues[proc->queue_level], proc);
+                proc->queue_level = 0;
+                queue_add(&sched.mlfq_queues[0], proc);
+            } else {
+                proc->queue_level = 0;
+            }
+        }
+        proc = proc->next;
+    }
+
+    spinlock_irq_restore(&sched.lock, flags);
+}
+
 void sched_init(void) {
     for (int i = 0; i < SCHED_RT_QUEUE_COUNT; i++) {
         sched.rt_queues[i].head = NULL;
@@ -142,6 +186,10 @@ void sched_init(void) {
     sched.in_schedule = 0;
 }
 
+void scheduler_set_aio_tick(aio_tick_fn_t fn) {
+    g_aio_tick_fn = fn;
+}
+
 /* Idle task: runs when no other process is ready */
 static void idle_task_func(void) {
     while (1) {
@@ -159,6 +207,33 @@ void sched_create_idle_task(void) {
 }
 
 void sched_set_current(pcb_t *proc) {
+    /* The running process must not also sit in a ready queue: queue
+     * membership and being scheduled-in are mutually exclusive.  The
+     * init adoption path does sched_add() + sched_set_current(), so
+     * dequeue it here (same queue selection as add_to_queue). */
+    if (proc) {
+        uint32_t flags = spinlock_irq_save(&sched.lock);
+        sched_queue_t *q;
+        if (proc->sched_policy & PROCESS_REAL_TIME) {
+            int rt_level = proc->priority / 50;
+            if (rt_level >= SCHED_RT_QUEUE_COUNT) {
+                rt_level = SCHED_RT_QUEUE_COUNT - 1;
+            }
+            q = &sched.rt_queues[rt_level];
+        } else {
+            int mlfq_level = proc->queue_level;
+            if (mlfq_level >= SCHED_QUEUE_COUNT) {
+                mlfq_level = SCHED_QUEUE_COUNT - 1;
+            }
+            q = &sched.mlfq_queues[mlfq_level];
+        }
+        queue_remove(q, proc);  /* no-op if not queued */
+        spinlock_irq_restore(&sched.lock, flags);
+        /* Being current implies RUNNING: sched_add() sets READY, so the
+         * adopt path must upgrade the state here, otherwise schedule()
+         * would neither re-queue init nor ever switch back to it. */
+        proc->state = PROCESS_RUNNING;
+    }
     sched.current = proc;
 }
 
@@ -219,18 +294,38 @@ void sched_tick(void) {
 
     sched_wakeup_sleepers();
 
+    if (sched.tick_count % SCHED_BOOST_INTERVAL == 0) {
+        sched_boost_all();
+    }
+
+    /* Drive async I/O: process one AIO request every SCHED_AIO_TICK_DIV ticks.
+     * This keeps I/O running in the background without blocking the scheduler. */
+    if (g_aio_tick_fn && (sched.tick_count % SCHED_AIO_TICK_DIV == 0)) {
+        g_aio_tick_fn();
+    }
+
+    /* NOTE: never klog_write() here - this runs in IRQ0 context and the
+     * klog spinlock would deadlock if the interrupted thread holds it. */
+
     if (!sched.current) {
-        /* No process currently running - try to schedule the first one */
-        if (pick_next_process() || sched.idle_task) {
-            sched.in_schedule = 0;
-            schedule();
-        }
+        /* No process currently running - let schedule() pick the first
+         * one.  (Do NOT probe with pick_next_process() here: it pops the
+         * head of a queue, which would leak that process.) */
+        schedule();
         return;
     }
 
     sched.current->ticks_used++;
     sched.current->cpu_time++;
     sched.current->time_slice--;
+
+    /* The idle task's policy is neither NORMAL nor RT, so the slice logic
+     * below never preempts it.  Preempt it every tick instead: schedule()
+     * falls back to idle when the queues are empty, so this is cheap. */
+    if (sched.current == sched.idle_task) {
+        schedule();
+        return;
+    }
 
     if (sched.current->sched_policy & PROCESS_NORMAL) {
         if (sched.current->time_slice <= 0) {
@@ -257,7 +352,7 @@ void schedule(void) {
 
     pcb_t *prev = sched.current;
 
-    if (prev && prev->state == PROCESS_RUNNING) {
+    if (prev && prev->state == PROCESS_RUNNING && prev != sched.idle_task) {
         prev->state = PROCESS_READY;
         add_to_queue(prev);
     }
@@ -460,11 +555,18 @@ int sched_set_policy(pcb_t *proc, uint32_t policy) {
     if (proc->state == PROCESS_READY) {
         if (proc->sched_policy & PROCESS_REAL_TIME) {
             int rt_level = proc->priority / 50;
-            if (rt_level >= SCHED_RT_QUEUE_COUNT) {
+            if (rt_level >= SCHED_RT_QUEUE_COUNT)
                 rt_level = SCHED_RT_QUEUE_COUNT - 1;
-            }
             queue_remove(&sched.rt_queues[rt_level], proc);
+        } else if (proc->sched_policy & PROCESS_CFS) {
+            /* CFS rq is singly-linked; dequeue via sched_cfs_dequeue().
+             * sched_cfs_dequeue() is idempotent (no-op when rq empty) so
+             * it is safe to call unconditionally here. */
+            (void)sched_cfs_dequeue();
+        } else if (proc->sched_policy & PROCESS_DEADLINE) {
+            (void)sched_dl_dequeue();
         } else {
+            /* NORMAL / BATCH / IDLE -> MLFQ */
             queue_remove(&sched.mlfq_queues[proc->queue_level], proc);
         }
     }
@@ -488,7 +590,7 @@ void sched_print_stats(void) {
     uint32_t flags = spinlock_irq_save(&sched.lock);
 
     printf("=== Scheduler Statistics ===\n");
-    printf("Tick count: %llu\n", sched.tick_count);
+    printf("Tick count: %" PRIu64 "\n", (uint64_t)sched.tick_count);
     printf("\nReal-time queues:\n");
     for (int i = 0; i < SCHED_RT_QUEUE_COUNT; i++) {
         printf("  Queue %d: %d processes\n", i, sched.rt_queues[i].count);
@@ -728,22 +830,44 @@ int sched_set_policy_cfs(pcb_t *proc) {
 
     uint32_t flags = spinlock_irq_save(&sched.lock);
 
+    /*
+     * Before touching any runqueue the process must be dequeued from
+     * whichever runqueue it currently lives in.  Process may be:
+     *
+     *  1. READY + in MLFQ/RT queue   -> dequeue, update policy, enqueue CFS
+     *  2. READY + already in CFS rq  -> already dequeued from old rq, just
+     *                                    update policy (no-op on queues)
+     *  3. RUNNING + old policy        -> kernel path; update policy, next
+     *                                    schedule() will pick CFS
+     *  4. BLOCKED/ZOMBIE              -> no queue entry; just update policy
+     *
+     * Using `=` (assignment) instead of `|=` (OR) prevents flag accumulation
+     * if this function is called multiple times on the same process.
+     * All scheduling flags share the same bitfield, so mixing OR with
+     * assignment is intentional here: we want ONLY the CFS flag set.
+     */
     if (proc->state == PROCESS_READY) {
         if (proc->sched_policy & PROCESS_REAL_TIME) {
             int rt_level = proc->priority / 50;
-            if (rt_level >= SCHED_RT_QUEUE_COUNT) {
+            if (rt_level >= SCHED_RT_QUEUE_COUNT)
                 rt_level = SCHED_RT_QUEUE_COUNT - 1;
-            }
             queue_remove(&sched.rt_queues[rt_level], proc);
-        } else if (!(proc->sched_policy & PROCESS_CFS)) {
+        } else if (proc->sched_policy & (PROCESS_NORMAL | PROCESS_BATCH |
+                                         PROCESS_IDLE_PRIO)) {
             queue_remove(&sched.mlfq_queues[proc->queue_level], proc);
+        } else if (proc->sched_policy & PROCESS_DEADLINE) {
+            /* Deadline rq is a doubly-linked list; use dl_dequeue helper. */
+            sched_dl_dequeue();
         }
+        /* If already CFS and READY, the process is already not in any
+         * MLFQ/RT queue so queue_remove is a no-op above (queue_remove
+         * guards against foreign-queue removal).  Nothing extra needed. */
     }
 
-    proc->sched_policy |= PROCESS_CFS;
-    proc->vruntime = cfs_rq.min_vruntime;
+    proc->sched_policy = PROCESS_CFS;
+    proc->vruntime     = cfs_rq.min_vruntime;
     proc->need_resched = 0;
-    proc->exec_start = sched.tick_count;
+    proc->exec_start   = sched.tick_count;
 
     if (proc->state == PROCESS_READY) {
         enqueue_entity(&cfs_rq, proc);
@@ -931,10 +1055,10 @@ void sched_dump_queue(int queue_index) {
         printf("CFS Queue (%d processes):\n", cfs_rq.nr_running);
         cfs_node_t *node = cfs_rq.head;
         while (node) {
-            printf("  PID %d: %s, vruntime=%llu\n",
-                   node->proc->pid,
-                   node->proc->name,
-                   node->vruntime);
+printf("  PID %d: %s, vruntime=%" PRIu64 "\n",
+               node->proc->pid,
+               node->proc->name,
+               node->vruntime);
             node = node->next;
         }
     } else {
@@ -1038,7 +1162,23 @@ int sched_set_policy_deadline(pcb_t *proc, uint64_t runtime,
     node->params.current_deadline = sched.tick_count + deadline;
     node->params.active = 1;
 
-    dl_rq.running_bw += (runtime * 1000) / period;
+    /*
+     * SCHED_DEADLINE bandwidth admission test (CBS bandwidth guarantee).
+     * dl_rq.running_bw is the sum of (runtime/period) scaled by 1000,
+     * so 100% CPU = 1000.  Refuse to admit a new task if the new total
+     * would exceed 1000.  Use saturating arithmetic to avoid overflow.
+     */
+    uint32_t task_bw = (runtime > 0 && period > 0)
+                        ? (uint32_t)((runtime * 1000ULL) / period)
+                        : 0;
+    uint32_t new_total_bw = dl_rq.running_bw + task_bw;
+    if (new_total_bw < dl_rq.running_bw || new_total_bw > 1000) {
+        /* bandwidth overflow or saturation — reject admission */
+        node->proc = NULL;
+        spinlock_irq_restore(&sched.lock, flags);
+        return -1;
+    }
+    dl_rq.running_bw = new_total_bw;
 
     if (proc->state == PROCESS_READY) {
         sched_dl_enqueue(proc);
@@ -1291,17 +1431,17 @@ const sched_global_stats_t *sched_get_global_stats(void) {
 
 void sched_stats_print(void) {
     printf("=== Global Scheduler Statistics ===\n");
-    printf("Total context switches: %llu\n", global_stats.total_context_switches);
-    printf("Total ticks: %llu\n", global_stats.total_ticks);
-    printf("User ticks: %llu\n", global_stats.user_ticks);
-    printf("Kernel ticks: %llu\n", global_stats.kernel_ticks);
-    printf("Preempt count: %llu\n", global_stats.preempt_count);
-    printf("Yield count: %llu\n", global_stats.yield_count);
+    printf("Total context switches: %" PRIu64 "\n", global_stats.total_context_switches);
+    printf("Total ticks: %" PRIu64 "\n", global_stats.total_ticks);
+    printf("User ticks: %" PRIu64 "\n", global_stats.user_ticks);
+    printf("Kernel ticks: %" PRIu64 "\n", global_stats.kernel_ticks);
+    printf("Preempt count: %" PRIu64 "\n", global_stats.preempt_count);
+    printf("Yield count: %" PRIu64 "\n", global_stats.yield_count);
     printf("\nPer-process stats:\n");
     pcb_t *proc = process_list;
     while (proc) {
         sched_stat_t *st = &proc_stats[proc->pid];
-        printf("  PID %d (%s): sched=%llu runtime=%llu cs=%llu\n",
+        printf("  PID %d (%s): sched=%" PRIu64 " runtime=%" PRIu64 " cs=%" PRIu64 "\n",
                proc->pid, proc->name, st->sched_count,
                st->total_runtime, st->context_switches);
         proc = proc->next;

@@ -1,3 +1,23 @@
+/*
+ * font_engine.c — 内核统一字体渲染引擎
+ *
+ * 在 v0.8 架构中的角色:
+ *   - 是 `gui/font.c`(内置位图字体) 与 `gui/freetype_mini.c`(TrueType 子集)
+ *     之上的统一调度层
+ *   - 维护 glyph 缓存(FE_CACHE_SIZE=512)避免重复光栅化
+ *   - 通过 `font_face_t` 抽象支持最多 8 个 face(不同字体/字号)
+ *   - 提供 `font_engine_init()` / `font_engine_render_codepoint()` 给上层调用
+ *
+ * 调用方:
+ *   - kernel/fb_console.c(开 splash 与早期 shell)
+ *   - kernel/display_server.c(系统设置/系统信息窗口)
+ *   - gui/font.h 中的 `font_draw_string()` 包装了本引擎
+ *
+ * 与 renderer/src/font_ext.c 的区别:
+ *   - 本文件是字符级光栅化(返回 glyph_t 与位图)
+ *   - renderer/src/font_ext.c 是富文本排版(对齐/换行/省略/下划线)
+ */
+
 #include "font_engine.h"
 #include "font.h"
 #include "freetype_mini.h"

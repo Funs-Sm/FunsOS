@@ -55,6 +55,35 @@ int32_t ext2_read_inode(uint32_t ino, ext2_inode_t *inode) {
     return 0;
 }
 
+/* Read/write raw inode using VFS inode_t (which carries private_data as the
+ * real ext2 inode number).  These are registered in sb->ops so the page cache
+ * can call them generically through the superblock interface. */
+static int32_t ext2_read_inode_raw(inode_t *inode) {
+    if (!inode) return -1;
+    uint32_t ino = (uint32_t)(uintptr_t)inode->private_data;
+    ext2_inode_t e2inode;
+    if (ext2_read_inode(ino, &e2inode) != 0) return -1;
+    inode->size = e2inode.i_size;
+    inode->nlinks = e2inode.i_links_count;
+    inode->atime = e2inode.i_atime;
+    inode->mtime = e2inode.i_mtime;
+    inode->ctime = e2inode.i_ctime;
+    return 0;
+}
+
+static int32_t ext2_write_inode_raw(inode_t *inode) {
+    if (!inode) return -1;
+    uint32_t ino = (uint32_t)(uintptr_t)inode->private_data;
+    ext2_inode_t e2inode;
+    if (ext2_read_inode(ino, &e2inode) != 0) return -1;
+    e2inode.i_size = inode->size;
+    e2inode.i_links_count = (uint16_t)inode->nlinks;
+    e2inode.i_atime = inode->atime;
+    e2inode.i_mtime = inode->mtime;
+    e2inode.i_ctime = inode->ctime;
+    return ext2_write_inode(ino, &e2inode);
+}
+
 int32_t ext2_write_inode(uint32_t ino, const ext2_inode_t *inode) {
     if (ino == 0 || !inode) return -1;
 
@@ -403,6 +432,41 @@ static int32_t ext2_write_file(ext2_inode_t *e2inode, const void *buf, uint32_t 
     kfree(block_buf);
     return (int32_t)bytes_written;
 }
+
+/* Write data to an inode from the VFS layer.  Used by the page cache
+ * for write-back: the page cache has (inode, offset, size, data) and
+ * this function translates that into ext2's block allocation and I/O. */
+int32_t ext2_write_data(inode_t *inode, uint32_t offset, uint32_t size, const void *buf) {
+    if (!inode || !buf) return -1;
+
+    ext2_inode_t e2inode;
+    uint32_t ino = (uint32_t)(uintptr_t)inode->private_data;
+    if (ext2_read_inode(ino, &e2inode) != 0) return -1;
+
+    int32_t written = ext2_write_file(&e2inode, buf, offset, size);
+    if (written < 0) return written;
+
+    e2inode.i_mtime = rtc_get_timestamp();
+    ext2_write_inode(ino, &e2inode);
+    return written;
+}
+
+/* FS sync: flush all modified ext2 inodes to disk by writing back the
+ * inode table blocks that contain them.  Individual data blocks are
+ * written synchronously in ext2_write_file above, but we also sync
+ * the inode table to persist metadata changes. */
+int32_t ext2_fsync(uint32_t ino) {
+    if (ino == 0) return -1;
+
+    ext2_inode_t e2inode;
+    if (ext2_read_inode(ino, &e2inode) != 0) return -1;
+
+    /* ext2_write_inode reads, modifies, and writes the inode table block.
+     * This guarantees metadata (mtime, size, link count) is persisted. */
+    return ext2_write_inode(ino, &e2inode);
+}
+
+/* External declaration for fs_sync.c's ext2_fsync lookup */
 
 static int32_t ext2_lookup(uint32_t dir_ino, const char *name, uint32_t *out_ino) {
     ext2_inode_t dir_inode;
@@ -1216,12 +1280,7 @@ static int32_t ext2_file_seek(file_t *file, int32_t offset, int32_t whence) {
     return new_offset;
 }
 
-int32_t ext2_fsync(uint32_t ino) {
-    /* EXT2 writes are synchronous - data is already on disk after each write.
-     * This function exists for VFS compatibility. */
-    (void)ino;
-    return 0;
-}
+/* External declaration for fs_sync.c's ext2_fsync lookup */
 
 static int32_t ext2_file_ioctl(file_t *file, uint32_t cmd, void *arg) {
     if (!file || !file->inode) return -EBADF;
@@ -1258,6 +1317,17 @@ int32_t ext2_mount(superblock_t *sb_vfs, void *data) {
     sb_vfs->total_blocks = sb.blocks_count;
     sb_vfs->free_blocks = sb.free_blocks_count;
     sb_vfs->fs_data = &sb;
+
+    /* Register superblock operations so the page cache can perform real disk
+     * writeback through ext2's block allocation and I/O functions. */
+    {
+        static superblock_ops_t ext2_sb_ops = {
+            .read_inode = ext2_read_inode_raw,
+            .write_inode = ext2_write_inode_raw,
+            .write_data = ext2_write_data,
+        };
+        sb_vfs->ops = &ext2_sb_ops;
+    }
 
     ext2_inode_t root_e2inode;
     if (ext2_read_inode(2, &root_e2inode) != 0) return -1;

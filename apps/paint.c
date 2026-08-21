@@ -1,3 +1,16 @@
+/*
+ * paint.c — DEPRECATED 旧版 GUI 画板
+ *
+ * v0.8 状态:本文件**未被任何 Makefile 目标或 #include 引用**;顶层 Makefile
+ *         的 `APPS_C = $(wildcard apps/*_app.c) apps/init.c` 不匹配 `paint.c`。
+ *         实际运行的是 `kernel/shell.c` 中的 `app_paint_main()`,后者调用
+ *         `gui_app_paint()`(`kernel/gui_apps.c`)。
+ *
+ * 替代实现:`os/apps/paint.c`(32 KB,鼠标绘制 + 调色板 + 撤销)。
+ *
+ * 重构建议:保留(0 字节二进制开销,因为不被链入),下次大重构时删除。
+ */
+
 #include "user_syscall.h"
 #include "string.h"
 #include "gui_common.h"

@@ -1,3 +1,14 @@
+/*
+ * terminal.c — DEPRECATED 旧版 GUI 终端模拟器
+ *
+ * v0.8 状态:本文件**未被任何 Makefile 目标或 #include 引用**。
+ *         实际运行的是 `kernel/shell.c` 中的 `app_terminal_main()`。
+ *
+ * 替代实现:`os/apps/terminal.c`(43 KB,包装 kernel/shell.c)。
+ *
+ * 重构建议:保留(0 字节二进制开销),下次大重构时删除。
+ */
+
 #include "user_syscall.h"
 #include "string.h"
 #include "gui_common.h"

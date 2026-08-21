@@ -5,9 +5,13 @@
 
 #define USER_MAX_NAME  32
 #define USER_MAX_USERS 64
-#define USER_MAX_PASS_HASH 0xFFFFFFFF
 #define USER_MAX_GROUPS 32
 #define USER_MAX_GROUP_MEMBERS 16
+
+/* Hash output: SHA-256 hex string (64 chars + NUL). */
+#define USER_HASH_HEX_LEN 64
+#define USER_SALT_HEX_LEN 16   /* 8 bytes of salt in hex */
+#define USER_HASH_BUF_LEN (USER_SALT_HEX_LEN + 1 + USER_HASH_HEX_LEN + 1)
 
 #define USER_UID_SOVER    0
 #define USER_UID_ADMIN    1
@@ -19,6 +23,10 @@
 #define USER_GID_ADMIN    1
 #define USER_GID_USERS    100
 #define USER_GID_NOGROUP  65534
+
+/* Password policy */
+#define USER_PASSWORD_MIN_LEN 6
+#define USER_PASSWORD_MAX_FAILS 5
 
 typedef enum {
     USER_ROLE_SOVER = 0,
@@ -35,7 +43,11 @@ typedef struct {
     char shell[64];
     uint8_t is_admin;
     uint8_t is_active;
-    uint32_t password_hash;
+    /* New secure credential: "salt_hex$hash_hex" stored as one string. */
+    char credential[USER_HASH_BUF_LEN];
+    /* Login throttling */
+    uint8_t failed_logins;
+    uint32_t lock_until_tick;
 } user_t;
 
 typedef struct {
@@ -48,7 +60,7 @@ typedef struct {
 void user_init(void);
 int user_create(const char *name, uint32_t uid, uint32_t gid, uint8_t admin);
 int user_delete(const char *name);
-int user_set_password(const char *name, uint32_t password_hash);
+int user_set_password(const char *name, const char *credential);
 int user_change_password(const char *name, const char *password);
 int user_set_admin(const char *name, uint8_t admin);
 int user_set_home(const char *name, const char *home);
@@ -74,9 +86,6 @@ user_t *user_get_current(void);
 
 int user_rename(uint32_t uid, const char *new_name);
 
-uint32_t user_hash_password(const char *password);
-uint32_t user_hash_password_salt(const char *password, const char *username);
-
 user_role_t user_get_role(uint32_t uid);
 const char *user_role_name(user_role_t role);
 int user_is_sover(uint32_t uid);
@@ -89,5 +98,11 @@ uint32_t user_alloc_gid(void);
 
 int user_get_groups(uint32_t uid, uint32_t *groups, uint32_t max_groups);
 int user_in_group(uint32_t uid, uint32_t gid);
+
+/* Credential helpers (secure hashing) */
+void user_make_credential(const char *password, const char *username,
+                          char out[USER_HASH_BUF_LEN]);
+int  user_verify_credential(const char *credential, const char *password);
+int  user_password_meets_policy(const char *password);
 
 #endif

@@ -317,13 +317,32 @@ vesa_ok:
     JMP .info_done
 
 .got_info_blk:
-    CMP DWORD [0x0600], 0xB007F00D
+    ; DAP loaded sector 1 to 0x0000:0x0600 (physical 0x0600)
+    ; Use ES:0x0604 to read (ES=0 from reset, verified at loader_start)
+    MOV AX, 0x0000
+    MOV ES, AX
+    MOV AL, 'G'
+    CALL debug_char
+    ; Compare magic at [ES:0x0600] with 0xB007F00D
+    ; Must use 16-bit comparison: compare low word and high word separately
+    MOV DI, 0x0600
+    MOV AL, 'H'
+    CALL debug_char
+    CMP WORD [ES:DI], 0xF00D
     JNE .fallback_info
-    MOV EAX, [0x0604]
+    CMP WORD [ES:DI+2], 0xB007
+    JNE .fallback_info
+    MOV AL, 'I'
+    CALL debug_char
+    ; Read kernel sectors from [ES:0x0604]
+    MOV DI, 0x0604
+    MOV EAX, [ES:DI]
     MOV [kern_total_sectors], EAX
     JMP .info_done
 
 .fallback_info:
+    MOV AL, 'F'
+    CALL debug_char
     MOV DWORD [kern_total_sectors], KERNEL_FALLBACK_SECTORS
 
 .info_done:

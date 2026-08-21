@@ -140,8 +140,66 @@ int reg_delete_value(reg_handle_t key, const char *name);
 /* ---- 便捷函数 ---- */
 int reg_set_string(reg_handle_t key, const char *name, const char *value);
 int reg_set_dword(reg_handle_t key, const char *name, uint32_t value);
+int reg_set_binary(reg_handle_t key, const char *name, const void *data, uint32_t size);
+int reg_set_multi_string(reg_handle_t key, const char *name, const char **strings, uint32_t count);
 const char *reg_get_string(reg_handle_t key, const char *name, const char *def);
 uint32_t reg_get_dword(reg_handle_t key, const char *name, uint32_t def);
+
+/* ---- 键路径构建 ---- */
+void reg_build_path(reg_key_t *key, char *buf, uint32_t buf_size);
+
+/* ---- 监视初始化 ---- */
+void reg_watch_init(void);
+void reg_fire_watch_event(uint32_t event_type, uint32_t root,
+                          const char *path, const char *name);
+
+/* ---- 键改名 ---- */
+int reg_rename_key(reg_handle_t key, const char *new_name);
+
+/* ---- 权限检查（HKLM 写保护） ---- */
+/* 检查是否可以写入指定根键的路径，返回 0=可写，负数=只读 */
+int reg_check_write_access(uint32_t root);
+
+/* ---- 键存在性检查 ---- */
+/* 检查键是否存在（不打开句柄） */
+int reg_key_exists(uint32_t root, const char *subkey);
+int reg_value_exists(reg_handle_t key, const char *name);
+
+/* ---- 监视/追踪 ---- */
+/* 监视事件类型 */
+#define REG_WATCH_CREATE_KEY   0x01
+#define REG_WATCH_DELETE_KEY  0x02
+#define REG_WATCH_SET_VALUE   0x04
+#define REG_WATCH_DELETE_VALUE 0x08
+#define REG_WATCH_ALL         0xFF
+
+typedef struct reg_watch_event {
+    uint32_t timestamp;
+    uint32_t event_type;       /* REG_WATCH_* */
+    char     path[REG_MAX_PATH];
+    char     name[REG_MAX_NAME];
+    uint32_t root;
+} reg_watch_event_t;
+
+/* 监视回调函数类型 */
+typedef void (*reg_watch_callback_t)(const reg_watch_event_t *event);
+
+/* 添加监视项（返回监视 ID，-1 表示失败） */
+int reg_watch_add(const char *path_prefix, uint32_t events,
+                  reg_watch_callback_t callback);
+
+/* 移除监视项 */
+int reg_watch_remove(int watch_id);
+
+/* 清除所有监视项 */
+void reg_watch_clear(void);
+
+/* 获取监视事件历史（返回事件数） */
+int reg_watch_get_history(reg_watch_event_t *events, int max_events);
+
+/* 启用/禁用监视（默认启用） */
+void reg_watch_enable(int enabled);
+int reg_watch_is_enabled(void);
 
 /* 通过完整路径操作（自动解析根键） */
 reg_handle_t reg_open_path(const char *path);
@@ -160,6 +218,19 @@ uint32_t reg_export(reg_handle_t key, char *buf, uint32_t buf_size);
 
 /* 把整个注册表导出到 klog */
 void reg_dump_all(void);
+
+/* ---- 备份与恢复 ---- */
+/* 将整个注册表导出到缓冲区（用于备份文件） */
+int reg_backup_to_buffer(char *buf, uint32_t buf_size, uint32_t *out_size);
+
+/* 从备份缓冲区恢复注册表（会清空现有数据） */
+int reg_restore_from_buffer(const char *buf, uint32_t size);
+
+/* 将备份写入文件 */
+int reg_backup_to_file(const char *filepath);
+
+/* 从文件恢复备份 */
+int reg_restore_from_file(const char *filepath);
 
 /* 类型名称 */
 const char *reg_type_name(uint32_t type);

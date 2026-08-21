@@ -11,19 +11,24 @@ BUILDDIR = build
 CFLAGS  = -m32 -ffreestanding -nostdlib -nostdinc -fno-builtin -fno-stack-protector \
           -fno-stack-check -mno-stack-arg-probe \
           -fno-pie -fno-pic -Wall -Wextra -Wno-unused-parameter \
+          -MMD -MP \
           -Ilib -Ikernel -Idrivers -Idrivers/gpu -Idrivers/net -Idrivers/audio -Idrivers/block -Idrivers/char -Idrivers/video -Ifs -Inet -Igui -Iusb -Iaudio -Iboot -Iapps \
           -Isdk/include -Isdk/lib -Irenderer/include -Irenderer/themes -Ios -Ios/apps -Ios/desktop -Ios/services
 
 # Assembler flags
 ASFLAGS = -f elf32 -O999
 
-# Linker flags - use gcc as linker driver for cross-format support
-LDFLAGS = -m32 -nostdlib -T boot/linker.ld -Wl,--oformat=pei-i386
+# Linker flags - link as a flat 32-bit ELF binary instead of PE so that
+# `objcopy -O binary` produces a kernel.bin whose file offsets match the
+# kernel's VMA layout exactly.  The loader then dumps bytes linearly to
+# physical address 0x100000 and every section lands at the address the
+# linker expects without any post-processing.
+LDFLAGS = -m32 -nostdlib -T boot/linker.ld -Wl,--oformat=pei-i386 -Wl,--image-base=0x100000
 
 # SDK用户态库(不链接到内核, 避免与GUI/内核实现符号冲突)
 SDK_OBJ   = $(patsubst %.c,$(BUILDDIR)/%.o,$(SDK_C))
 RENDERER_OBJ = $(patsubst %.c,$(BUILDDIR)/%.o,$(RENDERER_C))
-SDK_EXCLUDE = $(SDK_OBJ) $(RENDERER_OBJ)
+SDK_EXCLUDE = $(SDK_OBJ)
 
 # -------------------------------------------------------------------
 #  Source file discovery
@@ -70,11 +75,12 @@ USERLAND_C = $(wildcard userland/*.c)
 APPS_C = $(wildcard apps/*_app.c) apps/init.c
 
 # SDK sources (integrated into kernel)
-SDK_C = $(wildcard sdk/lib/*.c)
+SDK_C = $(filter-out sdk/lib/funsos_fs.c sdk/lib/funsos_stat.c sdk/lib/funsos_dir.c sdk/lib/funsos_thread.c sdk/lib/funsos_signal.c sdk/lib/funsos_pipe.c sdk/lib/funsos_mmap.c sdk/lib/funsos_select.c,$(wildcard sdk/lib/*.c))
 
 # Renderer sources (integrated into kernel)
-# Temporarily excluded due to pre-existing compilation issues
-RENDERER_C = $(wildcard renderer/src/*.c)
+# Exclude numbered effect_*.c files and effect_opacity.c because they
+# duplicate symbols already defined in effect.c (compilation-order issues).
+RENDERER_C = $(filter-out renderer/src/effect_8.c renderer/src/effect_9.c renderer/src/effect_10.c renderer/src/effect_11.c renderer/src/effect_opacity.c,$(wildcard renderer/src/*.c))
 
 # OS layer sources (integrated into kernel)
 OS_C = $(wildcard os/apps/*.c) $(wildcard os/desktop/*.c) $(wildcard os/services/*.c) $(wildcard os/*.c)
@@ -103,16 +109,18 @@ OS_IMAGE   = $(BUILDDIR)/os.img
 
 all: $(OS_IMAGE)
 
-# Create all needed output directories (Windows cmd compatible)
+# Create all needed output directories (shell-agnostic, works under cmd/sh/powershell)
+DIRS = $(BUILDDIR) $(BUILDDIR)/kernel $(BUILDDIR)/drivers \
+  $(BUILDDIR)/drivers/block $(BUILDDIR)/drivers/char $(BUILDDIR)/drivers/net \
+  $(BUILDDIR)/drivers/usb $(BUILDDIR)/drivers/video $(BUILDDIR)/drivers/gpu \
+  $(BUILDDIR)/drivers/audio $(BUILDDIR)/fs $(BUILDDIR)/net $(BUILDDIR)/gui \
+  $(BUILDDIR)/usb $(BUILDDIR)/audio $(BUILDDIR)/lib $(BUILDDIR)/userland \
+  $(BUILDDIR)/boot $(BUILDDIR)/apps $(BUILDDIR)/sdk $(BUILDDIR)/sdk/lib \
+  $(BUILDDIR)/renderer $(BUILDDIR)/renderer/src $(BUILDDIR)/os \
+  $(BUILDDIR)/os/apps $(BUILDDIR)/os/desktop $(BUILDDIR)/os/services
+
 dirs:
-	-@mkdir $(BUILDDIR) $(BUILDDIR)/kernel $(BUILDDIR)/drivers \
-	  $(BUILDDIR)/drivers/block $(BUILDDIR)/drivers/char $(BUILDDIR)/drivers/net \
-	  $(BUILDDIR)/drivers/usb $(BUILDDIR)/drivers/video $(BUILDDIR)/drivers/gpu \
-	  $(BUILDDIR)/drivers/audio $(BUILDDIR)/fs $(BUILDDIR)/net $(BUILDDIR)/gui \
-	  $(BUILDDIR)/usb $(BUILDDIR)/audio $(BUILDDIR)/lib $(BUILDDIR)/userland \
-	  $(BUILDDIR)/boot $(BUILDDIR)/apps $(BUILDDIR)/sdk $(BUILDDIR)/sdk/lib \
-	  $(BUILDDIR)/renderer $(BUILDDIR)/renderer/src $(BUILDDIR)/os \
-	  $(BUILDDIR)/os/apps $(BUILDDIR)/os/desktop $(BUILDDIR)/os/services 2>nul
+	@python -c "import os; [os.makedirs(d, exist_ok=True) for d in '$(DIRS)'.split()]"
 
 # --- Kernel ELF ---
 kernel: $(KERNEL_ELF)
@@ -144,7 +152,7 @@ $(STAGE2_BIN): boot/stage2.asm | dirs
 # --- Disk image ---
 $(OS_IMAGE): $(BOOT_BIN) $(LOADER_BIN) $(STAGE2_BIN) $(KERNEL_ELF)
 	@echo Creating disk image...
-	@objcopy -O binary -R .note -R .comment -R .eh_frame $(KERNEL_ELF) $(BUILDDIR)/kernel.bin
+	@python tools/pe2bin.py $(KERNEL_ELF) $(BUILDDIR)/kernel.bin
 	@python tools/mkimg.py $@ $(BOOT_BIN) $(LOADER_BIN) $(STAGE2_BIN) $(BUILDDIR)/kernel.bin
 
 # --- Apps ---
@@ -153,7 +161,7 @@ apps:
 
 # --- Clean ---
 clean:
-	-rmdir /s /q $(BUILDDIR) 2>nul
+	@python -c "import shutil, os; shutil.rmtree('$(BUILDDIR)', ignore_errors=True)"
 	$(MAKE) -C apps clean
 
 # --- Run in QEMU ---

@@ -1,3 +1,23 @@
+/*
+ * fb_console.c — VBE 帧缓冲文本控制台(行缓冲回滚 + Unicode)
+ *
+ * 在 v0.8 架构中的角色:
+ *   - 内核最早的字符输出设备之一,出现在 VESA 模式设置之后(早于桌面)
+ *   - 维护一个行缓冲(文本行而非像素),提供 PGUP/PGDN 回滚
+ *   - 字体使用 `gui/font.c` 内置等宽字体;Unicode 通过 `kernel/unicode.c` 解码
+ *   - 不调用 gui/window.c — 直接刷 framebuffer
+ *
+ * 与 drivers/vga_text.c 的区别:
+ *   - vga_text.c 是 80×25 VGA 文本模式的传统 BIOS 控制台(用于 splash 与早期 shell)
+ *   - 本文件是 VESA VBE 帧缓冲下的"软件文本模式",分辨率跟随 VBE 设置
+ *
+ * 当前启动顺序(见 kernel/main.c):
+ *   1. VBE 模式设置 -> drivers/vesa.c
+ *   2. 字体初始化  -> kernel/font_engine.c
+ *   3. fb_console  -> 本文件(开 splash)
+ *   4. 桌面        -> kernel/display_server.c -> os/desktop/desktop.c
+ */
+
 #include "fb_console.h"
 #include "gfx.h"
 #include "font.h"

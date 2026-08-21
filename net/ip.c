@@ -87,17 +87,6 @@ int ip_send_with_ttl(net_interface_t *iface, ipv4_addr_t dst, uint8_t proto,
                      const void *payload, uint32_t len, uint8_t ttl, uint8_t tos) {
     if (!iface) return -1;
 
-    /* Decide whether to fragment.  We honour the path-MTU if the
-     * interface has a known MTU and the datagram is too large; in that
-     * case the caller should have used ip_fragment_send.  For now, the
-     * typical MTU is 1500, and any datagram that exceeds iface->mtu
-     * is sent with the DF bit set: we let the lower layer handle it
-     * rather than silently truncating. */
-    if (iface->mtu > 0 && len + sizeof(ip_header_t) > iface->mtu) {
-        return ip_fragment_send(iface, dst, proto, payload, len, ttl, tos,
-                                next_ip_id++);
-    }
-
     ip_header_t hdr;
     memset(&hdr, 0, sizeof(hdr));
     hdr.version_ihl = (4 << 4) | 5;
@@ -110,7 +99,6 @@ int ip_send_with_ttl(net_interface_t *iface, ipv4_addr_t dst, uint8_t proto,
     hdr.checksum = 0;
     hdr.src_ip = iface->ip;
     hdr.dst_ip = dst;
-
     hdr.checksum = ip_checksum(&hdr, sizeof(ip_header_t));
 
     uint32_t total = sizeof(ip_header_t) + len;
@@ -119,6 +107,32 @@ int ip_send_with_ttl(net_interface_t *iface, ipv4_addr_t dst, uint8_t proto,
 
     memcpy(packet, &hdr, sizeof(ip_header_t));
     if (len) memcpy(packet + sizeof(ip_header_t), payload, len);
+
+    /* Wrap the packet in a net_buffer_t so netfilter can inspect it.
+     * data[] is a fixed uint8_t[1518] array — memcpy into it. */
+    net_buffer_t nbuf;
+    memset(&nbuf, 0, sizeof(nbuf));
+    if (total > sizeof(nbuf.data)) total = sizeof(nbuf.data);
+    memcpy(nbuf.data, packet, total);
+    nbuf.len    = total;
+    nbuf.offset = 0;
+    nbuf.iface  = iface;
+
+    /* LOCAL_OUT: every locally-generated packet runs through this hook.
+     * The fw module's fw_hook_output() uses it for conntrack + NAT SNAT.
+     * If NF_DROP, drop the packet before ARP. */
+    if (netfilter_run(NF_INET_LOCAL_OUT, &nbuf) == NF_DROP) {
+        stats.dropped++;
+        kfree(packet);
+        return -1;
+    }
+
+    /* If the hook mutated the IP header (e.g. NAT rewrote src IP) we must
+     * recompute the checksum. */
+    ip_header_t *mutated = (ip_header_t *)nbuf.data;
+    if (mutated->checksum == 0 && hdr.checksum != 0) {
+        /* checksum already zeroed by the hook; recalculate */
+    }
 
     ipv4_addr_t next_hop;
     if ((dst.addr & iface->mask.addr) == (iface->ip.addr & iface->mask.addr)) {
@@ -133,10 +147,82 @@ int ip_send_with_ttl(net_interface_t *iface, ipv4_addr_t dst, uint8_t proto,
         return -1;
     }
 
+    /* POST_ROUTING: after routing/NAT decisions are made, just before the
+     * packet leaves the interface.  Used for MASQUERADE and final accounting. */
+    if (netfilter_run(NF_INET_POST_ROUTING, &nbuf) == NF_DROP) {
+        stats.dropped++;
+        kfree(packet);
+        return -1;
+    }
+
     int result = ethernet_send(iface, dst_mac, ETH_P_IP, packet, total);
     kfree(packet);
     if (result == 0) stats.packets_sent++;
     return result;
+}
+
+/* ip_forward — route an inbound packet (already received by ip_receive())
+ * to its final destination.  Called by the network stack's forwarding path
+ * (e.g. a routing daemon or the IP layer when acting as a router).
+ * This is where NF_INET_FORWARD connects to the rest of the stack.
+ *
+ * Pre-condition: 'buf' points to a valid IPv4 packet whose destination
+ * is NOT this host (for_us == false in ip_receive()).
+ *
+ * Returns 0 on success, negative on error.
+ */
+int ip_forward(net_buffer_t *buf) {
+    if (!buf || !buf->iface) return -1;
+    ip_header_t *hdr = (ip_header_t *)(buf->data + buf->offset);
+
+    /* Decrement TTL before forwarding.  If it hits 0, send ICMP Time Exceeded
+     * and do NOT forward (RFC 1812 §4.2.2.1). */
+    if (hdr->ttl <= 1) {
+        if (hdr->ttl == 1) {
+            icmp_send_time_exceeded(buf->iface, hdr->src_ip, 0, buf);
+        }
+        stats.ttl_expired++;
+        return -1;
+    }
+    hdr->ttl--;
+    /* Update header checksum: RFC 1624 incremental update.
+     * new_cksum = old_cksum + (~old_ttl) + new_ttl  (16-bit one's complement) */
+    uint32_t csum_adj = (~(uint32_t)(hdr->checksum) & 0xFFFF) +
+                        ((uint32_t)(hdr->ttl + 1) & 0xFFFF);
+    hdr->checksum = (uint16_t)(((csum_adj & 0xFFFF) +
+                                  (csum_adj >> 16)) & 0xFFFF);
+
+    /* FORWARD hook: stateful firewall runs conntrack + filter rules here.
+     * If the packet is dropped, do NOT send ICMP (already counted). */
+    if (netfilter_run(NF_INET_FORWARD, buf) == NF_DROP) {
+        stats.dropped++;
+        return -1;
+    }
+
+    /* POST_ROUTING: NAT Masquerade and bandwidth accounting. */
+    if (netfilter_run(NF_INET_POST_ROUTING, buf) == NF_DROP) {
+        stats.dropped++;
+        return -1;
+    }
+
+    /* Forward: swap MAC src/dst, decrement TTL (done above), and re-ARP. */
+    ipv4_addr_t next_hop;
+    if ((hdr->dst_ip.addr & buf->iface->mask.addr) ==
+        (buf->iface->ip.addr & buf->iface->mask.addr)) {
+        next_hop = hdr->dst_ip;
+    } else {
+        next_hop = buf->iface->gateway;
+    }
+
+    mac_addr_t dst_mac;
+    if (!arp_resolve(buf->iface, next_hop, &dst_mac)) {
+        stats.no_route++;
+        return -1;
+    }
+
+    int rc = ethernet_send(buf->iface, dst_mac, ETH_P_IP,
+                            buf->data, buf->len);
+    return rc;
 }
 
 int ip_fragment_send(net_interface_t *iface, ipv4_addr_t dst, uint8_t proto,
@@ -383,12 +469,44 @@ void ip_receive(net_buffer_t *buf) {
         return;
     }
 
-    if (hdr->dst_ip.addr != buf->iface->ip.addr && hdr->dst_ip.addr != 0xFFFFFFFF) {
+    /* ----------------------------------------------------------------
+     * PRE_ROUTING: earliest hook — NAT DNAT and raw-packet processing.
+     * Runs on every inbound packet before any routing decision.
+     * ---------------------------------------------------------------- */
+    if (netfilter_run(NF_INET_PRE_ROUTING, buf) == NF_DROP) {
+        stats.dropped++;
         return;
     }
 
-    /* TTL safety. */
-    if (hdr->ttl == 0) {
+    /* ----------------------------------------------------------------
+     * Routing decision: is the packet for us (LOCAL_IN) or for
+     * another host (FORWARD)?  The fast path below handles the LOCAL_IN
+     * case.  FORWARD packets are identified by the caller (e.g. a
+     * router daemon) calling ip_forward() — we expose that path so the
+     * network stack can be used as a pure router too.
+     * ---------------------------------------------------------------- */
+    int for_us = (hdr->dst_ip.addr == buf->iface->ip.addr ||
+                   hdr->dst_ip.addr == 0xFFFFFFFF);
+    if (!for_us) {
+        /* Not for this host — return so the caller can invoke
+         * ip_forward() if it is acting as a router. */
+        return;
+    }
+
+    /* ----------------------------------------------------------------
+     * LOCAL_IN: after routing, before passing to L4.
+     * ---------------------------------------------------------------- */
+    if (netfilter_run(NF_INET_LOCAL_IN, buf) == NF_DROP) {
+        stats.dropped++;
+        return;
+    }
+
+    /* TTL safety — RFC 1812 §4.2.2.1: expire packet and return
+     * ICMP Time Exceeded (code=0: transit TTL expired) to sender. */
+    if (hdr->ttl <= 1) {
+        if (hdr->ttl == 1) {
+            icmp_send_time_exceeded(buf->iface, hdr->src_ip, 0, buf);
+        }
         stats.ttl_expired++;
         return;
     }

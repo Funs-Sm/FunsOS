@@ -1055,3 +1055,182 @@ int sock_errq_dequeue(int fd, int32_t *errno_val) {
     }
     return -1;
 }
+
+/* ------------------------------------------------------------------------- */
+/*  Socket 增强功能                                                          */
+/* ------------------------------------------------------------------------- */
+
+int sock_get_stats(sock_stat_t *out) {
+    if (!out) return -1;
+    memset(out, 0, sizeof(*out));
+    tcp_state_monitor_t tcp_mon;
+    tcp_state_monitor_get(&tcp_mon);
+    out->tcp_sockets = tcp_mon.total_sockets;
+    out->listening = tcp_mon.listening_sockets;
+    out->connected = tcp_mon.established_sockets;
+    out->time_wait = tcp_mon.timewait_sockets;
+    out->closed_wait = tcp_mon.close_wait_sockets;
+    uint32_t udp_count = 0;
+    /* 我们通过 socket 表来统计 UDP sockets */
+    for (int i = 0; i < SOCK_FD_MAX; i++) {
+        if (sock_table[i].used) {
+            out->total_sockets++;
+            if (sock_table[i].sock.type == SOCK_DGRAM) {
+                udp_count++;
+            } else if (sock_table[i].sock.type == SOCK_RAW) {
+                out->raw_sockets++;
+            }
+        }
+    }
+    out->udp_sockets = udp_count;
+    return 0;
+}
+
+int sock_get_tcp_info(int fd, void *info, uint32_t *len) {
+    if (fd < 0 || fd >= SOCK_FD_MAX || !sock_table[fd].used) return -1;
+    socket_t *s = &sock_table[fd].sock;
+    if (s->type != SOCK_STREAM) return -1;
+    tcp_socket_t *t = (tcp_socket_t *)s->private_data;
+    if (!t || !info || !len) return -1;
+    /* 简单版的 tcp_info - 只填一些关键字段 */
+    uint32_t *tcp_info = (uint32_t *)info;
+    uint32_t max_len = *len / sizeof(uint32_t);
+    if (max_len < 20) max_len = 20;
+    /* 索引 0: state */
+    if (max_len > 0) tcp_info[0] = t->state;
+    /* 索引 1: rtt */
+    if (max_len > 1) tcp_info[1] = t->srtt ? (t->srtt / 8) : 0;
+    /* 索引 2: rttvar */
+    if (max_len > 2) tcp_info[2] = t->rttvar ? (t->rttvar / 4) : 0;
+    /* 索引 3: snd_ssthresh */
+    if (max_len > 3) tcp_info[3] = t->ssthresh;
+    /* 索引 4: snd_cwnd */
+    if (max_len > 4) tcp_info[4] = t->cwnd;
+    /* 索引 5: rto */
+    if (max_len > 5) tcp_info[5] = t->rto;
+    /* 索引 6: retransmits */
+    if (max_len > 6) tcp_info[6] = t->retrans_cnt;
+    /* 索引 7: snd_mss */
+    if (max_len > 7) tcp_info[7] = t->mss_peer;
+    /* 索引 8: rcv_mss */
+    if (max_len > 8) tcp_info[8] = t->mss_local;
+    /* 索引 9: lost */
+    if (max_len > 9) tcp_info[9] = 0;
+    /* 索引 10: retrans */
+    if (max_len > 10) tcp_info[10] = t->retrans_cnt;
+    *len = max_len * sizeof(uint32_t);
+    return 0;
+}
+
+int sock_set_tcp_congestion(int fd, const char *algo) {
+    if (fd < 0 || fd >= SOCK_FD_MAX || !sock_table[fd].used) return -1;
+    socket_t *s = &sock_table[fd].sock;
+    if (s->type != SOCK_STREAM) return -1;
+    tcp_socket_t *t = (tcp_socket_t *)s->private_data;
+    if (!t || !algo) return -1;
+    if (strcmp(algo, "reno") == 0) {
+        tcp_cc_set_algo(t, TCP_CC_RENO);
+        return 0;
+    } else if (strcmp(algo, "newreno") == 0) {
+        tcp_cc_set_algo(t, TCP_CC_NEWRENO);
+        return 0;
+    } else if (strcmp(algo, "cubic") == 0) {
+        tcp_cc_set_algo(t, TCP_CC_CUBIC);
+        return 0;
+    }
+    return -1;
+}
+
+int sock_get_tcp_congestion(int fd, char *algo, uint32_t len) {
+    if (fd < 0 || fd >= SOCK_FD_MAX || !sock_table[fd].used) return -1;
+    socket_t *s = &sock_table[fd].sock;
+    if (s->type != SOCK_STREAM) return -1;
+    tcp_socket_t *t = (tcp_socket_t *)s->private_data;
+    if (!t || !algo || len == 0) return -1;
+    const char *name = tcp_cc_get_name(t->cc_algo);
+    strncpy(algo, name, len - 1);
+    algo[len - 1] = 0;
+    return 0;
+}
+
+int sock_set_bind_to_device(int fd, const char *iface) {
+    (void)fd;
+    (void)iface;
+    /* 接受但不实际绑定设备 - 模拟实现 */
+    return 0;
+}
+
+int sock_set_mark(int fd, uint32_t mark) {
+    (void)fd;
+    (void)mark;
+    /* 接受但不实际设置 mark - 模拟实现 */
+    return 0;
+}
+
+uint32_t sock_get_mark(int fd) {
+    (void)fd;
+    return 0;
+}
+
+int sock_set_priority(int fd, int priority) {
+    if (fd < 0 || fd >= SOCK_FD_MAX || !sock_table[fd].used) return -1;
+    (void)priority;
+    /* 接受但不实际设置优先级 - 模拟实现 */
+    return 0;
+}
+
+int sock_get_priority(int fd) {
+    if (fd < 0 || fd >= SOCK_FD_MAX || !sock_table[fd].used) return -1;
+    return 0;
+}
+
+int sock_set_recv_buffer(int fd, uint32_t size) {
+    if (fd < 0 || fd >= SOCK_FD_MAX || !sock_table[fd].used) return -1;
+    socket_t *s = &sock_table[fd].sock;
+    if (s->type == SOCK_STREAM && s->private_data) {
+        tcp_socket_t *t = (tcp_socket_t *)s->private_data;
+        /* 我们不重新分配缓冲区，只记录大小 */
+        if (size > 0 && size < (1024 * 1024)) {
+            t->recv_buf_size = size;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+int sock_get_recv_buffer(int fd, uint32_t *size) {
+    if (fd < 0 || fd >= SOCK_FD_MAX || !sock_table[fd].used || !size) return -1;
+    socket_t *s = &sock_table[fd].sock;
+    if (s->type == SOCK_STREAM && s->private_data) {
+        tcp_socket_t *t = (tcp_socket_t *)s->private_data;
+        *size = t->recv_buf_size;
+        return 0;
+    }
+    *size = 65536;
+    return 0;
+}
+
+int sock_set_send_buffer(int fd, uint32_t size) {
+    if (fd < 0 || fd >= SOCK_FD_MAX || !sock_table[fd].used) return -1;
+    socket_t *s = &sock_table[fd].sock;
+    if (s->type == SOCK_STREAM && s->private_data) {
+        tcp_socket_t *t = (tcp_socket_t *)s->private_data;
+        if (size > 0 && size < (1024 * 1024)) {
+            t->send_buf_size = size;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+int sock_get_send_buffer(int fd, uint32_t *size) {
+    if (fd < 0 || fd >= SOCK_FD_MAX || !sock_table[fd].used || !size) return -1;
+    socket_t *s = &sock_table[fd].sock;
+    if (s->type == SOCK_STREAM && s->private_data) {
+        tcp_socket_t *t = (tcp_socket_t *)s->private_data;
+        *size = t->send_buf_size;
+        return 0;
+    }
+    *size = 65536;
+    return 0;
+}

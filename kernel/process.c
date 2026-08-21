@@ -97,37 +97,44 @@ static pcb_t *create_process_common(const char *name)
     return proc;
 }
 
-/* Allocate a 2-page kernel stack, mapped contiguously in kernel virtual
- * memory.  Sets proc->kernel_stack (top) and proc->kernel_esp.  For a
+/* Allocate a kernel stack of `pages` pages, mapped contiguously in kernel
+ * virtual memory.  Sets proc->kernel_stack (top) and proc->kernel_esp.  For a
  * new process the stack is set up so that context_switch will "return"
  * to process_first_run.  For fork the caller adjusts kernel_esp later. */
-static int alloc_kernel_stack(pcb_t *proc)
+static int alloc_kernel_stack_ex(pcb_t *proc, uint32_t pages)
 {
-    uint32_t kstack_virt = next_kstack_virt;
-    next_kstack_virt += 2 * PAGE_SIZE;
+    if (pages == 0 || pages > 16) pages = 2;
 
-    void *phys1 = pmm_alloc_page();
-    void *phys2 = pmm_alloc_page();
-    if (!phys1 || !phys2) {
-        if (phys1) pmm_free_page(phys1);
-        if (phys2) pmm_free_page(phys2);
-        return -1;
+    uint32_t kstack_virt = next_kstack_virt;
+    next_kstack_virt += pages * PAGE_SIZE;
+
+    void *phys[16];
+    uint32_t i;
+    for (i = 0; i < pages; i++) {
+        phys[i] = pmm_alloc_page();
+        if (!phys[i]) {
+            while (i > 0) { i--; pmm_free_page(phys[i]); }
+            return -1;
+        }
     }
 
-    vmm_map_page(vmm_get_current_dir(), kstack_virt, (uint32_t)phys1,
-                 PTE_PRESENT | PTE_WRITABLE);
-    vmm_map_page(vmm_get_current_dir(), kstack_virt + PAGE_SIZE, (uint32_t)phys2,
-                 PTE_PRESENT | PTE_WRITABLE);
+    for (i = 0; i < pages; i++) {
+        vmm_map_page(vmm_get_current_dir(), kstack_virt + i * PAGE_SIZE,
+                     (uint32_t)phys[i], PTE_PRESENT | PTE_WRITABLE);
+    }
 
     /* Zero the stack pages */
-    memset((void *)kstack_virt, 0, 2 * PAGE_SIZE);
+    memset((void *)kstack_virt, 0, pages * PAGE_SIZE);
 
-    proc->kernel_stack = kstack_virt + 2 * PAGE_SIZE;  /* top of stack */
+    proc->kernel_stack = kstack_virt + pages * PAGE_SIZE;  /* top of stack */
+    proc->kstack_pages = pages;
 
-    /* Set up for context_switch: the asm pops edi,esi,ebx,ebp then RET.
-     * For a new process, RET should jump to process_first_run. */
+    /* Set up for context_switch: the asm pops edi,esi,ebx,ebp, then
+     * POPFD, then RET.  For a new process, RET jumps to process_first_run
+     * and EFLAGS must have IF=1 so the thread can receive timer ticks. */
     uint32_t *sp = (uint32_t *)proc->kernel_stack;
     sp--; *sp = (uint32_t)process_first_run;   /* return address */
+    sp--; *sp = 0x202; /* eflags: IF=1 (+ reserved bit 1) */
     sp--; *sp = 0;   /* ebp */
     sp--; *sp = 0;   /* ebx */
     sp--; *sp = 0;   /* esi */
@@ -137,14 +144,27 @@ static int alloc_kernel_stack(pcb_t *proc)
     return 0;
 }
 
+static int alloc_kernel_stack(pcb_t *proc)
+{
+    return alloc_kernel_stack_ex(proc, 2);
+}
+
 /* Create a kernel-only thread (no user-space, no ELF loading).
  * Used for idle task and other kernel threads. */
 pcb_t *process_create_kernel(const char *name, void (*entry)(void))
 {
+    return process_create_kernel_ex(name, entry, 2);
+}
+
+/* Create a kernel-only thread with a custom stack size (in pages).
+ * Shell background jobs use larger stacks since shell commands allocate
+ * sizeable line/path buffers on their call chain. */
+pcb_t *process_create_kernel_ex(const char *name, void (*entry)(void), uint32_t stack_pages)
+{
     pcb_t *proc = create_process_common(name);
     if (!proc) return NULL;
 
-    if (alloc_kernel_stack(proc) != 0) {
+    if (alloc_kernel_stack_ex(proc, stack_pages) != 0) {
         return NULL;
     }
 
@@ -157,13 +177,67 @@ pcb_t *process_create_kernel(const char *name, void (*entry)(void))
     proc->effective_priority = SCHED_PRIORITY_MAX;
 
     /* Override the return address on the kernel stack to point to entry.
-     * The context_switch will pop callee-saved regs and RET to entry. */
+     * The context_switch will pop callee-saved regs, POPFD, then RET. */
     uint32_t *sp = (uint32_t *)proc->kernel_esp;
-    /* sp points to: [edi=0] [esi=0] [ebx=0] [ebp=0] [ret=process_first_run]
+    /* sp points to: [edi=0] [esi=0] [ebx=0] [ebp=0] [eflags=0x202]
+     *               [ret=process_first_run]
      * Replace process_first_run with our kernel entry point */
-    sp[4] = (uint32_t)entry;  /* overwrite return address */
+    sp[5] = (uint32_t)entry;  /* overwrite return address */
 
     return proc;
+}
+
+/* Terminate the current kernel thread (created by process_create_kernel_ex).
+ * The PCB becomes ZOMBIE and is removed from the scheduler; the PCB and
+ * kernel stack are reclaimed later by kernel_thread_reap() from another
+ * context.  The kernel page directory is shared, so unlike process_exit()
+ * we must NOT destroy it here.  This function never returns. */
+void kernel_thread_exit(int status)
+{
+    pcb_t *curr = sched_get_current();
+    if (!curr) {
+        for (;;) asm volatile("hlt");
+    }
+
+    spinlock_lock(&process_lock);
+    curr->exit_status = status;
+    curr->state = PROCESS_ZOMBIE;
+    sched_remove(curr);
+    spinlock_unlock(&process_lock);
+
+    schedule();  /* never comes back: ZOMBIE and dequeued */
+
+    for (;;) asm volatile("hlt");  /* safety net */
+}
+
+/* Reclaim a finished kernel thread: clear its process-table slot, free the
+ * kernel stack pages and the PCB.  Must be called from a DIFFERENT thread
+ * than the one being reaped (the shell reaps its background jobs).
+ * Returns 0 on success, -1 if pid is not a reapable zombie kernel thread. */
+int kernel_thread_reap(pid_t pid)
+{
+    if (pid <= 0 || pid >= MAX_PROCESSES) return -1;
+
+    spinlock_lock(&process_lock);
+    pcb_t *proc = process_table[pid];
+    if (!proc || proc->state != PROCESS_ZOMBIE || proc->user_stack != 0) {
+        spinlock_unlock(&process_lock);
+        return -1;
+    }
+    process_table[pid] = (void *)0;
+    spinlock_unlock(&process_lock);
+
+    /* Free the kernel stack: unmap each page (also frees the physical
+     * page, since kernel stacks are never COW-shared).  The virtual range
+     * itself is not reused (bump allocator), leaving it unmapped is fine. */
+    uint32_t pages = proc->kstack_pages ? proc->kstack_pages : 2;
+    for (uint32_t i = 0; i < pages; i++) {
+        vmm_unmap_page(vmm_get_current_dir(),
+                       proc->kernel_stack - (i + 1) * PAGE_SIZE);
+    }
+
+    kfree(proc);
+    return 0;
 }
 
 /* Adopt the currently running kernel context as a proper process.
@@ -177,7 +251,7 @@ pcb_t *process_adopt_current(const char *name)
     /* Use the current kernel stack (entry.asm's boot stack) */
     uint32_t esp;
     asm volatile("mov %%esp, %0" : "=r"(esp));
-    proc->kernel_stack = 0x100000 + 32768;  /* top of entry.asm's boot stack */
+    proc->kernel_stack = 0x100000 + 131072;  /* top of entry.asm's boot stack (128 KB) */
     proc->kernel_esp = esp;                  /* current ESP */
     proc->user_stack = 0;
     proc->page_dir = vmm_get_current_dir();
@@ -485,18 +559,18 @@ pid_t process_fork(void)
     sp--; *sp = child->context.fs;
     sp--; *sp = child->context.gs;
 
-    /* Now sp points to the regs_t frame.  Above it we place the
-     * context_switch callee-saved regs and a return address to
-     * fork_return_asm (defined in interrupt.asm) which does:
+    /* Now sp points to the regs_t frame.  Below it we place the
+     * context_switch frame: [edi][esi][ebx][ebp][eflags][ret].
+     * context_switch pops edi..ebp, POPFD, then RETs into
+     * fork_return_trampoline (defined in context.asm) which does:
      *   pop gs; pop fs; pop es; pop ds; popad; add esp,8; iret */
+    extern void fork_return_trampoline(void);
+    sp--; *sp = (uint32_t)fork_return_trampoline;  /* return address */
+    sp--; *sp = 0x202;  /* eflags for context_switch's POPFD (IF=1) */
     sp--; *sp = 0;   /* ebp for context_switch */
     sp--; *sp = 0;   /* ebx */
     sp--; *sp = 0;   /* esi */
     sp--; *sp = 0;   /* edi */
-
-    /* Return address: jump to the interrupt return path */
-    extern void fork_return_trampoline(void);
-    sp--; *sp = (uint32_t)fork_return_trampoline;
 
     child->kernel_esp = (uint32_t)sp;
 
@@ -656,6 +730,75 @@ int process_exec(const char *path, char *const argv[])
         memcpy(dest, elf_buf + ph->p_offset, ph->p_filesz);
     }
 
+    /* Build the user stack: argv strings + argv pointer array (System V i386 ABI).
+     * Stack layout (top -> bottom):
+     *     [argv[0] string][argv[1] string]...[NULL]
+     *     [argv[0] ptr][argv[1] ptr]...[NULL]
+     *     [argc]
+     * We construct it right at USER_STACK_TOP and grow downward.  argv[0]
+     * defaults to the program path if the caller didn't provide one. */
+    uint32_t stack_top = USER_STACK_TOP;
+
+    /* Count argv */
+    int argc = 0;
+    if (argv) {
+        while (argv[argc] && argc < 256) argc++;
+    }
+
+    /* Reserve space for argv pointer array + argc + NULL terminator.
+     * Walk argv strings first to compute total bytes, then place them. */
+    uint32_t total_str_bytes = 0;
+    int i;
+    for (i = 0; i < argc; i++) {
+        uint32_t len = 0;
+        if (argv[i]) {
+            while (argv[i][len]) len++;
+        }
+        total_str_bytes += len + 1;
+    }
+
+    /* Layout (growing downward from stack_top):
+     *   [reserved area: argc(4) + (argc+1)*4 ptrs + strings]
+     */
+    uint32_t strings_size = total_str_bytes;
+    uint32_t argv_table_size = (uint32_t)(argc + 1) * 4;
+    uint32_t reserved = strings_size + argv_table_size + 4; /* +4 for argc */
+
+    /* Align to 16 bytes for System V ABI */
+    reserved = (reserved + 15) & ~0xFu;
+
+    uint32_t sp_user = stack_top - reserved;
+    uint32_t str_base = sp_user + 4 + argv_table_size; /* after argc + ptrs */
+
+    /* Copy strings into user stack */
+    uint32_t str_off = 0;
+    for (i = 0; i < argc; i++) {
+        uint32_t len = 0;
+        if (argv[i]) {
+            while (argv[i][len]) len++;
+        }
+        for (uint32_t k = 0; k < len; k++) {
+            ((uint8_t *)str_base)[str_off + k] = argv[i][k];
+        }
+        ((uint8_t *)str_base)[str_off + len] = '\0';
+        str_off += len + 1;
+    }
+
+    /* Write argv pointer table */
+    str_off = 0;
+    for (i = 0; i < argc; i++) {
+        uint32_t len = 0;
+        if (argv[i]) {
+            while (argv[i][len]) len++;
+        }
+        *(uint32_t *)(sp_user + 4 + i * 4) = str_base + str_off;
+        str_off += len + 1;
+    }
+    *(uint32_t *)(sp_user + 4 + argc * 4) = 0; /* argv terminator */
+
+    /* Write argc at the very top of the user stack area */
+    *(uint32_t *)sp_user = (uint32_t)argc;
+
     /* Switch CR3 back */
     asm volatile("mov %0, %%cr3" : : "r"(old_cr3) : "memory");
 
@@ -666,14 +809,21 @@ int process_exec(const char *path, char *const argv[])
     curr->page_dir = new_dir;
     vmm_set_current_dir(new_dir);
 
+    /* Load CR3 with the new address space so the upcoming iret (and any
+     * kernel code that runs before it, including process_first_run's
+     * stack pushes) operates against the user-space mappings. */
+    asm volatile("mov %0, %%cr3" : : "r"(new_dir) : "memory");
+
     /* 10. Destroy the old address space */
     if (old_dir) {
         vmm_destroy_address_space(old_dir);
     }
 
-    /* 11. Update process metadata */
+    /* 11. Update process metadata.
+     * user_stack stores the pointer to argc on the user stack, which
+     * process_first_run will use to set ESP for iret. */
     curr->entry_point = hdr->e_entry;
-    curr->user_stack = USER_STACK_TOP;
+    curr->user_stack = sp_user;
 
     /* Allocate a new 2-page kernel stack */
     if (alloc_kernel_stack(curr) != 0) {
@@ -690,8 +840,14 @@ int process_exec(const char *path, char *const argv[])
     /* Free the ELF buffer */
     kfree(elf_buf);
 
-    (void)argv;
+    /* Trigger the user-mode entry.  process_first_run() does iret to
+     * curr->entry_point with ESP = curr->user_stack and CS/SS set to
+     * user-mode selectors.  This call never returns: the kernel stack
+     * frame for process_first_run replaces the current kernel frame, and
+     * iret transitions the CPU to ring 3 in the new address space. */
+    process_first_run();
 
+    /* process_first_run() does not return under normal operation. */
     return 0;
 }
 

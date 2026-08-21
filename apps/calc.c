@@ -1,3 +1,18 @@
+/*
+ * calc.c — DEPRECATED 旧版 GUI 计算器
+ *
+ * v0.8 状态:本文件**未被任何 Makefile 目标或 #include 引用**。
+ *         实际运行的是 `kernel/shell.c` 中的 `app_calc_main()`,
+ *         后者调用 `kernel/cmd_calc()`(纯文本模式)。
+ *
+ * 替代实现:
+ *   - `kernel/shell.c::cmd_calc()` — 表达式求值
+ *   - `kernel/gui_apps.c::gui_app_calculator()` — 简化窗口版
+ *   - `os/apps/calculator.c` — 完整窗口版(29 KB,鼠标 + 键盘)
+ *
+ * 重构建议:保留(0 字节二进制开销),下次大重构时删除。
+ */
+
 #include "user_syscall.h"
 #include "string.h"
 

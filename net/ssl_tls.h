@@ -51,13 +51,16 @@ typedef struct tls_ctx {
     /* 随机数 */
     uint8_t     client_random[32];    /* ClientHello随机数 */
     uint8_t     server_random[32];    /* ServerHello随机数 */
+    uint8_t     pre_master_secret[48]; /* 预主密钥 (派生后立即清零) */
     uint8_t     master_secret[48];    /* 主密钥 */
 
     /* 会话 */
     uint32_t    session_id_len;
     uint8_t     session_id[32];
 
-    /* 密钥材料 (简化) */
+    /* 密钥材料 (由PRF从master_secret派生) */
+    uint8_t     client_write_mac_key[48]; /* 客户端写MAC密钥 (CBC套件) */
+    uint8_t     server_write_mac_key[48]; /* 服务端写MAC密钥 (CBC套件) */
     uint8_t     client_write_key[32];
     uint8_t     server_write_key[32];
     uint8_t     client_iv[16];
@@ -105,5 +108,11 @@ const char *tls_state_str(tls_state_t state);
 
 /* 获取错误信息 */
 const char *tls_error_str(const tls_ctx_t *ctx);
+
+/*
+ * 密码学原语自测 (SHA-256 / HMAC-SHA256 / TLS-PRF)
+ * 返回0表示全部通过, 负数表示失败
+ */
+int tls_crypto_selftest(void);
 
 #endif /* SSL_TLS_H */

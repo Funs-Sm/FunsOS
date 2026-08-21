@@ -41,14 +41,14 @@ typedef struct {
     uint32_t uid, gid;
     uint32_t pid;
     uint32_t data_len;
-    char     data[4096];
+    char     data[256];
 } fuse_request_t;
 
 typedef struct {
     uint32_t unique;
     int32_t  error;
     uint32_t data_len;
-    char     data[4096];
+    char     data[256];
 } fuse_response_t;
 
 typedef struct fuse_req_node {

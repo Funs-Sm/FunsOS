@@ -820,17 +820,11 @@ int funsos_getsockopt(int fd, int level, int optname,
     return syscall5(SYS_GETSOCKOPT, fd, level, optname, (int)optval, (int)optlen);
 }
 
-int funsos_select(int nfds, void *readfds, void *writefds,
-                  void *exceptfds, uint32_t timeout_ms)
-{
-    return syscall5(SYS_SELECT, nfds, (int)readfds, (int)writefds,
-                    (int)exceptfds, (int)timeout_ms);
-}
-
-int funsos_poll(void *fds, uint32_t nfds, int timeout_ms)
-{
-    return syscall3(SYS_POLL, (int)fds, (int)nfds, timeout_ms);
-}
+/* ================================================================
+ *  I/O 多路复用 (select/poll/epoll)
+ *  注: 实际实现在 funsos_select.c 中（带 funsos_fd_set 类型支持），
+ *  本文件只保留网络 API。
+ * ================================================================ */
 
 funsos_ipv4_t funsos_inet_addr(const char *str)
 {

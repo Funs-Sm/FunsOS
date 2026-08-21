@@ -1,5 +1,41 @@
-/* widgets.c - 控件实现
+/*
+ * widgets.c - 控件实现
  * 所有 UI 控件的创建、渲染和交互逻辑
+ *
+ * 文件尺寸警告:本文件 ~62 KB。本注释作为控件索引,方便定位。
+ *
+ * 控件清单(渲染函数 -> 行号大致):
+ *   widget_alloc / add_child     - L10   (helper)
+ *   button_render                - L58
+ *   label_render                 - L109
+ *   textbox_render               - L126
+ *   checkbox_render              - L163
+ *   slider_render                - L194
+ *   progress_render              - L229
+ *   combobox_render              - L263
+ *   listbox_render               - L294
+ *   table_render                 - L329
+ *   tabview_render               - L368
+ *   menu_render                  - L405
+ *   toolbar_render               - L445
+ *   statusbar_render             - L466
+ *   dialog_render                - L487
+ *   scrollbar_render             - L526
+ *   spinbox_render + event       - L865 / L914
+ *   hvslider_render + event      - L967 / L1013
+ *   progress2_render             - L1076
+ *   tab_control_render           - L1141
+ *   tree_view_render             - L1251
+ *   splitter_render + event      - L1303 / L1335
+ *   toolbar2_render              - L1394
+ *   statusbar2_render            - L1472
+ *   mdi_area_render              - L1551
+ *   calendar_render              - L1672
+ *   color_picker_render          - L1787
+ *
+ * 已知 TODO(留给后续拆分):
+ *   - 每个控件可拆到独立 widgets/<name>.c,widgets.c 降为调度表
+ *   - widget_alloc / add_child 抽到 widgets_internal.h
  */
 
 #include "funrender.h"

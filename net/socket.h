@@ -40,9 +40,34 @@
 #define SO_REUSEPORT    0x0200
 #define SO_RCVLOWAT     0x1005
 #define SO_SNDLOWAT     0x1006
+#define SO_DEBUG        0x0001
+#define SO_DONTROUTE    0x0010
+#define SO_OOBINLINE    0x0100
+#define SO_PRIORITY     0x000c
+#define SO_BSDCOMPAT    0x0004
+#define SO_PASSCRED     0x0010
+#define SO_PEERCRED     0x0012
+#define SO_RCVBUFFORCE  0x100b
+#define SO_SNDBUFFORCE  0x100a
+#define SO_PROTOCOL     0x1028
+#define SO_DOMAIN       0x1029
 
 /* IP level options */
 #define IP_PKTINFO      8
+#define IP_TTL          2
+#define IP_TOS          1
+#define IP_HDRINCL      3
+#define IP_OPTIONS      4
+#define IP_RECVERR      11
+#define IP_RECVTTL      12
+#define IP_RECVTOS      13
+#define IP_MTU_DISCOVER 10
+#define IP_TRANSPARENT  19
+#define IP_FREEBIND     15
+#define IP_MULTICAST_TTL 33
+#define IP_MULTICAST_LOOP 34
+#define IP_ADD_MEMBERSHIP 35
+#define IP_DROP_MEMBERSHIP 36
 
 /* TCP level options */
 #define TCP_NODELAY     0x01
@@ -50,6 +75,16 @@
 #define TCP_KEEPINTVL   0x04
 #define TCP_KEEPCNT     0x05
 #define TCP_MAXSEG      0x02
+#define TCP_DEFER_ACCEPT 9
+#define TCP_QUICKACK    12
+#define TCP_SYNCNT      7
+#define TCP_LINGER2     8
+#define TCP_FASTOPEN    23
+#define TCP_CONGESTION  13
+#define TCP_INFO        11
+#define TCP_WINDOW_CLAMP 10
+#define TCP_NOTSENT_LOWAT 25
+#define TCP_USER_TIMEOUT 18
 
 /* send/recv flags */
 #define MSG_DONTWAIT  0x40
@@ -168,5 +203,31 @@ void sock_set_nonblock(socket_t *sock, int on);
 int32_t sock_get_remote_addr(socket_t *sock, sockaddr_in_t *addr);
 void sock_set_timeout(socket_t *sock, uint32_t recv_timeout, uint32_t send_timeout);
 int sys_socket_get_error(socket_t *sock);
+
+/* Socket 增强功能 */
+typedef struct {
+    uint32_t total_sockets;
+    uint32_t tcp_sockets;
+    uint32_t udp_sockets;
+    uint32_t raw_sockets;
+    uint32_t listening;
+    uint32_t connected;
+    uint32_t closed_wait;
+    uint32_t time_wait;
+} sock_stat_t;
+
+int  sock_get_stats(sock_stat_t *out);
+int  sock_get_tcp_info(int fd, void *info, uint32_t *len);
+int  sock_set_tcp_congestion(int fd, const char *algo);
+int  sock_get_tcp_congestion(int fd, char *algo, uint32_t len);
+int  sock_set_bind_to_device(int fd, const char *iface);
+int  sock_set_mark(int fd, uint32_t mark);
+uint32_t sock_get_mark(int fd);
+int  sock_set_priority(int fd, int priority);
+int  sock_get_priority(int fd);
+int  sock_set_recv_buffer(int fd, uint32_t size);
+int  sock_get_recv_buffer(int fd, uint32_t *size);
+int  sock_set_send_buffer(int fd, uint32_t size);
+int  sock_get_send_buffer(int fd, uint32_t *size);
 
 #endif

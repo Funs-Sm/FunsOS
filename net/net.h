@@ -67,6 +67,39 @@ typedef struct {
     uint32_t tx_dropped;
 } net_stats_t;
 
+/* 扩展的网络性能统计 */
+typedef struct {
+    uint64_t rx_bytes_total;
+    uint64_t tx_bytes_total;
+    uint64_t rx_packets_total;
+    uint64_t tx_packets_total;
+    uint32_t rx_pps;           /* 每秒接收包数 */
+    uint32_t tx_pps;           /* 每秒发送包数 */
+    uint32_t rx_bps;           /* 每秒接收位数 */
+    uint32_t tx_bps;           /* 每秒发送位数 */
+    uint32_t peak_rx_bps;
+    uint32_t peak_tx_bps;
+    uint32_t peak_rx_pps;
+    uint32_t peak_tx_pps;
+    uint32_t collisions;
+    uint32_t multicast_rx;
+    uint32_t broadcast_rx;
+    uint32_t multicast_tx;
+    uint32_t broadcast_tx;
+    uint32_t rx_frame_errors;
+    uint32_t rx_over_errors;
+    uint32_t rx_crc_errors;
+    uint32_t rx_fifo_errors;
+    uint32_t rx_length_errors;
+    uint32_t tx_aborted_errors;
+    uint32_t tx_carrier_errors;
+    uint32_t tx_fifo_errors;
+    uint32_t tx_heartbeat_errors;
+    uint32_t tx_window_errors;
+    uint32_t rx_compressed;
+    uint32_t tx_compressed;
+} net_perf_stats_t;
+
 void net_init(void);
 void net_register_interface(net_interface_t *iface);
 net_interface_t *net_get_interface(uint32_t index);
@@ -84,6 +117,19 @@ void net_tick(uint32_t now_ms);
 
 const net_stats_t *net_get_stats(void);
 void net_reset_stats(void);
+
+/* 扩展性能统计接口 */
+const net_perf_stats_t *net_get_perf_stats(void);
+void net_perf_stats_reset(void);
+void net_perf_tick(uint32_t now_ms);
+int  net_get_iface_stats(const char *iface_name, net_stats_t *out);
+uint32_t net_get_iface_mtu(const char *iface_name);
+int  net_set_iface_mtu(const char *iface_name, uint32_t mtu);
+int  net_iface_up(const char *iface_name);
+int  net_iface_down(const char *iface_name);
+int  net_get_iface_link(const char *iface_name);
+uint32_t net_get_iface_speed(const char *iface_name);
+const char *net_get_iface_duplex(const char *iface_name);
 
 #endif
 

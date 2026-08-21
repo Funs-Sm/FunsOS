@@ -13,6 +13,8 @@
 #include "ssl_tls.h"
 #include "string.h"
 #include "stdlib.h"
+#include "fun_format.h"  /* fun_hash_data: 标准SHA-256 */
+#include "krng.h"        /* 内核随机数 */
 
 /* ========== 内部常量定义 ========== */
 
@@ -106,16 +108,26 @@ static int build_handshake(uint8_t *buf, uint32_t buf_size,
 }
 
 /*
- * 生成伪随机数 (简化版)
- * 在实际系统中应使用硬件RNG或CSPRNG
+ * 生成伪随机数
+ * 熵源混合: 内核RNG(krng) + CPU时间戳计数器(rdtsc) + LCG,
+ * 避免固定种子导致每次启动产生完全相同的随机数序列.
+ * 注: 仍非CSPRNG级别, 教学环境下优于静态种子的确定性输出.
  */
 static void generate_random(uint8_t *buf, uint32_t len)
 {
-    static uint32_t seed = 12345;
+    static uint32_t lcg = 0x9E3779B9U;
+    uint32_t tsc_lo, tsc_hi;
     uint32_t i;
+
+    __asm__ volatile("rdtsc" : "=a"(tsc_lo), "=d"(tsc_hi));
+
+    uint32_t s = tsc_lo ^ (tsc_hi << 13) ^ krng_next32()
+               ^ (lcg = lcg * 1103515245U + 12345U);
+
     for (i = 0; i < len; i++) {
-        seed = seed * 1103515245 + 12345;
-        buf[i] = (seed >> 16) & 0xFF;
+        s = s * 1664525U + 1013904223U;
+        s ^= krng_next32() >> (i % 17);  /* 每字节混入新的内核熵 */
+        buf[i] = (uint8_t)((s >> 16) & 0xFF);
     }
 }
 
@@ -320,67 +332,198 @@ static int parse_server_hello(tls_ctx_t *ctx, const uint8_t *data, uint32_t len)
     return 0;
 }
 
+/* ========== 密码学原语 (真实实现) ========== */
+
 /*
- * 简化的主密钥生成 (PRF stub)
- * 实际应使用HKDF或TLS PRF
+ * SHA-256 单次哈希 (包装fun_format.c中的标准实现)
  */
-static void compute_master_secret_stub(tls_ctx_t *ctx)
+static void sha256_oneshot(const uint8_t *data, uint32_t len, uint8_t out[32])
 {
-    /*
-     * 真实的master_secret计算:
-     * master_secret = PRF(pre_master_secret,
-     *                     "master secret",
-     *                     ClientHello.random + ServerHello.random)
-     *                    [0..47]
-     *
-     * 这里使用简化版本: 直接拼接哈希
-     */
-    uint32_t i;
-    for (i = 0; i < 48; i++) {
-        /* 使用预主密钥和随机数混合 */
-        ctx->master_secret[i] = ctx->client_random[i % 32] ^
-                               ctx->server_random[i % 32] ^
-                               (uint8_t)(i * 17 + 42);  /* 固定盐值 */
-    }
+    uint32_t hlen = 0;
+    fun_hash_data(data, len, out, &hlen);
 }
 
 /*
- * 简化的密钥材料派生 (key expansion stub)
+ * HMAC-SHA256 (RFC 2104)
+ * 支持两段数据拼接: HMAC(key, d1 || d2)
+ * 约束: key_len <= 64; d1_len + d2_len <= 384
+ * 返回0成功, -1参数超限
  */
-static void derive_keys_stub(tls_ctx_t *ctx)
+static int hmac_sha256(const uint8_t *key, uint32_t key_len,
+                       const uint8_t *d1, uint32_t d1_len,
+                       const uint8_t *d2, uint32_t d2_len,
+                       uint8_t out[32])
 {
-    /*
-     * 实际的密钥派生:
-     * key_block = PRF(master_secret,
-     *                 "key expansion",
-     *                 ServerHello.random + ClientHello.random)
-     *
-     * key_block分解为:
-     *   client_write_MAC_key[security_params.mac_key_length]
-     *   server_write_MAC_key[security_params.mac_key_length]
-     *   client_write_key[security_params.enc_key_length]
-     *   server_write_key[security_params.enc_key_length]
-     *   client_write_IV[security_params.fixed_iv_length]
-     *   server_write_IV[security_params.fixed_iv_length]
-     */
+    if (key_len > 64 || d1_len + d2_len > 384)
+        return -1;
 
-    /* 简化: 用master_secret的不同部分作为各密钥 */
+    uint8_t k[64];
+    memset(k, 0, sizeof(k));
+    if (key_len > 0)
+        memcpy(k, key, key_len);
+
+    uint8_t ipad[64], opad[64];
+    uint32_t i;
+    for (i = 0; i < 64; i++) {
+        ipad[i] = k[i] ^ 0x36;
+        opad[i] = k[i] ^ 0x5C;
+    }
+
+    /* inner = SHA256(ipad || d1 || d2) */
+    uint8_t buf[64 + 384];
+    memcpy(buf, ipad, 64);
+    if (d1_len > 0) memcpy(buf + 64, d1, d1_len);
+    if (d2_len > 0) memcpy(buf + 64 + d1_len, d2, d2_len);
+
+    uint8_t inner[32];
+    sha256_oneshot(buf, 64 + d1_len + d2_len, inner);
+
+    /* out = SHA256(opad || inner) */
+    memcpy(buf, opad, 64);
+    memcpy(buf + 64, inner, 32);
+    sha256_oneshot(buf, 64 + 32, out);
+
+    memset(buf, 0, sizeof(buf));
+    memset(inner, 0, sizeof(inner));
+    memset(k, 0, sizeof(k));
+    return 0;
+}
+
+/*
+ * TLS 1.2 PRF (RFC 5246 §5), 基于P_SHA256:
+ *   A(0) = seed
+ *   A(i) = HMAC_SHA256(secret, A(i-1))
+ *   PRF  = HMAC(secret, A(1)||seed) || HMAC(secret, A(2)||seed) || ...
+ * seed参数为 label || 调用方提供的seed 的拼接.
+ * 返回0成功, -1失败
+ */
+static int tls_prf_sha256(const uint8_t *secret, uint32_t secret_len,
+                          const char *label,
+                          const uint8_t *seed, uint32_t seed_len,
+                          uint8_t *out, uint32_t out_len)
+{
+    uint32_t label_len = (uint32_t)strlen(label);
+    if (label_len + seed_len > 352)
+        return -1;
+
+    /* 拼接 label+seed, 供各轮HMAC复用 */
+    uint8_t ls[384];
+    memcpy(ls, label, label_len);
+    if (seed_len > 0)
+        memcpy(ls + label_len, seed, seed_len);
+    uint32_t ls_len = label_len + seed_len;
+
+    /* A(1) = HMAC(secret, label || seed) */
+    uint8_t a[32];
+    if (hmac_sha256(secret, secret_len, ls, ls_len, NULL, 0, a) != 0)
+        return -1;
+
+    uint32_t produced = 0;
+    while (produced < out_len) {
+        /* HMAC(secret, A(i) || label || seed) */
+        uint8_t round[32];
+        if (hmac_sha256(secret, secret_len, a, 32, ls, ls_len, round) != 0)
+            return -1;
+
+        uint32_t take = out_len - produced;
+        if (take > 32)
+            take = 32;
+        memcpy(out + produced, round, take);
+        produced += take;
+
+        if (produced < out_len) {
+            /* A(i+1) = HMAC(secret, A(i)) */
+            uint8_t next_a[32];
+            if (hmac_sha256(secret, secret_len, a, 32, NULL, 0, next_a) != 0)
+                return -1;
+            memcpy(a, next_a, 32);
+            memset(next_a, 0, sizeof(next_a));
+        }
+    }
+
+    memset(a, 0, sizeof(a));
+    memset(ls, 0, sizeof(ls));
+    return 0;
+}
+
+/*
+ * 主密钥生成 (RFC 5246 §8.1):
+ * master_secret = PRF(pre_master_secret, "master secret",
+ *                     ClientHello.random + ServerHello.random)[0..47]
+ */
+static void compute_master_secret(tls_ctx_t *ctx)
+{
+    uint8_t seed[64];
+    memcpy(seed, ctx->client_random, 32);
+    memcpy(seed + 32, ctx->server_random, 32);
+
+    tls_prf_sha256(ctx->pre_master_secret, 48, "master secret",
+                   seed, 64, ctx->master_secret, 48);
+
+    /* 预主密钥用后即刻清除 */
+    memset(ctx->pre_master_secret, 0, sizeof(ctx->pre_master_secret));
+    memset(seed, 0, sizeof(seed));
+}
+
+/*
+ * 密钥材料派生 (RFC 5246 §6.3):
+ * key_block = PRF(master_secret, "key expansion",
+ *                 ServerHello.random + ClientHello.random)
+ * 按密码套件参数切分为 MAC_key / enc_key / IV 各两份.
+ */
+static void derive_key_material(tls_ctx_t *ctx)
+{
+    uint32_t mac_len, enc_len, iv_len;
+
+    switch (ctx->cipher_suite) {
+    case TLS_RSA_WITH_AES_128_CBC_SHA:
+        mac_len = 20; enc_len = 16; iv_len = 16;  /* SHA1 HMAC + AES-128-CBC */
+        break;
+    case TLS_RSA_WITH_AES_256_CBC_SHA:
+        mac_len = 20; enc_len = 32; iv_len = 16;  /* SHA1 HMAC + AES-256-CBC */
+        break;
+    case TLS_AES_128_GCM_SHA256:
+        mac_len = 0;  enc_len = 16; iv_len = 4;   /* AEAD, 4字节fixed salt */
+        break;
+    case TLS_AES_256_GCM_SHA384:
+        mac_len = 0;  enc_len = 32; iv_len = 4;
+        break;
+    case TLS_CHACHA20_POLY1305_SHA256:
+        mac_len = 0;  enc_len = 32; iv_len = 12;  /* RFC 7905 fixed_iv */
+        break;
+    default:
+        mac_len = 0;  enc_len = 16; iv_len = 16;
+        break;
+    }
+
+    uint8_t seed[64];
+    memcpy(seed, ctx->server_random, 32);
+    memcpy(seed + 32, ctx->client_random, 32);
+
+    uint32_t need = 2 * (mac_len + enc_len + iv_len);
+    uint8_t key_block[2 * (48 + 32 + 16)];  /* 上限192字节 */
+    memset(key_block, 0, sizeof(key_block));
+
+    tls_prf_sha256(ctx->master_secret, 48, "key expansion",
+                   seed, 64, key_block, need);
+
+    uint32_t off = 0;
+    memset(ctx->client_write_mac_key, 0, sizeof(ctx->client_write_mac_key));
+    memset(ctx->server_write_mac_key, 0, sizeof(ctx->server_write_mac_key));
     memset(ctx->client_write_key, 0, sizeof(ctx->client_write_key));
     memset(ctx->server_write_key, 0, sizeof(ctx->server_write_key));
     memset(ctx->client_iv, 0, sizeof(ctx->client_iv));
     memset(ctx->server_iv, 0, sizeof(ctx->server_iv));
 
-    /* 从master_secret复制部分字节作为密钥 (仅示意) */
-    uint32_t key_len = 16;  /* AES-128 */
-    if (ctx->cipher_suite == TLS_AES_256_GCM_SHA384 ||
-        ctx->cipher_suite == TLS_RSA_WITH_AES_256_CBC_SHA) {
-        key_len = 32;  /* AES-256 */
-    }
+    memcpy(ctx->client_write_mac_key, key_block + off, mac_len); off += mac_len;
+    memcpy(ctx->server_write_mac_key, key_block + off, mac_len); off += mac_len;
+    memcpy(ctx->client_write_key, key_block + off, enc_len);     off += enc_len;
+    memcpy(ctx->server_write_key, key_block + off, enc_len);     off += enc_len;
+    memcpy(ctx->client_iv, key_block + off, iv_len);             off += iv_len;
+    memcpy(ctx->server_iv, key_block + off, iv_len);
 
-    memcpy(ctx->client_write_key, ctx->master_secret, key_len);
-    memcpy(ctx->server_write_key, ctx->master_secret + 48 - key_len, key_len);
-    memcpy(ctx->client_iv, ctx->master_secret + 16, 12);  /* GCM IV通常是12字节 */
-    memcpy(ctx->server_iv, ctx->master_secret + 28, 12);
+    memset(key_block, 0, sizeof(key_block));
+    memset(seed, 0, sizeof(seed));
 }
 
 /*
@@ -390,20 +533,22 @@ static int build_client_key_exchange(tls_ctx_t *ctx, uint8_t *buf, uint32_t buf_
 {
     /*
      * RSA密钥交换:
-     * 客户端生成pre_master_secret (46字节: version(2) + random(44))
+     * 客户端生成pre_master_secret (48字节: version(2) + random(46))
      * 用服务器证书的公钥加密后发送
      *
-     * 简化实现: 发送固定的pre_master_secret (不加密!)
+     * 简化点: 未做RSA公钥加密 (无证书公钥基础设施), PMS明文发送.
+     * 但PMS会真实参与主密钥派生, 保证密钥学结构正确.
      */
     uint8_t pms[48];
 
     /* pre_master_secret的前两字节是客户端建议的版本 */
     pms[0] = (TLS_VERSION_1_2 >> 8) & 0xFF;
     pms[1] = TLS_VERSION_1_2 & 0xFF;
-    generate_random(pms + 2, 46);  /* 其余44字节随机 */
+    generate_random(pms + 2, 46);  /* 其余46字节随机 */
 
-    /* 计算主密钥 */
-    compute_master_secret_stub(ctx);
+    /* 保存PMS并计算主密钥 (PRF真实实现) */
+    memcpy(ctx->pre_master_secret, pms, 48);
+    compute_master_secret(ctx);
 
     /* 加密后的PMS长度 (RSA加密后的长度, 这里用原始长度代替) */
     uint8_t cke[64];  /* encrypted_pms_length(2) + encrypted_pre_master_secret */
@@ -434,25 +579,34 @@ static int build_change_cipher_spec(tls_ctx_t *ctx, uint8_t *buf, uint32_t buf_s
 }
 
 /*
- * 构建Finished消息 (verify_data = PRF(master_secret, finished_label, handshake_hash)) */
+ * 构建Finished消息
+ * verify_data = PRF(master_secret, "client finished",
+ *                   Hash(handshake_messages))[0..11]
+ * 简化点: 未累积全部握手消息的transcript哈希,
+ * 以 SHA256(client_random||server_random) 作为transcript输入;
+ * 但verify_data真实经由PRF从master_secret派生.
+ */
 static int build_finished(tls_ctx_t *ctx, uint8_t *buf, uint32_t buf_size)
 {
-    /*
-     * Finished消息包含12字节的verify_data
-     * verify_data = PRF(master_secret, finished_label, Hash(handshake_messages))
-     *
-     * 简化: 使用固定模式的验证数据
-     */
+    uint8_t transcript_seed[64];
+    uint8_t transcript_hash[32];
     uint8_t verify_data[12];
-    uint32_t i;
-    for (i = 0; i < 12; i++) {
-        verify_data[i] = (uint8_t)(ctx->client_seq + i) ^ 0xAB;
-    }
+
+    memcpy(transcript_seed, ctx->client_random, 32);
+    memcpy(transcript_seed + 32, ctx->server_random, 32);
+    sha256_oneshot(transcript_seed, 64, transcript_hash);
+
+    tls_prf_sha256(ctx->master_secret, 48, "client finished",
+                   transcript_hash, 32, verify_data, 12);
+
+    memset(transcript_seed, 0, sizeof(transcript_seed));
+    memset(transcript_hash, 0, sizeof(transcript_hash));
 
     /* 包装成握手消息 */
     uint8_t hs_buf[TLS_HANDSHAKE_HEADER_SIZE + 12];
     int hs_len = build_handshake(hs_buf, sizeof(hs_buf),
                                  HS_FINISHED, verify_data, 12);
+    memset(verify_data, 0, sizeof(verify_data));
     if (hs_len < 0)
         return -1;
 
@@ -467,6 +621,8 @@ static int build_finished(tls_ctx_t *ctx, uint8_t *buf, uint32_t buf_size)
  */
 tls_ctx_t *tls_create(void)
 {
+    static int selftest_done = 0;
+
     tls_ctx_t *ctx = (tls_ctx_t *)malloc(sizeof(tls_ctx_t));
     if (!ctx)
         return NULL;
@@ -475,6 +631,16 @@ tls_ctx_t *tls_create(void)
     ctx->state = TLS_STATE_CLOSED;
     ctx->error_code = 0;
     ctx->error_msg[0] = '\0';
+
+    /* 首次创建时验证密码学原语正确性, 失败则拒绝工作 */
+    if (!selftest_done) {
+        selftest_done = 1;
+        if (tls_crypto_selftest() != 0) {
+            ctx->state = TLS_STATE_ERROR;
+            strcpy(ctx->error_msg, "TLS crypto selftest failed");
+            ctx->error_code = -100;
+        }
+    }
 
     return ctx;
 }
@@ -490,7 +656,10 @@ void tls_destroy(tls_ctx_t *ctx)
     /* 安全清除敏感数据 */
     memset(ctx->client_random, 0, sizeof(ctx->client_random));
     memset(ctx->server_random, 0, sizeof(ctx->server_random));
+    memset(ctx->pre_master_secret, 0, sizeof(ctx->pre_master_secret));
     memset(ctx->master_secret, 0, sizeof(ctx->master_secret));
+    memset(ctx->client_write_mac_key, 0, sizeof(ctx->client_write_mac_key));
+    memset(ctx->server_write_mac_key, 0, sizeof(ctx->server_write_mac_key));
     memset(ctx->client_write_key, 0, sizeof(ctx->client_write_key));
     memset(ctx->server_write_key, 0, sizeof(ctx->server_write_key));
 
@@ -681,7 +850,7 @@ int tls_connect(tls_ctx_t *ctx)
     }
 
     /* 派生密钥材料 */
-    derive_keys_stub(ctx);
+    derive_key_material(ctx);
 
     /* 发送ChangeCipherSpec */
     uint8_t ccs_buf[16];
@@ -853,4 +1022,105 @@ const char *tls_error_str(const tls_ctx_t *ctx)
         return ctx->error_msg;
 
     return "No error";
+}
+
+/*
+ * tls_crypto_selftest - 密码学原语自测
+ *
+ * 1. SHA-256("abc") 标准向量 (FIPS 180-4)
+ * 2. HMAC-SHA256 RFC 4231 Test Case 1
+ * 3. TLS-PRF 属性: 确定性 / 标签敏感性 / 输出前缀一致性
+ * 返回0全部通过, 负数表示对应测试失败
+ */
+int tls_crypto_selftest(void)
+{
+    /* ---- 1. SHA-256("abc") ---- */
+    static const uint8_t sha256_abc[32] = {
+        0xba,0x78,0x16,0xbf,0x8f,0x01,0xcf,0xea,0x41,0x41,0x40,0xde,
+        0x5d,0xae,0x22,0x23,0xb0,0x03,0x61,0xa3,0x96,0x17,0x7a,0x9c,
+        0xb4,0x10,0xff,0x61,0xf2,0x00,0x15,0xad
+    };
+    uint8_t digest[32];
+    sha256_oneshot((const uint8_t *)"abc", 3, digest);
+    if (memcmp(digest, sha256_abc, 32) != 0)
+        return -1;
+
+    /* ---- 2. HMAC-SHA256 RFC4231 TC1: key=0x0b*20, data="Hi There" ---- */
+    static const uint8_t hmac_tc1[32] = {
+        0xb0,0x34,0x4c,0x61,0xd8,0xdb,0x38,0x53,0x5c,0xa8,0xaf,0xce,
+        0xaf,0x0b,0xf1,0x2b,0x88,0x1d,0xc2,0x00,0xc9,0x83,0x3d,0xa7,
+        0x26,0xe9,0x37,0x6c,0x2e,0x32,0xcf,0xf7
+    };
+    uint8_t key[20];
+    memset(key, 0x0b, sizeof(key));
+    if (hmac_sha256(key, 20, (const uint8_t *)"Hi There", 8,
+                    NULL, 0, digest) != 0)
+        return -2;
+    if (memcmp(digest, hmac_tc1, 32) != 0)
+        return -3;
+
+    /* ---- 3. TLS1.2 PRF 公开测试向量 (与OpenSSL行为一致) ---- */
+    {
+        static const uint8_t prf_secret[16] = {
+            0x9b,0xbe,0x43,0x6b,0xa9,0x40,0xf0,0x17,
+            0xb1,0x76,0x52,0x84,0x9a,0x71,0xdb,0x35
+        };
+        static const uint8_t prf_seed[16] = {
+            0xa0,0xba,0x9f,0x93,0x6c,0xda,0x31,0x18,
+            0x27,0xa6,0xf7,0x96,0xff,0xd5,0x19,0x8c
+        };
+        static const uint8_t prf_expect[20] = {
+            0xe3,0xf2,0x29,0xba,0x72,0x7b,0xe1,0x7b,0x8d,0x12,
+            0x26,0x20,0x55,0x7c,0xd4,0x53,0xc2,0xaa,0xb2,0x1d
+        };
+        uint8_t prf_out[20];
+        if (tls_prf_sha256(prf_secret, 16, "test label",
+                           prf_seed, 16, prf_out, 20) != 0)
+            return -4;
+        if (memcmp(prf_out, prf_expect, 20) != 0)
+            return -8;
+    }
+
+    /* ---- 4. PRF 属性 ---- */
+    static const uint8_t secret[48] = {
+        0x9b,0xbe,0x43,0x6b,0xa9,0x40,0xf0,0x17,0xb1,0x76,0x52,0x84,
+        0x9a,0x71,0xdb,0x35,0xf8,0x2a,0x34,0x00,0xea,0x69,0x01,0x72,
+        0xb4,0x71,0xb5,0x03,0xa1,0x11,0x4d,0x8c,0x00,0x01,0x02,0x03,
+        0x04,0x05,0x06,0x07,0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f
+    };
+    static const uint8_t seed[64] = {
+        0xa0,0xa1,0xa2,0xa3,0xa4,0xa5,0xa6,0xa7,0xa8,0xa9,0xaa,0xab,
+        0xac,0xad,0xae,0xaf,0xb0,0xb1,0xb2,0xb3,0xb4,0xb5,0xb6,0xb7,
+        0xb8,0xb9,0xba,0xbb,0xbc,0xbd,0xbe,0xbf,0xc0,0xc1,0xc2,0xc3,
+        0xc4,0xc5,0xc6,0xc7,0xc8,0xc9,0xca,0xcb,0xcc,0xcd,0xce,0xcf,
+        0xd0,0xd1,0xd2,0xd3,0xd4,0xd5,0xd6,0xd7,0xd8,0xd9,0xda,0xdb,
+        0xdc,0xdd,0xde,0xdf
+    };
+    uint8_t out1[48], out2[48], out3[48], out32[32];
+
+    /* 确定性: 同输入必同输出 */
+    if (tls_prf_sha256(secret, 48, "master secret", seed, 64, out1, 48) != 0)
+        return -4;
+    if (tls_prf_sha256(secret, 48, "master secret", seed, 64, out2, 48) != 0)
+        return -4;
+    if (memcmp(out1, out2, 48) != 0)
+        return -5;
+
+    /* 标签敏感性: 不同label必须产生不同输出 */
+    if (tls_prf_sha256(secret, 48, "key expansion", seed, 64, out3, 48) != 0)
+        return -4;
+    if (memcmp(out1, out3, 48) == 0)
+        return -6;
+
+    /* 前缀一致性: P_hash输出截断, 32字节输出须为48字节输出的前缀 */
+    if (tls_prf_sha256(secret, 48, "master secret", seed, 64, out32, 32) != 0)
+        return -4;
+    if (memcmp(out1, out32, 32) != 0)
+        return -7;
+
+    memset(out1, 0, sizeof(out1));
+    memset(out2, 0, sizeof(out2));
+    memset(out3, 0, sizeof(out3));
+    memset(out32, 0, sizeof(out32));
+    return 0;
 }

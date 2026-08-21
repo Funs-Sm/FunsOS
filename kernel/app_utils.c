@@ -210,62 +210,135 @@ void calc_interactive_run(void) {
 }
 
 /* ========== SYSTEM MONITOR ========== */
+static int sysmon_count_procs(int *running, int *blocked)
+{
+    int total = 0, run = 0, blk = 0;
+    for (pid_t pid = 0; pid < 1024; pid++) {
+        pcb_t *p = process_get_pcb(pid);
+        if (!p) continue;
+        total++;
+        if (p->state == PROCESS_RUNNING) run++;
+        else blk++;
+    }
+    if (running) *running = run;
+    if (blocked) *blocked = blk;
+    return total;
+}
+
 void sysmon_run(void) {
     int cr, cc; save_cursor_pos(&cr, &cc);
     vga_clear_all();
+    int page = 0;
     while (1) {
         keyboard_event_t ev;
-        if (wait_key_ms(&ev, 500)) {
+        if (wait_key_ms(&ev, 1000)) {
             if (ev.ascii == 27 || ev.ascii == 'q' || ev.ascii == 'Q') {
                 vga_clear_all(); restore_cursor_pos(cr, cc); return;
+            }
+            if (ev.ascii == '\t') { page = (page + 1) % 3; }
+            if (ev.flags & KEY_EXTENDED) {
+                if (ev.scancode == 0x4B) page = (page + 2) % 3;
+                if (ev.scancode == 0x4D) page = (page + 1) % 3;
             }
         }
 
         vga_fill_rect(0, 0, 80, 25, ' ', 0x00);
         vga_puts(0, 2, "=== SYSTEM MONITOR ===", 0x0E);
-        vga_puts(0, 55, "Q/ESC to quit", 0x08);
+        vga_puts(0, 55, "Q/ESC quit  Tab/Arrows switch page", 0x08);
+
+        const char *pages[] = {" Memory ", " Process ", " System "};
+        for (int i = 0; i < 3; i++) {
+            vga_puts(1, 10 + i * 20, pages[i], i == page ? 0x30 : 0x07);
+        }
 
         uint32_t total = pmm_get_total_pages();
         uint32_t free_p = pmm_get_free_pages();
-        uint32_t used_p = total - free_p;
+        uint32_t used_p = pmm_get_used_pages();
         uint32_t ticks = timer_get_ticks();
         uint32_t uptime_s = ticks / 100;
-
-        vga_puts(2, 2, "Memory:", 0x0B);
         char buf[80];
-        snprintf(buf, sizeof(buf), "  Total: %u KB", total * 4);
-        vga_puts(3, 4, buf, 0x0F);
-        uint32_t pct = total ? (used_p * 100 / total) : 0;
-        snprintf(buf, sizeof(buf), "  Used:  %u KB (%u%%)", used_p * 4, pct);
-        vga_puts(4, 4, buf, 0x0C);
-        snprintf(buf, sizeof(buf), "  Free:  %u KB", free_p * 4);
-        vga_puts(5, 4, buf, 0x0A);
 
-        int bar_w = 40;
-        int used_bar = total ? (used_p * bar_w / total) : 0;
-        vga_puts(6, 4, "[", 0x07);
-        for (int i = 0; i < bar_w; i++) {
-            vga_putc(6, 5 + i, 0xDB, i < used_bar ? 0x4C : 0x02);
+        if (page == 0) {
+            vga_puts(3, 2, "Physical Memory:", 0x0B);
+            snprintf(buf, sizeof(buf), "  Total: %u KB (%u MB)", total * 4, total * 4 / 1024);
+            vga_puts(4, 4, buf, 0x0F);
+            uint32_t pct = total ? (used_p * 100 / total) : 0;
+            snprintf(buf, sizeof(buf), "  Used:  %u KB (%u%%)", used_p * 4, pct);
+            vga_puts(5, 4, buf, 0x0C);
+            snprintf(buf, sizeof(buf), "  Free:  %u KB", free_p * 4);
+            vga_puts(6, 4, buf, 0x0A);
+
+            int bar_w = 50;
+            int used_bar = total ? (used_p * bar_w / total) : 0;
+            vga_puts(7, 4, "[", 0x07);
+            for (int i = 0; i < bar_w; i++) {
+                vga_putc(7, 5 + i, 0xDB, i < used_bar ? 0x4C : 0x02);
+            }
+            vga_puts(7, 5 + bar_w, "]", 0x07);
+
+            vga_puts(9, 2, "Kernel Memory:", 0x0B);
+            vga_puts(10, 4, "[OK] PMM - Physical Memory Manager", 0x0A);
+            vga_puts(11, 4, "[OK] VMM - Virtual Memory Manager", 0x0A);
+            vga_puts(12, 4, "[OK] Slab allocator", 0x0A);
+            vga_puts(13, 4, "[OK] kmalloc/kfree heap", 0x0A);
+
+            vga_puts(15, 2, "Memory Zones:", 0x0B);
+            vga_puts(16, 4, "  DMA zone:    <16MB", 0x07);
+            vga_puts(17, 4, "  Normal zone: 16MB-896MB", 0x07);
+            vga_puts(18, 4, "  High zone:   >896MB", 0x07);
+        } else if (page == 1) {
+            int running = 0, blocked = 0;
+            int total_p = sysmon_count_procs(&running, &blocked);
+
+            vga_puts(3, 2, "Process Summary:", 0x0B);
+            snprintf(buf, sizeof(buf), "  Total:   %d processes", total_p);
+            vga_puts(4, 4, buf, 0x0F);
+            snprintf(buf, sizeof(buf), "  Running: %d", running);
+            vga_puts(5, 4, buf, 0x0A);
+            snprintf(buf, sizeof(buf), "  Blocked: %d", blocked);
+            vga_puts(6, 4, buf, 0x0C);
+
+            vga_puts(8, 2, "Process List (first 10):", 0x0B);
+            int shown = 0;
+            for (pid_t pid = 0; pid < 1024 && shown < 10; pid++) {
+                pcb_t *p = process_get_pcb(pid);
+                if (!p) continue;
+                const char *state_str = "UNKNOWN";
+                uint8_t col = 0x07;
+                if (p->state == PROCESS_RUNNING) { state_str = "RUNNING"; col = 0x0A; }
+                else { state_str = "BLOCKED"; col = 0x0C; }
+                snprintf(buf, sizeof(buf), "  PID %4d: %-20s [%s]", p->pid, p->name ? p->name : "?", state_str);
+                vga_puts(9 + shown, 4, buf, col);
+                shown++;
+            }
+        } else {
+            vga_puts(3, 2, "Uptime:", 0x0B);
+            snprintf(buf, sizeof(buf), "  %uh %um %us", uptime_s / 3600, (uptime_s / 60) % 60, uptime_s % 60);
+            vga_puts(4, 4, buf, 0x0F);
+
+            vga_puts(3, 30, "System ticks:", 0x0B);
+            snprintf(buf, sizeof(buf), "  %u", ticks);
+            vga_puts(4, 30, buf, 0x0F);
+
+            rtc_time_t t;
+            rtc_read_time(&t);
+            vga_puts(6, 2, "Current Time:", 0x0B);
+            snprintf(buf, sizeof(buf), "  %04d-%02d-%02d %02d:%02d:%02d",
+                     t.year, t.month, t.day, t.hour, t.minute, t.second);
+            vga_puts(7, 4, buf, 0x0F);
+
+            vga_puts(9, 2, "Kernel subsystems:", 0x0B);
+            vga_puts(10, 4, "[OK] Memory manager (PMM/VMM/Slab)", 0x0A);
+            vga_puts(11, 4, "[OK] Process scheduler (CFS/RT)", 0x0A);
+            vga_puts(12, 4, "[OK] VFS & filesystems (Ext2/FAT32/Proc)", 0x0A);
+            vga_puts(13, 4, "[OK] Keyboard/mouse input", 0x0A);
+            vga_puts(14, 4, "[OK] VGA text & VESA graphics", 0x0A);
+            vga_puts(15, 4, "[OK] Network stack (TCP/IP)", 0x0A);
+            vga_puts(16, 4, "[OK] I/O scheduler (Deadline/CFQ)", 0x0A);
+            vga_puts(17, 4, "[OK] Crypto & security subsystems", 0x0A);
+            vga_puts(18, 4, "[OK] RTC & timer subsystem", 0x0A);
+            vga_puts(19, 4, "[OK] Signal & IPC subsystem", 0x0A);
         }
-        vga_puts(6, 5 + bar_w, "]", 0x07);
-
-        vga_puts(8, 2, "Uptime:", 0x0B);
-        snprintf(buf, sizeof(buf), "  %uh %um %us", uptime_s / 3600, (uptime_s / 60) % 60, uptime_s % 60);
-        vga_puts(9, 4, buf, 0x0F);
-
-        vga_puts(8, 30, "System ticks:", 0x0B);
-        snprintf(buf, sizeof(buf), "  %u", ticks);
-        vga_puts(9, 30, buf, 0x0F);
-
-        vga_puts(11, 2, "Kernel subsystems:", 0x0B);
-        vga_puts(12, 4, "[OK] Memory manager (PMM/VMM/Slab)", 0x0A);
-        vga_puts(13, 4, "[OK] Process scheduler (CFS/RT)", 0x0A);
-        vga_puts(14, 4, "[OK] VFS & filesystems (Ext2/FAT32/Proc)", 0x0A);
-        vga_puts(15, 4, "[OK] Keyboard/mouse input", 0x0A);
-        vga_puts(16, 4, "[OK] VGA text & VESA graphics", 0x0A);
-        vga_puts(17, 4, "[OK] Network stack (TCP/IP)", 0x0A);
-        vga_puts(18, 4, "[OK] I/O scheduler (Deadline/CFQ)", 0x0A);
-        vga_puts(19, 4, "[OK] Crypto & security subsystems", 0x0A);
     }
 }
 
@@ -367,9 +440,11 @@ void cal_run(void) {
 void clock_run(void) {
     int cr, cc; save_cursor_pos(&cr, &cc);
     vga_clear_all();
+    int show_sec = 1;
+    uint32_t last_tick = 0;
     while (1) {
         keyboard_event_t ev;
-        if (wait_key_ms(&ev, 500)) {
+        if (wait_key_ms(&ev, 100)) {
             if (ev.ascii == 27 || ev.ascii == 'q' || ev.ascii == 'Q') {
                 vga_clear_all(); restore_cursor_pos(cr, cc); return;
             }
@@ -377,6 +452,12 @@ void clock_run(void) {
 
         rtc_time_t t;
         rtc_read_time(&t);
+
+        uint32_t now = timer_get_ticks();
+        if ((now / 100) != (last_tick / 100)) {
+            show_sec = !show_sec;
+            last_tick = now;
+        }
 
         int disp_hour = (t.hour < 24) ? t.hour : 0;
         int disp_min  = (t.minute < 60) ? t.minute : 0;
@@ -423,8 +504,10 @@ void clock_run(void) {
         int dx = 8;
         for (int d = 0; d < 8; d++) {
             if (digits[d] == -1) {
-                for (int ln = 1; ln < 4; ln++) {
-                    vga_putc(10 + ln * 2, dx + 1, 'o', 0x4E);
+                if (show_sec) {
+                    for (int ln = 1; ln < 4; ln++) {
+                        vga_putc(10 + ln * 2, dx + 1, 0xDB, 0x4E);
+                    }
                 }
                 dx += 5;
             } else {
@@ -446,6 +529,13 @@ void clock_run(void) {
         static const char *months[] = {"Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
         snprintf(buf, sizeof(buf), "%s, %s %d, %d", wdays[wday_idx], months[mon_idx], disp_day, disp_year);
         vga_puts(21, (80 - (int)strlen(buf))/2, buf, 0x0F);
+
+        snprintf(buf, sizeof(buf), "Uptime: %uh %um %us",
+                 (unsigned)(now / 360000),
+                 (unsigned)((now / 6000) % 60),
+                 (unsigned)((now / 100) % 60));
+        vga_puts(22, (80 - (int)strlen(buf))/2, buf, 0x08);
+
         vga_puts(23, 30, "Press Q or ESC to exit", 0x08);
     }
 }

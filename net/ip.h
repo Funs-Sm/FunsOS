@@ -52,6 +52,13 @@ void ip_init(void);
 int ip_send(net_interface_t *iface, ipv4_addr_t dst, uint8_t proto, const void *payload, uint32_t len);
 int ip_send_with_ttl(net_interface_t *iface, ipv4_addr_t dst, uint8_t proto, const void *payload, uint32_t len, uint8_t ttl, uint8_t tos);
 void ip_receive(net_buffer_t *buf);
+
+/* ip_forward — route a received packet whose destination is not this host.
+ * Called from the network stack's forwarding path so that NF_INET_FORWARD
+ * and NF_INET_POST_ROUTING hooks can run before the packet is re-sent.
+ * Returns 0 on success, negative on error / drop. */
+int ip_forward(net_buffer_t *buf);
+
 uint16_t ip_checksum(const void *data, uint32_t len);
 ip_route_t ip_route_lookup(ipv4_addr_t dst);
 int ip_fragment_send(net_interface_t *iface, ipv4_addr_t dst, uint8_t proto, const void *payload, uint32_t len, uint8_t ttl, uint8_t tos, uint16_t ident);

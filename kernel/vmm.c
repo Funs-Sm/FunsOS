@@ -9,6 +9,7 @@
 #include "swap.h"
 #include "sched.h"
 #include "klog.h"
+#include "mmap.h"
 
 typedef uint32_t page_table_entry_t;
 typedef uint32_t page_dir_entry_t;
@@ -264,6 +265,21 @@ void vmm_free_pages(void *addr, uint32_t count) {
 }
 
 int vmm_handle_page_fault(uint32_t error_code, uint32_t fault_addr) {
+    /* Check if this fault address is within an mmap'd file-backed region.
+     * mmap_handle_page_fault returns 0 if it handled the fault (page was
+     * mapped), or falls through if the address is not in any mmap region. */
+    if (!(error_code & VMM_PAGE_FAULT_PRESENT)) {
+        pcb_t *curr = sched_get_current();
+        if (curr) {
+            /* Check mmap regions first */
+            mmap_handle_page_fault(fault_addr, (uint32_t)curr->pid);
+            /* If mmap mapped it, the address is now valid */
+            if (vmm_get_physical(current_page_directory, fault_addr) != 0) {
+                return 0;
+            }
+        }
+    }
+
     if (error_code & VMM_PAGE_FAULT_PRESENT) {
         if ((error_code & VMM_PAGE_FAULT_WRITE) &&
             (vmm_get_physical(current_page_directory, fault_addr) & PTE_COW)) {

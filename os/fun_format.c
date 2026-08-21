@@ -676,8 +676,9 @@ static uint32_t g_unwind_info_count = 0;
 /*  哈希函数 (SHA-256 简化/校验)                                       */
 /* ================================================================ */
 
-static uint32_t fun_rotl32(uint32_t x, int n) {
-    return (x << n) | (x >> (32 - n));
+/* SHA-256压缩函数使用循环右移(ROTR), 符合FIPS 180-4定义 */
+static uint32_t fun_rotr32(uint32_t x, int n) {
+    return (x >> n) | (x << (32 - n));
 }
 
 static void fun_sha256_transform(uint32_t *state, const uint8_t *block) {
@@ -690,8 +691,8 @@ static void fun_sha256_transform(uint32_t *state, const uint8_t *block) {
                (uint32_t)block[i * 4 + 3];
     }
     for (i = 16; i < 64; i++) {
-        uint32_t s0 = fun_rotl32(w[i - 15], 7) ^ fun_rotl32(w[i - 15], 18) ^ (w[i - 15] >> 3);
-        uint32_t s1 = fun_rotl32(w[i - 2], 17) ^ fun_rotl32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+        uint32_t s0 = fun_rotr32(w[i - 15], 7) ^ fun_rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+        uint32_t s1 = fun_rotr32(w[i - 2], 17) ^ fun_rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
         w[i] = w[i - 16] + s0 + w[i - 7] + s1;
     }
     uint32_t a = state[0], b = state[1], c = state[2], d = state[3];
@@ -710,10 +711,10 @@ static void fun_sha256_transform(uint32_t *state, const uint8_t *block) {
         0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
     };
     for (i = 0; i < 64; i++) {
-        uint32_t s1 = fun_rotl32(e, 6) ^ fun_rotl32(e, 11) ^ fun_rotl32(e, 25);
+        uint32_t s1 = fun_rotr32(e, 6) ^ fun_rotr32(e, 11) ^ fun_rotr32(e, 25);
         uint32_t ch = (e & f) ^ ((~e) & g);
         uint32_t t1 = h + s1 + ch + k[i] + w[i];
-        uint32_t s0 = fun_rotl32(a, 2) ^ fun_rotl32(a, 13) ^ fun_rotl32(a, 22);
+        uint32_t s0 = fun_rotr32(a, 2) ^ fun_rotr32(a, 13) ^ fun_rotr32(a, 22);
         uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
         uint32_t t2 = s0 + maj;
         h = g; g = f; f = e; e = d + t1;

@@ -55,6 +55,7 @@ struct pcb_t {
     page_directory_t *page_dir;
     uint32_t kernel_stack;
     uint32_t kernel_esp;     /* saved ESP for context switch */
+    uint32_t kstack_pages;   /* kernel stack size in pages (for reclaim) */
     uint32_t user_stack;
     uint32_t entry_point;
     int32_t exit_status;

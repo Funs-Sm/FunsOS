@@ -22,6 +22,7 @@ typedef struct mmap_region {
     uint32_t inode_num;
     uint64_t file_offset;
     uint32_t pid;
+    char *path;               /* 文件路径（非匿名映射时有效） */
     struct mmap_region *next;
 } mmap_region_t;
 
@@ -32,5 +33,6 @@ int mprotect(void *addr, uint32_t length, uint32_t prot);
 int msync(void *addr, uint32_t length, uint32_t flags);
 void mmap_handle_page_fault(uint32_t vaddr, uint32_t pid);
 void mmap_release_all(uint32_t pid);
+void sys_mmap_set_fd_offset(uint32_t fd, uint32_t offset);
 
 #endif

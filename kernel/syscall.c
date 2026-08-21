@@ -100,7 +100,8 @@ enum {
     SYS_WINDOW_EX   = 221,
     SYS_FOCUS_WINDOW=222,
     SYS_RAISE_WINDOW=223,
-    SYS_GET_WIN_RECT=224
+    SYS_GET_WIN_RECT=224,
+    SYS_FLOCK      = 225
 };
 
 extern volatile int need_resched;

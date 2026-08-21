@@ -11,18 +11,18 @@
 
 /* SDK 版本 */
 #define FUNSOS_SDK_VERSION_MAJOR  1
-#define FUNSOS_SDK_VERSION_MINOR  3
+#define FUNSOS_SDK_VERSION_MINOR  5
 #define FUNSOS_SDK_VERSION_PATCH  1
-#define FUNSOS_SDK_VERSION "1.3.1"
+#define FUNSOS_SDK_VERSION "1.5.1"
 
 /* 版本检查 - 用于编译期检查 SDK 版本兼容性 */
 #define FUNSOS_VERSION_CODE(major, minor, patch) (((major) << 16) | ((minor) << 8) | (patch))
-#define FUNSOS_SDK_VERSION_CODE  FUNSOS_VERSION_CODE(1, 3, 1)
+#define FUNSOS_SDK_VERSION_CODE  FUNSOS_VERSION_CODE(1, 5, 1)
 
 /* 操作系统信息（与内核 version.h 保持一致） */
 #define FUNSOS_OS_NAME    "FUNSOS"
 #define FUNSOS_KERNEL_NAME "FunsCore"
-#define FUNSOS_KERNEL_VERSION "0.8"
+#define FUNSOS_KERNEL_VERSION "0.8.3"
 
 /* ---- 功能特性宏 ----
  * 用于在编译时检测当 SDK/内核支持的功能
@@ -42,7 +42,7 @@
 
 /* 扩展功能（需要对应内核模块支持） */
 #define FUNSOS_HAS_KVM        1   /* KVM 虚拟化支持 */
-#define FUNSOS_HAS_DB         1   /* 内嵌数据库支持?*/
+#define FUNSOS_HAS_DB         1   /* 内嵌数据库支持 */
 #define FUNSOS_HAS_FUSE       1   /* FUSE 用户态文件系统 */
 #define FUNSOS_HAS_3D_RENDER  1   /* 3D 硬件加速渲染 */
 #define funsos_render         1   /* 渲染器后端支持 */
@@ -59,6 +59,26 @@
 #define FUNSOS_HAS_SCHED      1   /* 调度器控制 */
 #define FUNSOS_HAS_REGISTRY   1   /* 系统注册表（基于 FunDB） */
 #define FUNSOS_HAS_APPS       1   /* 内置应用查询 */
+#define FUNSOS_HAS_SECURITY   1   /* 安全/权限/ACL 管理 */
+#define FUNSOS_HAS_DRIVER     1   /* 驱动信息查询 */
+#define FUNSOS_HAS_CRYPTO     1   /* 加密/哈希/Base64 */
+#define FUNSOS_HAS_LOGGER     1   /* 日志系统 */
+#define FUNSOS_HAS_FS_ADV     1   /* 高级文件系统操作 */
+#define FUNSOS_HAS_THREAD     1   /* 线程管理 */
+#define FUNSOS_HAS_SIGNAL     1   /* 信号处理增强 */
+#define FUNSOS_HAS_PIPE       1   /* 管道和FIFO */
+#define FUNSOS_HAS_MMAP       1   /* 内存映射增强 */
+#define FUNSOS_HAS_SELECT     1   /* I/O多路复用 */
+#define FUNSOS_HAS_STAT       1   /* 文件状态和统计 */
+#define FUNSOS_HAS_DIR        1   /* 目录操作增强 */
+#define FUNSOS_HAS_ERRNO      1   /* 错误码增强 */
+#define FUNSOS_HAS_UUID       1   /* UUID生成 */
+#define FUNSOS_HAS_JSON       1   /* 轻量级JSON解析 */
+#define FUNSOS_HAS_COMPRESS   1   /* 压缩/解压 */
+#define FUNSOS_HAS_REGEX      1   /* 正则表达式 */
+#define FUNSOS_HAS_CHECKSUM   1   /* 校验和 */
+#define FUNSOS_HAS_SERIAL     1   /* 串口通信 */
+#define FUNSOS_HAS_PLUGIN     1   /* 插件加载 */
 
 /* ---- 错误码枚 ?----
  * 所 ?FUNSOS API 函数的统一错误码定义 ?
@@ -162,6 +182,21 @@ int funs_app_cleanup(void);
 #include "funsos_ipc.h"
 #include "funsos_libc.h"
 #include "funsos_package.h"
+#include "funsos_security.h"
+#include "funsos_driver.h"
+#include "funsos_crypto.h"
+#include "funsos_logger.h"
+
+/* v1.5.0 新增模块 */
+#include "funsos_errno.h"
+#include "funsos_uuid.h"
+#include "funsos_json.h"
+#include "funsos_compress.h"
+#include "funsos_regex.h"
+#include "funsos_checksum.h"
+#include "funsos_serial.h"
+#include "funsos_plugin.h"
+#include "funsos_flock.h"
 
 int funs_get_system_info(funsos_sysinfo_t *info);
 

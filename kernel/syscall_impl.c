@@ -12,6 +12,7 @@
 #include "pipe.h"
 #include "signal.h"
 #include "version.h"
+#include "mmap.h"
 #include "../fs/vfs.h"
 #include "../fs/tarfs.h"
 #include "../fs/file_desc.h"
@@ -24,6 +25,7 @@
 #include "sys_api.h"
 #include "display_server.h"
 #include "../audio/hdaudio.h"
+#include "epoll.h"
 
 /* Syscall numbers - must match syscall.c */
 #define SYS_EXIT       1
@@ -74,6 +76,7 @@
 #define SYS_ALARM        46
 #define SYS_PAUSE        47
 #define SYS_SIGRETURN    48
+#define SYS_FLOCK        225
 
 /* SDK Extended Syscall Numbers - Window Management */
 #define SYS_CREATE_WINDOW  100
@@ -139,6 +142,11 @@
 #define SYS_FOCUS_WINDOW    222
 #define SYS_RAISE_WINDOW    223
 #define SYS_GET_WIN_RECT    224
+
+/* SDK Extended Syscall Numbers - I/O Multiplexing (epoll) */
+#define SYS_EPOLL_CREATE    340
+#define SYS_EPOLL_CTL       341
+#define SYS_EPOLL_WAIT      342
 
 extern void vga_print(const char *str);
 
@@ -300,6 +308,17 @@ int32_t sys_close(uint32_t fd, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint
     return ret;
 }
 
+/*
+ * 文件锁系统调用 (BSD flock)
+ * 参数: fd - 文件描述符, operation - 操作 (LOCK_SH | LOCK_EX | LOCK_UN) [+ LOCK_NB]
+ */
+int32_t sys_flock(uint32_t fd, uint32_t operation, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
+    (void)arg3; (void)arg4; (void)arg5;
+
+    extern int32_t flock_syscall(int32_t fd, int32_t operation);
+    return flock_syscall((int32_t)fd, (int32_t)operation);
+}
+
 int32_t sys_waitpid(uint32_t pid, uint32_t status, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
     (void)arg3; (void)arg4; (void)arg5;
     process_wait((int *)(uintptr_t)status);
@@ -454,32 +473,22 @@ int32_t sys_kill(uint32_t pid, uint32_t sig, uint32_t arg3, uint32_t arg4, uint3
     return 0;
 }
 
-int32_t sys_mmap(uint32_t addr, uint32_t length, uint32_t prot, uint32_t flags, uint32_t arg5) {
-    (void)flags; (void)arg5;
-    uint32_t page_addr = addr & 0xFFFFF000;
-    uint32_t num_pages = (length + 4095) / 4096;
-    uint32_t map_flags = 0x001;
-    if (prot & 0x02) map_flags |= 0x002;
-    if (prot & 0x04) map_flags |= 0x004;
+int32_t sys_mmap(uint32_t addr, uint32_t length, uint32_t prot, uint32_t flags_and_fd, uint32_t offset) {
+    /* Encode: flags_and_fd = (flags & 0xFFFF) | (fd << 16)
+     * Decode: fd = (flags_and_fd >> 16), flags = (flags_and_fd & 0xFFFF) */
+    uint32_t fd = (flags_and_fd >> 16);
+    uint32_t flags = (flags_and_fd & 0xFFFF);
 
-    page_directory_t *dir = vmm_get_current_dir();
-    for (uint32_t i = 0; i < num_pages; i++) {
-        void *phys = pmm_alloc_page();
-        if (!phys) return -1;
-        vmm_map_page(dir, page_addr + i * 4096, (uint32_t)(uintptr_t)phys, map_flags);
-    }
-    return (int32_t)page_addr;
+    /* Delegate to the proper mmap() implementation in kernel/mmap.c.
+     * It handles address selection, region bookkeeping, and lazy page faults. */
+    void *ret = mmap((void *)(uintptr_t)addr, length, prot, flags, fd, offset);
+    if (ret == MAP_FAILED) return -1;
+    return (int32_t)(uintptr_t)ret;
 }
 
 int32_t sys_munmap(uint32_t addr, uint32_t length, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
     (void)arg3; (void)arg4; (void)arg5;
-    uint32_t page_addr = addr & 0xFFFFF000;
-    uint32_t num_pages = (length + 4095) / 4096;
-    page_directory_t *dir = vmm_get_current_dir();
-    for (uint32_t i = 0; i < num_pages; i++) {
-        vmm_unmap_page(dir, page_addr + i * 4096);
-    }
-    return 0;
+    return munmap((void *)(uintptr_t)addr, length);
 }
 
 int32_t sys_ioctl(uint32_t fd, uint32_t cmd, uint32_t arg, uint32_t arg4, uint32_t arg5) {
@@ -754,6 +763,68 @@ int32_t sys_sendfile_call(uint32_t out_fd, uint32_t in_fd,
 }
 
 /* ===============================================
+ * epoll 系统调用实现
+ * userland uses funsos_epoll_event_t (with union data);
+ * kernel uses epoll_event (with uint64_t data). We translate.
+ * =============================================== */
+
+typedef struct {
+    uint32_t events;
+    uint32_t fd_lo;       /* low 32 bits of data (fd is common) */
+    uint32_t fd_hi;       /* high 32 bits (zero for typical 32-bit pointers) */
+} funsos_epoll_event_user_t;
+
+static int32_t translate_user_event_in(funsos_epoll_event_user_t *user_ev,
+                                       struct epoll_event *kev) {
+    kev->events = user_ev->events;
+    kev->data = ((uint64_t)user_ev->fd_hi << 32) | (uint64_t)user_ev->fd_lo;
+    return 0;
+}
+
+static int32_t translate_kern_event_out(struct epoll_event *kev,
+                                        funsos_epoll_event_user_t *user_ev) {
+    user_ev->events = kev->events;
+    user_ev->fd_lo = (uint32_t)(kev->data & 0xFFFFFFFFu);
+    user_ev->fd_hi = (uint32_t)((kev->data >> 32) & 0xFFFFFFFFu);
+    return 0;
+}
+
+int32_t sys_epoll_create_call(uint32_t size, uint32_t arg2, uint32_t arg3,
+                              uint32_t arg4, uint32_t arg5) {
+    (void)arg2; (void)arg3; (void)arg4; (void)arg5;
+    return (int32_t)sys_epoll_create((int)size);
+}
+
+int32_t sys_epoll_ctl_call(uint32_t epfd, uint32_t op, uint32_t fd,
+                           uint32_t event_ptr, uint32_t arg5) {
+    (void)arg5;
+    if (!event_ptr) return -22;  /* EINVAL */
+    struct epoll_event kev;
+    funsos_epoll_event_user_t uev;
+    /* Copy from user address space; syscall handler runs in kernel,
+     * userspace pointers are still valid mappings we set up via mmap. */
+    memcpy(&uev, (const void *)(uintptr_t)event_ptr, sizeof(uev));
+    translate_user_event_in(&uev, &kev);
+    return (int32_t)sys_epoll_ctl((int)epfd, (int)op, (int)fd, &kev);
+}
+
+int32_t sys_epoll_wait_call(uint32_t epfd, uint32_t events_ptr,
+                            uint32_t maxevents, uint32_t timeout,
+                            uint32_t arg5) {
+    (void)arg5;
+    if (!events_ptr || maxevents == 0 || maxevents > EPOLL_MAX_EVENTS) return -22;
+    struct epoll_event kevs[EPOLL_MAX_EVENTS];
+    int32_t n = sys_epoll_wait((int)epfd, kevs, (int)maxevents, (int)timeout);
+    if (n > 0) {
+        funsos_epoll_event_user_t *dst = (funsos_epoll_event_user_t *)(uintptr_t)events_ptr;
+        for (int32_t i = 0; i < n; i++) {
+            translate_kern_event_out(&kevs[i], &dst[i]);
+        }
+    }
+    return n;
+}
+
+/* ===============================================
  * SDK Extended Syscall Implementations
  * =============================================== */
 
@@ -887,7 +958,7 @@ int32_t sys_cancel_timer_call(uint32_t timer_id, uint32_t arg2, uint32_t arg3, u
 /* Audio Syscalls */
 int32_t sys_audio_init_call(uint32_t arg1, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
     (void)arg1; (void)arg2; (void)arg3; (void)arg4; (void)arg5;
-    hdaudio_init();
+    (void)hdaudio_init(0, 0, 0);
     return 0;
 }
 
@@ -960,7 +1031,7 @@ int32_t sys_audio_play_wav_call(uint32_t path, uint32_t arg2, uint32_t arg3, uin
         return -1;
     }
 
-    int32_t ret = hdaudio_play(audio_buf, (uint32_t)read_bytes, sample_rate, channels);
+    int32_t ret = hdaudio_play((const int16_t *)audio_buf, (uint32_t)read_bytes / 2U, sample_rate, (uint8_t)channels);
     kfree(audio_buf);
     return ret;
 }
@@ -1150,7 +1221,8 @@ void init_syscall_impl(void) {
     syscall_register(SYS_ALARM,        sys_alarm);
     syscall_register(SYS_PAUSE,        sys_pause);
     syscall_register(SYS_SIGRETURN,    sys_sigreturn);
-    
+    syscall_register(SYS_FLOCK,       sys_flock);
+
     /* Register SDK extended syscalls - Window Management */
     syscall_register(SYS_CREATE_WINDOW,  sys_create_window_call);
     syscall_register(SYS_DESTROY_WINDOW, sys_destroy_window_call);
@@ -1215,4 +1287,9 @@ void init_syscall_impl(void) {
     syscall_register(SYS_FOCUS_WINDOW,   sys_focus_window_call);
     syscall_register(SYS_RAISE_WINDOW,   sys_raise_window_call);
     syscall_register(SYS_GET_WIN_RECT,   sys_get_win_rect_call);
+
+    /* Register SDK extended syscalls - epoll */
+    syscall_register(SYS_EPOLL_CREATE,   sys_epoll_create_call);
+    syscall_register(SYS_EPOLL_CTL,      sys_epoll_ctl_call);
+    syscall_register(SYS_EPOLL_WAIT,     sys_epoll_wait_call);
 }

@@ -1,3 +1,16 @@
+/*
+ * snake.c — DEPRECATED 旧版 GUI 贪吃蛇
+ *
+ * v0.8 状态:本文件**未被任何 Makefile 目标或 #include 引用**(文件名不是 `*_app.c` 后缀)。
+ *         实际运行的是 `kernel/shell.c` 中的命令 `snake`,后者调用
+ *         `snake_game_run()`(`kernel/games.c`)— 那是文本模式版本。
+ *
+ * 替代实现:`kernel/games.c::snake_game_run()`(文本模式,带 4 个方向 + 分数)。
+ *
+ * 重构建议:保留(0 字节二进制开销),下次大重构时删除。
+ *           如果未来要做图形版贪吃蛇,应该放在 `os/apps/snake.c` 而非这里。
+ */
+
 #include "user_syscall.h"
 #include "string.h"
 #include "gui_common.h"

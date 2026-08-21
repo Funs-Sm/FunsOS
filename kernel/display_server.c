@@ -1,3 +1,24 @@
+/*
+ * display_server.c — 内嵌显示服务器(显示输出的中央协调层)
+ *
+ * 在 v0.8 架构中的角色:
+ *   - 拥有 framebuffer(`drivers/vesa.c` 提供的线性像素区)
+ *   - 管理 `DS_MAX_WINDOWS = 32` 个窗口槽位,Z 序,foucs,事件队列
+ *   - 提供 `display_server_init()` / `display_server_run()` 给 `kernel/main.c` 调用
+ *   - 是 gui/window.c、gui/wm.c、gui/compositor.c 的"上层薄壳":
+ *     - 它把 gui/wm.c 的窗口事件打包成 `ds_event_t` 推入队列
+ *     - 它把 gui/compositor.c 的合成结果刷到 framebuffer
+ *
+ * 与 gui/window_server.c 的区别:
+ *   - `gui/window_server.c` 是设计上的纯用户态服务(尚未真正独立运行)
+ *   - 本文件是实际跑在内核地址空间里的实现,直接持有 framebuffer
+ *
+ * 重构注意:
+ *   - Phase D 应该把 framebuffer 拥有权转移到 `gui/window_server.c`,
+ *     本文件降级为 IPC 中转层。
+ *   - 事件队列固定大小 256,Phase B 之后应该改为动态。
+ */
+
 #include "display_server.h"
 #include "kheap.h"
 #include "string.h"
@@ -6,6 +27,7 @@
 #include "mouse.h"
 #include "font.h"
 #include "gfx.h"
+#include "../gui/compositor.h"  /* PR-5: 委托给 gui/compositor */
 
 #define DS_MAX_WINDOWS     32
 #define DS_MAX_EVENTS      256
@@ -63,6 +85,9 @@ void display_server_init(uint32_t *fb, uint32_t width, uint32_t height, uint32_t
 
     memset(ds_windows, 0, sizeof(ds_windows));
     memset(ds_event_queue, 0, sizeof(ds_event_queue));
+
+    /* PR-5: 初始化 gui/compositor (与 display_server 共存, 后续 Phase D 将转移 fb 所有权) */
+    compositor_init(fb, width, height);
 }
 
 static void ds_enqueue_event(ds_event_t *ev) {
@@ -477,6 +502,12 @@ void ds_render(void) {
 
     /* Draw mouse cursor */
     ds_draw_cursor();
+
+    /* PR-5: 委托给 gui/compositor (与 display_server 共存) */
+    /* compositor_render 写入 back_buffer，swap_buffers 复制 dirty tiles 到 front buffer。
+     * 当前 display_server 直接写 framebuffer，所以这里 swap 实际无效，但建立链路。 */
+    compositor_render();
+    /* compositor_swap_buffers 在 front==back 时为 no-op 安全 */
 }
 
 void ds_process_events(void) {

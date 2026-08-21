@@ -329,4 +329,36 @@ void tcp_cc_on_rto(tcp_socket_t *sock);
 void tcp_cc_on_dup_ack(tcp_socket_t *sock);
 const tcp_cc_stats_t *tcp_cc_get_stats(void);
 
+/* ---- TCP 状态监控 API ---- */
+typedef struct {
+    uint32_t state_counts[11];  /* 按 TCP_STATE_* 索引的计数 */
+    uint32_t total_sockets;
+    uint32_t listening_sockets;
+    uint32_t established_sockets;
+    uint32_t timewait_sockets;
+    uint32_t close_wait_sockets;
+} tcp_state_monitor_t;
+
+typedef struct {
+    uint32_t min_rtt;
+    uint32_t max_rtt;
+    uint32_t avg_rtt;
+    uint32_t srtt_samples;
+    uint32_t retransmit_rate;  /* 千分比 */
+    uint32_t total_retransmits;
+    uint32_t total_segments_sent;
+    uint32_t total_segments_recv;
+    uint32_t total_bytes_sent;
+    uint32_t total_bytes_recv;
+} tcp_health_stats_t;
+
+void tcp_state_monitor_get(tcp_state_monitor_t *out);
+void tcp_health_stats_get(tcp_health_stats_t *out);
+int  tcp_get_socket_info(uint32_t index, tcp_socket_t *out_info);
+uint32_t tcp_get_socket_count(void);
+const char *tcp_state_to_name(uint32_t state);
+uint32_t tcp_get_retransmit_rate(void);
+int  tcp_socket_dump(char *buf, uint32_t buf_size);
+void tcp_monitor_reset(void);
+
 #endif

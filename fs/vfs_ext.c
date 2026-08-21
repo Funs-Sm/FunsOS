@@ -4,6 +4,8 @@
 #include "string.h"
 #include "stdio.h"
 #include "klog.h"
+#include "spinlock.h"
+#include "timer.h"
 
 /* ================================================================ */
 /*  全局状态                                                        */
@@ -17,6 +19,11 @@ static uint32_t g_next_inode = 1;
 static vfs_ext_fd_t g_fd_table[VFS_EXT_MAX_FDS];
 static int g_fd_initialized = 0;
 static char g_cwd_buf[VFS_EXT_MAX_PATH] = "/";
+
+/* AIO state */
+static vfs_ext_aio_request_t g_aio_requests[VFS_EXT_AIO_MAX_REQUESTS];
+static uint32_t g_aio_next_id = 1;
+static int g_aio_initialized = 0;
 
 /* ================================================================ */
 /*  内部辅助函数                                                    */
@@ -2047,16 +2054,21 @@ int vfs_ext_mmap_protect(void *addr, uint32_t size, uint32_t prot)
 /*  8) Async I/O (aio)                                               */
 /* ================================================================ */
 
-static vfs_ext_aio_request_t g_aio_requests[VFS_EXT_AIO_MAX_REQUESTS];
-static uint32_t g_aio_next_id = 1;
-static int g_aio_initialized = 0;
+/* AIO requests are queued and processed asynchronously by the scheduler tick.
+ * vfs_ext_aio_process_one() is called from sched_tick() in kernel/sched.c,
+ * which processes one pending request per tick, allowing other tasks to run
+ * between I/O operations. */
+
+/* Round-robin pointer for fair processing */
+static uint32_t g_aio_rr_index = 0;
 
 int vfs_ext_aio_init(void)
 {
     memset(g_aio_requests, 0, sizeof(g_aio_requests));
     g_aio_next_id = 1;
     g_aio_initialized = 1;
-    klog_info("vfs_ext: aio system initialized");
+    g_aio_rr_index = 0;
+    klog_info("vfs_ext: aio system initialized (async mode)");
     return 0;
 }
 
@@ -2073,6 +2085,50 @@ static int aio_alloc_request(void)
         }
     }
     return -1;
+}
+
+/* Execute a single pending AIO request. Called from scheduler tick.
+ * Returns 1 if a request was processed, 0 if none were pending. */
+int vfs_ext_aio_process_one(void) {
+    if (!g_aio_initialized) return 0;
+
+    /* Round-robin search for a pending request, starting from the last index.
+     * This ensures fair processing across all requests and avoids starving
+     * earlier requests when many are submitted. */
+    for (uint32_t scan = 0; scan < VFS_EXT_AIO_MAX_REQUESTS; scan++) {
+        uint32_t idx = (g_aio_rr_index + scan) % VFS_EXT_AIO_MAX_REQUESTS;
+        if (!g_aio_requests[idx].active) continue;
+        if (g_aio_requests[idx].state != VFS_EXT_AIO_STATE_PENDING) continue;
+
+        vfs_ext_aio_request_t *req = &g_aio_requests[idx];
+
+        /* Mark as RUNNING so aio_wait / aio_poll see it is in progress */
+        req->state = VFS_EXT_AIO_STATE_RUNNING;
+
+        /* Perform the actual I/O through the buffer cache */
+        if (req->type == VFS_EXT_AIO_READ) {
+            req->result = vfs_ext_cache_read(req->inode, req->offset,
+                                              req->buffer, req->size);
+        } else if (req->type == VFS_EXT_AIO_WRITE) {
+            req->result = vfs_ext_cache_write(req->inode, req->offset,
+                                               req->buffer, req->size);
+        } else {
+            req->result = -1;
+        }
+
+        req->state = (req->result >= 0) ? VFS_EXT_AIO_STATE_DONE
+                                        : VFS_EXT_AIO_STATE_ERROR;
+
+        /* Invoke the completion callback if provided */
+        if (req->callback) {
+            req->callback(req->result, req->user_data);
+        }
+
+        g_aio_rr_index = (idx + 1) % VFS_EXT_AIO_MAX_REQUESTS;
+        return 1;
+    }
+
+    return 0;
 }
 
 int vfs_ext_aio_read(uint32_t inode, void *buf, uint32_t offset, uint32_t size, vfs_ext_aio_callback_t cb, void *user_data, uint32_t *req_id)
@@ -2125,91 +2181,88 @@ int vfs_ext_aio_write(uint32_t inode, const void *buf, uint32_t offset, uint32_t
 
 int vfs_ext_aio_wait(uint32_t req_id)
 {
-    uint32_t i;
     if (!g_aio_initialized) return -1;
 
-    for (i = 0; i < VFS_EXT_AIO_MAX_REQUESTS; i++) {
-        if (g_aio_requests[i].active && g_aio_requests[i].request_id == req_id) {
-            if (g_aio_requests[i].type == VFS_EXT_AIO_READ) {
-                g_aio_requests[i].result = vfs_ext_cache_read(g_aio_requests[i].inode, g_aio_requests[i].offset, g_aio_requests[i].buffer, g_aio_requests[i].size);
-            } else if (g_aio_requests[i].type == VFS_EXT_AIO_WRITE) {
-                g_aio_requests[i].result = vfs_ext_cache_write(g_aio_requests[i].inode, g_aio_requests[i].offset, g_aio_requests[i].buffer, g_aio_requests[i].size);
-            }
-            g_aio_requests[i].state = (g_aio_requests[i].result >= 0) ? VFS_EXT_AIO_STATE_DONE : VFS_EXT_AIO_STATE_ERROR;
-            g_aio_requests[i].completed = 0;
+    for (uint32_t i = 0; i < VFS_EXT_AIO_MAX_REQUESTS; i++) {
+        if (!g_aio_requests[i].active) continue;
+        if (g_aio_requests[i].request_id != req_id) continue;
 
-            if (g_aio_requests[i].callback) {
-                g_aio_requests[i].callback(g_aio_requests[i].result, g_aio_requests[i].user_data);
+        vfs_ext_aio_request_t *req = &g_aio_requests[i];
+
+        /* If the request is still PENDING (not yet processed by sched tick),
+         * process it inline now.  This makes aio_wait() a proper synchronous
+         * fallback for callers that need the result immediately. */
+        if (req->state == VFS_EXT_AIO_STATE_PENDING) {
+            req->state = VFS_EXT_AIO_STATE_RUNNING;
+            if (req->type == VFS_EXT_AIO_READ) {
+                req->result = vfs_ext_cache_read(req->inode, req->offset,
+                                                  req->buffer, req->size);
+            } else if (req->type == VFS_EXT_AIO_WRITE) {
+                req->result = vfs_ext_cache_write(req->inode, req->offset,
+                                                   req->buffer, req->size);
+            } else {
+                req->result = -1;
             }
-            return g_aio_requests[i].result;
+            req->state = (req->result >= 0) ? VFS_EXT_AIO_STATE_DONE
+                                            : VFS_EXT_AIO_STATE_ERROR;
         }
+
+        if (req->callback) {
+            req->callback(req->result, req->user_data);
+        }
+
+        return req->result;
     }
     return -1;
 }
 
 int vfs_ext_aio_poll(uint32_t req_id, int *done, int *result)
 {
-    uint32_t i;
     if (!g_aio_initialized || !done || !result) return -1;
 
-    for (i = 0; i < VFS_EXT_AIO_MAX_REQUESTS; i++) {
-        if (g_aio_requests[i].active && g_aio_requests[i].request_id == req_id) {
-            if (g_aio_requests[i].state == VFS_EXT_AIO_STATE_DONE || g_aio_requests[i].state == VFS_EXT_AIO_STATE_ERROR) {
-                *done = 1;
-                *result = g_aio_requests[i].result;
-            } else {
-                *done = 0;
-                *result = 0;
-            }
-            return 0;
+    for (uint32_t i = 0; i < VFS_EXT_AIO_MAX_REQUESTS; i++) {
+        if (!g_aio_requests[i].active) continue;
+        if (g_aio_requests[i].request_id != req_id) continue;
+
+        vfs_ext_aio_request_t *req = &g_aio_requests[i];
+        if (req->state == VFS_EXT_AIO_STATE_DONE ||
+            req->state == VFS_EXT_AIO_STATE_ERROR) {
+            *done = 1;
+            *result = req->result;
+        } else {
+            *done = 0;
+            *result = 0;
         }
+        return 0;
     }
     return -1;
 }
 
 int vfs_ext_aio_cancel(uint32_t req_id)
 {
-    uint32_t i;
     if (!g_aio_initialized) return -1;
 
-    for (i = 0; i < VFS_EXT_AIO_MAX_REQUESTS; i++) {
-        if (g_aio_requests[i].active && g_aio_requests[i].request_id == req_id) {
-            if (g_aio_requests[i].state == VFS_EXT_AIO_STATE_PENDING || g_aio_requests[i].state == VFS_EXT_AIO_STATE_RUNNING) {
-                g_aio_requests[i].active = 0;
-                return 0;
-            }
-            return -1;
+    for (uint32_t i = 0; i < VFS_EXT_AIO_MAX_REQUESTS; i++) {
+        if (!g_aio_requests[i].active) continue;
+        if (g_aio_requests[i].request_id != req_id) continue;
+
+        if (g_aio_requests[i].state == VFS_EXT_AIO_STATE_PENDING ||
+            g_aio_requests[i].state == VFS_EXT_AIO_STATE_RUNNING) {
+            g_aio_requests[i].active = 0;
+            return 0;
         }
+        return -1;
     }
     return -1;
 }
 
+/* Process all pending AIO requests.  This can be called from a periodic
+ * timer interrupt or from the idle task.  It processes one request per
+ * call to keep I/O non-blocking. */
 int vfs_ext_aio_process_all(void)
 {
-    uint32_t i;
-    int processed = 0;
-    if (!g_aio_initialized) return 0;
-
-    for (i = 0; i < VFS_EXT_AIO_MAX_REQUESTS; i++) {
-        if (g_aio_requests[i].active && g_aio_requests[i].state == VFS_EXT_AIO_STATE_PENDING) {
-            g_aio_requests[i].state = VFS_EXT_AIO_STATE_RUNNING;
-
-            if (g_aio_requests[i].type == VFS_EXT_AIO_READ) {
-                g_aio_requests[i].result = vfs_ext_cache_read(g_aio_requests[i].inode, g_aio_requests[i].offset, g_aio_requests[i].buffer, g_aio_requests[i].size);
-            } else if (g_aio_requests[i].type == VFS_EXT_AIO_WRITE) {
-                g_aio_requests[i].result = vfs_ext_cache_write(g_aio_requests[i].inode, g_aio_requests[i].offset, g_aio_requests[i].buffer, g_aio_requests[i].size);
-            }
-
-            g_aio_requests[i].state = (g_aio_requests[i].result >= 0) ? VFS_EXT_AIO_STATE_DONE : VFS_EXT_AIO_STATE_ERROR;
-            g_aio_requests[i].completed = 0;
-
-            if (g_aio_requests[i].callback) {
-                g_aio_requests[i].callback(g_aio_requests[i].result, g_aio_requests[i].user_data);
-            }
-            processed++;
-        }
-    }
-    return processed;
+    /* Process one pending request per call (round-robin) */
+    return vfs_ext_aio_process_one();
 }
 
 int vfs_ext_aio_cleanup(void)
@@ -2219,7 +2272,9 @@ int vfs_ext_aio_cleanup(void)
     if (!g_aio_initialized) return 0;
 
     for (i = 0; i < VFS_EXT_AIO_MAX_REQUESTS; i++) {
-        if (g_aio_requests[i].active && (g_aio_requests[i].state == VFS_EXT_AIO_STATE_DONE || g_aio_requests[i].state == VFS_EXT_AIO_STATE_ERROR)) {
+        if (g_aio_requests[i].active &&
+            (g_aio_requests[i].state == VFS_EXT_AIO_STATE_DONE ||
+             g_aio_requests[i].state == VFS_EXT_AIO_STATE_ERROR)) {
             g_aio_requests[i].active = 0;
             cleaned++;
         }

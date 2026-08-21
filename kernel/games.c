@@ -30,13 +30,6 @@ static void vga_fill(int row, int col, int w, int h, char c, uint8_t color) {
 static void save_cursor(int *r, int *c) { vga_text_get_cursor(r, c); }
 static void restore_cursor(int r, int c) { vga_text_set_cursor(r, c); vga_text_set_color(15, 0); }
 
-static void delay_ticks(uint32_t t) {
-    uint32_t start = timer_get_ticks();
-    while ((timer_get_ticks() - start) < t) {
-        asm volatile("pause");
-    }
-}
-
 /* Short busy-wait for responsive keyboard polling - much shorter than 1 tick
  * (10ms) so games feel responsive. ~50000 iterations ≈ <1ms on typical CPU. */
 static void delay_short(void) {
@@ -57,12 +50,19 @@ static int wait_key(keyboard_event_t *ev, int timeout_ticks) {
 }
 
 /* Drain any pending keyboard events to prevent stale input from previous
- * commands interfering with game input. Called at game start. */
+ * commands interfering with game input. Called at game start.
+ * 多轮 poll 以确保 0xE0 前缀和后续扫描码都被消费, 避免遗留状态干扰游戏输入。 */
 static void drain_keyboard(void) {
     keyboard_event_t ev;
-    while (1) {
-        keyboard_poll();
-        if (!keyboard_get_event(&ev)) break;
+    for (int round = 0; round < 4; round++) {
+        for (volatile int i = 0; i < 2000; i++) { asm volatile("pause"); }
+        int got = 0;
+        while (1) {
+            keyboard_poll();
+            if (!keyboard_get_event(&ev)) break;
+            got = 1;
+        }
+        if (!got && round > 0) break;
     }
 }
 
@@ -90,9 +90,14 @@ static int snake_is_at(int x, int y) {
 }
 
 static void snake_place_food(void) {
+    static uint32_t snake_rand_seed = 0;
+    snake_rand_seed = snake_rand_seed * 1103515245 + 12345;
+    uint32_t r = snake_rand_seed ^ timer_get_ticks();
     for (int a = 0; a < 1000; a++) {
-        snake_food.x = (timer_get_ticks() * 7 + a * 13) % (SNAKE_W - 2) + 1;
-        snake_food.y = (timer_get_ticks() * 11 + a * 17) % (SNAKE_H - 2) + 1;
+        r = r * 1664525 + 1013904223;
+        snake_food.x = (r >> 8) % (SNAKE_W - 2) + 1;
+        r = r * 1664525 + 1013904223;
+        snake_food.y = (r >> 8) % (SNAKE_H - 2) + 1;
         if (!snake_is_at(snake_food.x, snake_food.y)) return;
     }
     snake_food.x = 1; snake_food.y = 1;
@@ -121,8 +126,8 @@ static void snake_draw(void) {
     }
     for (int i = 0; i < snake_len; i++)
         vga_putc(SNAKE_Y + snake_arr[i].y, SNAKE_X + snake_arr[i].x,
-                 i == 0 ? '@' : 'O', i == 0 ? 0x02 : 0x0A);
-    vga_putc(SNAKE_Y + snake_food.y, SNAKE_X + snake_food.x, '*', 0x0C);
+                 i == 0 ? 'O' : 'o', i == 0 ? 0x2E : 0x2A);
+    vga_putc(SNAKE_Y + snake_food.y, SNAKE_X + snake_food.x, '*', 0x4F);
     char buf[40];
     snprintf(buf, sizeof(buf), " Score: %d ", snake_score);
     vga_puts(SNAKE_Y - 1, SNAKE_X, buf, 0x0E);
@@ -197,8 +202,11 @@ static void g2048_add_tile(void) {
         for (int x = 0; x < G2048_SIZE; x++)
             if (g2048_board[y][x] == 0) empty[cnt++] = y * G2048_SIZE + x;
     if (cnt == 0) return;
-    int pos = empty[(timer_get_ticks() % cnt)];
-    g2048_board[pos / G2048_SIZE][pos % G2048_SIZE] = (timer_get_ticks() % 10 == 0) ? 4 : 2;
+    static uint32_t tile_rand_seed = 0;
+    tile_rand_seed = tile_rand_seed * 1103515245 + 12345;
+    uint32_t r = tile_rand_seed ^ timer_get_ticks();
+    int pos = empty[(r >> 8) % cnt];
+    g2048_board[pos / G2048_SIZE][pos % G2048_SIZE] = ((r >> 16) % 10 == 0) ? 4 : 2;
 }
 
 static void g2048_init(void) {
@@ -290,18 +298,40 @@ void game_2048_run(void) {
     vga_clear(); g2048_init(); g2048_draw();
     while (1) {
         keyboard_event_t ev;
-        if (wait_key(&ev, 10)) {
+        keyboard_poll();
+        while (keyboard_get_event(&ev)) {
+            if (!(ev.flags & KEY_PRESSED)) continue;
             if (ev.ascii == 27) { vga_clear(); restore_cursor(cr, cc); return; }
             if (ev.ascii == 'r' || ev.ascii == 'R') { g2048_init(); g2048_draw(); continue; }
+            if (g2048_over && !g2048_won) continue;
             int moved = 0;
             if (ev.flags & KEY_EXTENDED) {
                 switch (ev.scancode) {
                     case 0x4B: moved = g2048_move_left(); break;
-                    case 0x4D: g2048_rotate(1); g2048_rotate(1); moved = g2048_move_left(); g2048_rotate(1); g2048_rotate(1); break;
+                    /* Right move: rotate the board 90° counter-clockwise,
+                     * apply a left move on the rotated board, then rotate
+                     * back clockwise.  Previously this called
+                     * g2048_rotate(1) twice on each side which cancels
+                     * out and just performs two left moves. */
+                    case 0x4D: g2048_rotate(1); moved = g2048_move_left(); g2048_rotate(0); break;
                     case 0x48: g2048_rotate(0); moved = g2048_move_left(); g2048_rotate(1); break;
                     case 0x50: g2048_rotate(1); moved = g2048_move_left(); g2048_rotate(0); break;
                 }
-                if (moved) { g2048_add_tile(); if (!g2048_can_move()) g2048_over = 1; g2048_draw(); }
+            } else {
+                /* WASD keys: a=Left, d=Right, w=Up, s=Down */
+                switch (ev.ascii) {
+                    case 'a': case 'A': moved = g2048_move_left(); break;
+                    case 'd': case 'D': g2048_rotate(1); moved = g2048_move_left(); g2048_rotate(0); break;
+                    case 'w': case 'W': g2048_rotate(0); moved = g2048_move_left(); g2048_rotate(1); break;
+                    case 's': case 'S': g2048_rotate(1); moved = g2048_move_left(); g2048_rotate(0); break;
+                }
+            }
+            if (moved) {
+                g2048_add_tile();
+                if (!g2048_can_move()) g2048_over = 1;
+                g2048_draw();
+            } else {
+                delay_short();
             }
         }
     }
@@ -326,11 +356,19 @@ static const uint8_t tet_colors[7] = { 0x0B, 0x0E, 0x0D, 0x0C, 0x09, 0x0A, 0x06 
 
 static int tet_board[TET_H][TET_W];
 static int tet_cur[4][4], tet_cx, tet_cy, tet_cshape;
+static int tet_next_shape;
 static int tet_score, tet_lines, tet_level, tet_tetover, tet_paused;
 static uint32_t tet_lastdrop;
+static uint32_t tet_rand_seed;
+
+static int tet_rand(void) {
+    tet_rand_seed = tet_rand_seed * 1103515245 + 12345;
+    return (int)((tet_rand_seed >> 16) & 0x7FFFFFFF);
+}
 
 static void tet_new_piece(void) {
-    tet_cshape = timer_get_ticks() % 7;
+    tet_cshape = tet_next_shape;
+    tet_next_shape = tet_rand() % 7;
     memcpy(tet_cur, tet_shapes[tet_cshape], sizeof(tet_cur));
     tet_cx = TET_W / 2 - 2; tet_cy = 0;
     for (int y = 0; y < 4; y++)
@@ -340,11 +378,17 @@ static void tet_new_piece(void) {
 }
 
 static void tet_rotate_piece(void) {
+    /* 90° clockwise rotation around the center of the 4x4 grid.
+     * The transformation (x, y) -> (3-y, x) keeps the O-piece in place
+     * (its bounding box is centred) and rotates the I-piece from
+     * horizontal to vertical.  The previous formula
+     *   tet_cur[x][3 - y] = tmp[y][x]
+     * accidentally translated the O-piece to the top-right corner. */
     int tmp[4][4];
     memcpy(tmp, tet_cur, sizeof(tmp));
     for (int y = 0; y < 4; y++)
         for (int x = 0; x < 4; x++)
-            tet_cur[x][3 - y] = tmp[y][x];
+            tet_cur[y][x] = tmp[3 - x][y];
 }
 
 static int tet_collides(int nx, int ny, int piece[4][4]) {
@@ -387,6 +431,8 @@ static void tet_lock(void) {
 static void tet_init(void) {
     memset(tet_board, 0, sizeof(tet_board));
     tet_score = 0; tet_lines = 0; tet_level = 1; tet_tetover = 0; tet_paused = 0;
+    tet_rand_seed = timer_get_ticks() * 2654435761U;
+    tet_next_shape = tet_rand() % 7;
     tet_lastdrop = timer_get_ticks();
     tet_new_piece();
 }
@@ -403,6 +449,17 @@ static void tet_draw(void) {
     vga_puts(TET_Y + 9, 5, "Space:Drop", 0x07);
     vga_puts(TET_Y + 10, 5, "P:Pause R:Restart", 0x07);
     vga_puts(TET_Y + 11, 5, "ESC:Quit", 0x07);
+
+    vga_puts(TET_Y + 13, 5, "Next:", 0x0B);
+    int ns = tet_next_shape;
+    for (int y = 0; y < 4; y++)
+        for (int x = 0; x < 4; x++)
+            if (tet_shapes[ns][y][x]) {
+                char c = 0xDB; uint8_t col = tet_colors[ns];
+                vga_putc(TET_Y + 14 + y, 5 + x * 2, c, col);
+                vga_putc(TET_Y + 14 + y, 5 + x * 2 + 1, c, col);
+            }
+
     for (int y = 0; y < TET_H; y++) {
         vga_putc(TET_Y + y, TET_X - 1, '|', 0x08);
         vga_putc(TET_Y + y, TET_X + TET_W * 2, '|', 0x08);
@@ -442,11 +499,13 @@ void tetris_run(void) {
                 switch (ev.scancode) {
                     case 0x4B: if (!tet_collides(tet_cx - 1, tet_cy, tet_cur)) tet_cx--; break;
                     case 0x4D: if (!tet_collides(tet_cx + 1, tet_cy, tet_cur)) tet_cx++; break;
-                    case 0x50: if (!tet_collides(tet_cx, tet_cy + 1, tet_cur)) tet_cy++; else tet_lock(); break;
+                    case 0x50: if (!tet_collides(tet_cx, tet_cy + 1, tet_cur)) tet_cy++; break;
                     case 0x48: {
                         int tmp[4][4]; memcpy(tmp, tet_cur, sizeof(tmp));
                         tet_rotate_piece();
-                        if (tet_collides(tet_cx, tet_cy, tet_cur)) memcpy(tet_cur, tmp, sizeof(tet_cur));
+                        if (tet_collides(tet_cx, tet_cy, tet_cur) && !tet_collides(tet_cx - 1, tet_cy, tet_cur)) tet_cx--;
+                        else if (tet_collides(tet_cx, tet_cy, tet_cur) && !tet_collides(tet_cx + 1, tet_cy, tet_cur)) tet_cx++;
+                        else if (tet_collides(tet_cx, tet_cy, tet_cur)) memcpy(tet_cur, tmp, sizeof(tet_cur));
                         break;
                     }
                 }
@@ -456,6 +515,7 @@ void tetris_run(void) {
                 while (!tet_collides(tet_cx, tet_cy + 1, tet_cur)) tet_cy++;
                 tet_lock();
                 tet_draw();
+                continue;
             }
         }
         if (!tet_tetover && !tet_paused) {
@@ -565,13 +625,12 @@ void minesweeper_run(void) {
             if (ev.ascii == 'r' || ev.ascii == 'R') { ms_init(); cx = MS_W/2; cy = MS_H/2; ms_draw(cx, cy); continue; }
             if (ms_over || ms_win) continue;
             int moved = 0;
-            if (ev.flags & KEY_EXTENDED) {
-                switch (ev.scancode) {
-                    case 0x48: if (cy > 0) { cy--; moved = 1; } break;
-                    case 0x50: if (cy < MS_H - 1) { cy++; moved = 1; } break;
-                    case 0x4B: if (cx > 0) { cx--; moved = 1; } break;
-                    case 0x4D: if (cx < MS_W - 1) { cx++; moved = 1; } break;
-                }
+            int sc = ev.scancode & 0xFF;
+            switch (sc) {
+                case 0x48: if (cy > 0) { cy--; moved = 1; } break;
+                case 0x50: if (cy < MS_H - 1) { cy++; moved = 1; } break;
+                case 0x4B: if (cx > 0) { cx--; moved = 1; } break;
+                case 0x4D: if (cx < MS_W - 1) { cx++; moved = 1; } break;
             }
             if (ev.ascii == 'f' || ev.ascii == 'F') {
                 if (!ms_revealed[cy][cx]) ms_flagged[cy][cx] = !ms_flagged[cy][cx];
@@ -619,12 +678,12 @@ static void pong_update(void) {
     if (pong_pause || pong_over) return;
     pong_bx += pong_bdx; pong_by += pong_bdy;
     if (pong_by <= 1 || pong_by >= PONG_H - 2) { pong_bdy = -pong_bdy; pong_by += pong_bdy; }
-    if (pong_bx == 2 && pong_by >= pong_py1 - 1 && pong_by <= pong_py1 + 2) {
-        pong_bdx = 1; pong_bdy = ((pong_by - pong_py1) - 1);
+    if (pong_bx <= 1 && pong_by >= pong_py1 && pong_by <= pong_py1 + 3) {
+        pong_bdx = 1; pong_bdy = pong_by - pong_py1 - 1;
         if (pong_bdy == 0) pong_bdy = (timer_get_ticks() % 2) ? 1 : -1;
     }
-    if (pong_bx == PONG_W - 3 && pong_by >= pong_py2 - 1 && pong_by <= pong_py2 + 2) {
-        pong_bdx = -1; pong_bdy = ((pong_by - pong_py2) - 1);
+    if (pong_bx >= PONG_W - 2 && pong_by >= pong_py2 && pong_by <= pong_py2 + 3) {
+        pong_bdx = -1; pong_bdy = pong_by - pong_py2 - 1;
         if (pong_bdy == 0) pong_bdy = (timer_get_ticks() % 2) ? 1 : -1;
     }
     if (pong_bx <= 0) { pong_s2++; pong_reset_ball(); if (pong_s2 >= 10) pong_over = 1; }

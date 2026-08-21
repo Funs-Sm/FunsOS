@@ -144,6 +144,125 @@ const tcp_socket_t *tcp_get_listeners(uint32_t *count) {
     return all_sockets;
 }
 
+void tcp_state_monitor_get(tcp_state_monitor_t *out) {
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    for (tcp_socket_t *s = all_sockets; s; s = s->next_all) {
+        out->total_sockets++;
+        if (s->state < 11) {
+            out->state_counts[s->state]++;
+        }
+        switch (s->state) {
+            case TCP_STATE_LISTEN:
+                out->listening_sockets++;
+                break;
+            case TCP_STATE_ESTABLISHED:
+                out->established_sockets++;
+                break;
+            case TCP_STATE_TIME_WAIT:
+                out->timewait_sockets++;
+                break;
+            case TCP_STATE_CLOSE_WAIT:
+                out->close_wait_sockets++;
+                break;
+            default:
+                break;
+        }
+    }
+}
+
+void tcp_health_stats_get(tcp_health_stats_t *out) {
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    const tcp_stats_t *ts = tcp_get_stats();
+    out->total_retransmits = ts->retransmits;
+    out->total_segments_sent = ts->segs_sent;
+    out->total_segments_recv = ts->segs_rcvd;
+    out->total_bytes_sent = ts->bytes_sent;
+    out->total_bytes_recv = ts->bytes_rcvd;
+    if (ts->segs_sent > 0) {
+        out->retransmit_rate = (ts->retransmits * 1000) / ts->segs_sent;
+    }
+    uint32_t min_rtt = 0xFFFFFFFF;
+    uint32_t max_rtt = 0;
+    uint64_t total_rtt = 0;
+    uint32_t count = 0;
+    for (tcp_socket_t *s = all_sockets; s; s = s->next_all) {
+        if (s->srtt > 0 && s->state == TCP_STATE_ESTABLISHED) {
+            uint32_t rtt = s->srtt / 8;
+            if (rtt < min_rtt) min_rtt = rtt;
+            if (rtt > max_rtt) max_rtt = rtt;
+            total_rtt += rtt;
+            count++;
+        }
+    }
+    if (count > 0) {
+        out->min_rtt = min_rtt;
+        out->max_rtt = max_rtt;
+        out->avg_rtt = (uint32_t)(total_rtt / count);
+        out->srtt_samples = count;
+    }
+}
+
+uint32_t tcp_get_socket_count(void) {
+    uint32_t count = 0;
+    for (tcp_socket_t *s = all_sockets; s; s = s->next_all) count++;
+    return count;
+}
+
+const char *tcp_state_to_name(uint32_t state) {
+    return tcp_state_name(state);
+}
+
+uint32_t tcp_get_retransmit_rate(void) {
+    const tcp_stats_t *ts = tcp_get_stats();
+    if (ts->segs_sent == 0) return 0;
+    return (ts->retransmits * 1000) / ts->segs_sent;
+}
+
+int tcp_get_socket_info(uint32_t index, tcp_socket_t *out_info) {
+    if (!out_info) return -1;
+    uint32_t i = 0;
+    for (tcp_socket_t *s = all_sockets; s; s = s->next_all, i++) {
+        if (i == index) {
+            memcpy(out_info, s, sizeof(tcp_socket_t));
+            return 0;
+        }
+    }
+    return -1;
+}
+
+int tcp_socket_dump(char *buf, uint32_t buf_size) {
+    if (!buf || buf_size == 0) return -1;
+    uint32_t offset = 0;
+    offset += snprintf(buf + offset, buf_size - offset,
+        "Local Address     Foreign Address   State\n");
+    for (tcp_socket_t *s = all_sockets; s; s = s->next_all) {
+        char local_ip[16], remote_ip[16];
+        uint32_t lip = s->local_ip.addr;
+        uint32_t rip = s->remote_ip.addr;
+        snprintf(local_ip, sizeof(local_ip), "%d.%d.%d.%d",
+            (lip >> 24) & 0xFF, (lip >> 16) & 0xFF,
+            (lip >> 8) & 0xFF, lip & 0xFF);
+        snprintf(remote_ip, sizeof(remote_ip), "%d.%d.%d.%d",
+            (rip >> 24) & 0xFF, (rip >> 16) & 0xFF,
+            (rip >> 8) & 0xFF, rip & 0xFF);
+        offset += snprintf(buf + offset, buf_size - offset,
+            "%-15s:%-5d %-15s:%-5d %s\n",
+            local_ip, s->local_port,
+            remote_ip, s->remote_port,
+            tcp_state_name(s->state));
+        if (offset >= buf_size - 64) break;
+    }
+    return (int)offset;
+}
+
+void tcp_monitor_reset(void) {
+    /* 重置全局统计 */
+    extern tcp_stats_t stats;
+    memset(&stats, 0, sizeof(stats));
+}
+
 int tcp_set_mss(tcp_socket_t *sock, uint16_t mss) {
     if (!sock || mss < 64 || mss > MSS) return -1;
     sock->mss_local = mss;

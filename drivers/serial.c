@@ -11,6 +11,17 @@ static int serial_transmit_empty(uint16_t port) {
     return inb(port + 5) & 0x20;
 }
 
+/* Wait for transmit-empty with a short timeout (debug aid).  Returns
+ * 0 on success, 1 if LSR bit 5 never went high.  We use this only
+ * to detect broken emulated UARTs (e.g. QEMU without proper NS16550A
+ * setup) and fall back to writing anyway. */
+static int serial_transmit_empty_wait(uint16_t port) {
+    for (int i = 0; i < 256; i++) {
+        if (inb(port + 5) & 0x20) return 0;
+    }
+    return 1;
+}
+
 void serial_init(uint16_t port) {
     outb(port + 1, 0x00);
     outb(port + 3, 0x80);
@@ -27,17 +38,19 @@ char serial_read(uint16_t port) {
 }
 
 void serial_putchar(uint16_t port, char c) {
-    while (!serial_transmit_empty(port));
+    (void)serial_transmit_empty_wait(port);
     outb(port, (uint8_t)c);
 }
 
 void serial_print(uint16_t port, const char *str) {
-    while (*str) {
+    int i = 0;
+    while (str && *str && i < 4096) {
         if (*str == '\n') {
             serial_putchar(port, '\r');
         }
         serial_putchar(port, *str);
         str++;
+        i++;
     }
 }
 

@@ -507,7 +507,7 @@ dom_node_t *ui_parse_html(ui_document_t *doc, const char *html_text) {
 
             /* 保存内联样式到class域用于后续处理（简化处理）*/
             if (style_str[0]) {
-                /* 临时存到text里后面处理? 简化: 暂存到class_name后面追加? */
+                /* 临时存到text里后面处理; 简化: 暂存到class_name后面追加 */
                 /* 这里简化处理，内联样式在apply阶段直接从style_str解析 */
                 /* 为了简单，我们把内联样式存到 text 前面部分，用特殊标记 */
                 /* 但这样太复杂，先支持外部样式表，内联的放后面 */

@@ -57,6 +57,11 @@ void keyboard_handler(regs_t *regs) {
     (void)regs;
     uint8_t status = inb(0x64);
 
+    /* 若输出缓冲区为空, 说明数据已被 poll 路径取走, 直接返回避免读到无效数据 */
+    if (!(status & 0x01)) {
+        return;
+    }
+
     if (status & 0x20) {
         inb(0x60);
         return;
@@ -143,7 +148,7 @@ void keyboard_handler(regs_t *regs) {
 /* Poll keyboard hardware directly (for when IRQs don't work).
  * Reads port 0x64 for status, 0x60 for data, processes scancode
  * and puts event into buffer. Returns 1 if key processed. */
-int keyboard_poll(void) {
+static int keyboard_poll_locked(void) {
     uint8_t status = inb(0x64);
     if (!(status & 0x01)) {
         return 0;
@@ -213,6 +218,28 @@ int keyboard_poll(void) {
         return 1;
     }
     return 0;
+}
+
+/* Wrapper: run the poll body with IF=0 so the IRQ1 handler cannot
+ * interleave between the status check and the data read (which would
+ * consume the byte first, leaving poll to read a stale duplicate from
+ * port 0x60) or preempt the ring-buffer push mid-update.  The previous
+ * IF state is restored on exit. */
+int keyboard_poll(void) {
+    uint32_t eflags;
+    __asm__ volatile(
+        "pushfl\n"
+        "popl %0\n"
+        "cli"
+        : "=r"(eflags)
+        :
+        : "memory"
+    );
+    int ret = keyboard_poll_locked();
+    if (eflags & 0x200) {
+        __asm__ volatile("sti");
+    }
+    return ret;
 }
 
 void keyboard_wait(void) {

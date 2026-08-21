@@ -1,5 +1,21 @@
-/* texture.c - 纹理管理实现
+/*
+ * texture.c - 纹理管理实现
  * 提供格式转换、mipmap 生成、纹理图集和纹理缓存
+ *
+ * 文件尺寸警告:本文件 ~52 KB。已通过 texture_manager.c/h 提供 manager 模块,
+ * 本文件聚焦纹理本身的"格式 + mipmap + sampler"。
+ *
+ * 章节大纲(行号大致):
+ *   L1    - L200   : 头包含 + 格式/采样 helper
+ *   L206  - L700   : 纹理生命周期(destroy/retain/release + sampler/filter/wrap)
+ *   L702  - L1500  : 纹理 blit(blit / blit_scaled / blit_region / blit_rotated / blit_tinted)
+ *   L1525 - end    : Alpha 预乘/取消预乘
+ *
+ * 已知 TODO(留给后续拆分):
+ *   - 抽出"纹理格式定义"到 texture_format.c
+ *   - 抽出"mipmap 生成"到 texture_mipmap.c
+ *   - 抽出"sampler/filter/wrap"到 texture_sampler.c
+ *   - 本文件 + texture_manager.c + 新文件 = ~30 KB / 4 文件
  */
 
 #include "../include/fr_texture.h"

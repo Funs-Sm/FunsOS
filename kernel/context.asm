@@ -51,24 +51,29 @@
 ; =============================================================================
 ; void context_switch(uint32_t *old_esp, uint32_t new_esp)
 ;
-; Saves callee-saved registers, switches stacks, restores, returns.
+; Saves EFLAGS + callee-saved registers, switches stacks, restores, returns.
 ; For a new process the stack contains:
-;   [edi=0] [esi=0] [ebx=0] [ebp=0] [return-address -> trampoline]
+;   [edi=0] [esi=0] [ebx=0] [ebp=0] [eflags=0x202] [return-addr -> trampoline]
 ; For a preempted process the stack contains:
-;   [edi] [esi] [ebx] [ebp] [return-address -> schedule() after call]
+;   [edi] [esi] [ebx] [ebp] [eflags] [return-address -> schedule() after call]
+;
+; EFLAGS must travel with the thread: schedule() can be entered from the
+; timer interrupt (IF=0), and a thread resumed here would otherwise inherit
+; IF=0 and never see another timer tick (its first HLT would hang the CPU).
 ;
 ; Parameters:
 ;   [ESP+4]  = old_esp - pointer to where to save current ESP
 ;   [ESP+8]  = new_esp - stack pointer of the new task
 ; =============================================================================
 _context_switch:
+    PUSHFD                      ; save EFLAGS of the outgoing thread
     PUSH    EBP
     PUSH    EBX
     PUSH    ESI
     PUSH    EDI
 
-    MOV     EAX, [ESP + 20]     ; old_esp (4 pushes + ret addr + 2 args = 20)
-    MOV     ECX, [ESP + 24]     ; new_esp
+    MOV     EAX, [ESP + 24]     ; old_esp (5 pushes + ret addr = 24)
+    MOV     ECX, [ESP + 28]     ; new_esp
 
     MOV     [EAX], ESP          ; save old ESP
 
@@ -78,6 +83,7 @@ _context_switch:
     POP     ESI
     POP     EBX
     POP     EBP
+    POPFD                       ; restore EFLAGS of the incoming thread
 
     RET
 

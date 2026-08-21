@@ -1,3 +1,15 @@
+/*
+ * shell.c — DEPRECATED 旧版独立 shell
+ *
+ * v0.8 状态:本文件**未被任何 Makefile 目标或 #include 引用**;真正在跑的 shell
+ *         是 `kernel/shell.c`(825 KB,完整命令解析 + 内建命令 + 管道/重定向)。
+ *         `kernel/shell.c` 中的 `app_*_main()` 包装了所有 GUI 应用入口。
+ *
+ * 替代实现:`kernel/shell.c`(权威 shell)+ `os/apps/terminal.c`(窗口化壳)。
+ *
+ * 重构建议:保留(0 字节二进制开销),下次大重构时删除。
+ */
+
 #include "user_syscall.h"
 #include "string.h"
 

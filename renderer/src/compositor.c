@@ -626,9 +626,9 @@ static void rect_union(const rect_t *a, const rect_t *b, rect_t *out)
 static dirty_tracker_t dirty;
 
 /*
- * compositor_dirty_add - 添加脏矩形到追踪器
+ * fr_compositor_dirty_add - 添加脏矩形到追踪器
  */
-void compositor_dirty_add(const rect_t *r)
+void fr_compositor_dirty_add(const rect_t *r)
 {
     if (r == NULL) return;
 
@@ -684,12 +684,12 @@ void compositor_dirty_add(const rect_t *r)
 }
 
 /*
- * compositor_dirty_flush - 刷新脏区域到目标表面
+ * fr_compositor_dirty_flush - 刷新脏区域到目标表面
  *
  * 将当前累积的脏矩形标记为需要重绘的区域。
  * 实际的重绘由调用方在 composite() 中处理。
  */
-void compositor_dirty_flush(fr_surface_t *target)
+void fr_compositor_dirty_flush(fr_surface_t *target)
 {
     if (target == NULL) return;
     (void)target; /* 表面指针用于未来硬件加速路径 */
@@ -699,11 +699,11 @@ void compositor_dirty_flush(fr_surface_t *target)
 }
 
 /*
- * compositor_dirty_merge - 合并重叠的脏矩形
+ * fr_compositor_dirty_merge - 合并重叠的脏矩形
  *
  * 返回合并后的脏矩形数量。
  */
-int compositor_dirty_merge(void)
+int fr_compositor_dirty_merge(void)
 {
     if (dirty.count <= 1) return dirty.count;
 
@@ -743,11 +743,11 @@ static int current_blend_mode = FR_COMPOSITE_SRC_OVER;
 #define FR_COMPOSITE_LIGHTEN   8
 
 /*
- * compositor_set_blend_mode - 设置全局合成混合模式
+ * fr_compositor_set_blend_mode - 设置全局合成混合模式
  *
  * 返回之前的模式值。
  */
-int compositor_set_blend_mode(int mode)
+int fr_compositor_set_blend_mode(int mode)
 {
     int prev = current_blend_mode;
     if (mode >= FR_COMPOSITE_SRC_OVER && mode <= FR_COMPOSITE_LIGHTEN) {
@@ -757,14 +757,14 @@ int compositor_set_blend_mode(int mode)
 }
 
 /*
- * compositor_blit_layered - 带图层合成模式的位块传输
+ * fr_compositor_blit_layered - 带图层合成模式的位块传输
  *
  * 将源表面以指定混合模式绘制到目标表面的指定位置。
  * 支持 Alpha 通道的多种混合算法。
  *
  * 返回 0=成功, -1=失败。
  */
-int compositor_blit_layered(fr_surface_t *dst, fr_surface_t *src,
+int fr_compositor_blit_layered(fr_surface_t *dst, fr_surface_t *src,
                              int x, int y, int mode, uint8_t alpha)
 {
     if (dst == NULL || src == NULL) return -1;
@@ -893,12 +893,12 @@ int compositor_blit_layered(fr_surface_t *dst, fr_surface_t *src,
 /* ---- 双缓冲支持 ---- */
 
 /*
- * compositor_double_buffer_init - 初始化双缓冲区
+ * fr_compositor_double_buffer_init - 初始化双缓冲区
  *
  * 创建前后两个相同大小的表面用于双缓冲渲染。
  * 返回 0=成功, -1=内存不足。
  */
-int compositor_double_buffer_init(double_buffer_t *db, int w, int h)
+int fr_compositor_double_buffer_init(double_buffer_t *db, int w, int h)
 {
     if (db == NULL) return -1;
     if (w <= 0 || h <= 0) return -1;
@@ -951,12 +951,12 @@ int compositor_double_buffer_init(double_buffer_t *db, int w, int h)
 }
 
 /*
- * compositor_swap_buffers - 交换前后缓冲区
+ * fr_compositor_swap_buffers - 交换前后缓冲区
  *
  * 将后缓冲的内容复制到前缓冲，然后交换指针。
  * 返回 0=成功, -1=失败。
  */
-int compositor_swap_buffers(double_buffer_t *db)
+int fr_compositor_swap_buffers(double_buffer_t *db)
 {
     if (db == NULL || db->front == NULL || db->back == NULL) return -1;
 
@@ -969,11 +969,11 @@ int compositor_swap_buffers(double_buffer_t *db)
 }
 
 /*
- * compositor_get_backbuffer - 获取后缓冲表面指针
+ * fr_compositor_get_backbuffer - 获取后缓冲表面指针
  *
  * 返回后缓冲指针，用于渲染到后台。
  */
-fr_surface_t *compositor_get_backbuffer(double_buffer_t *db)
+fr_surface_t *fr_compositor_get_backbuffer(double_buffer_t *db)
 {
     if (db == NULL) return NULL;
     db->needs_swap = 1;
@@ -987,17 +987,17 @@ fr_surface_t *compositor_get_backbuffer(double_buffer_t *db)
 static comp_stats_t stats;
 
 /*
- * compositor_get_stats - 获取合成器性能统计
+ * fr_compositor_get_stats - 获取合成器性能统计
  */
-comp_stats_t compositor_get_stats(void)
+comp_stats_t fr_compositor_get_stats(void)
 {
     return stats;
 }
 
 /*
- * compositor_reset_stats - 重置性能统计计数器
+ * fr_compositor_reset_stats - 重置性能统计计数器
  */
-void compositor_reset_stats(void)
+void fr_compositor_reset_stats(void)
 {
     memset(&stats, 0, sizeof(comp_stats_t));
 }

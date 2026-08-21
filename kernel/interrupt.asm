@@ -21,7 +21,7 @@ isr_stub_%+%1:
 %MACRO IRQ_STUB 2
 isr_stub_%+%1:
     PUSH DWORD 0
-    PUSH DWORD %2
+    PUSH DWORD %1
     JMP irq_common_stub
 %ENDMACRO
 

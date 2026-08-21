@@ -471,6 +471,80 @@ int32_t vfs_read(file_t *file, void *buf, uint32_t count) {
     return ret;
 }
 
+int32_t vfs_pread(file_t *file, void *buf, uint32_t count, uint32_t offset) {
+    if (!file || !buf) return -EINVAL;
+    if (!file->ops || !file->ops->read) return -EBADF;
+    if (!(file->flags & FILE_MODE_READ)) return -EBADF;
+
+    uint32_t saved_offset = file->offset;
+    int32_t ret = -1;
+
+    /* Seek to the requested position */
+    if (file->ops && file->ops->seek) {
+        ret = file->ops->seek(file, (int32_t)offset, SEEK_SET);
+    } else {
+        file->offset = offset;
+        ret = 0;
+    }
+
+    if (ret < 0) return ret;
+
+    /* Read from that position */
+    ret = file->ops->read(file, buf, count);
+
+    /* Restore the original offset */
+    if (file->ops && file->ops->seek) {
+        file->ops->seek(file, (int32_t)saved_offset, SEEK_SET);
+    } else {
+        file->offset = saved_offset;
+    }
+
+    if (ret > 0) {
+        fs_stat_read((uint32_t)ret, 0);
+    } else if (ret < 0) {
+        fs_stat_read(0, 1);
+        fs_stat_error(-ret);
+    }
+    return ret;
+}
+
+int32_t vfs_pwrite(file_t *file, const void *buf, uint32_t count, uint32_t offset) {
+    if (!file || !buf) return -EINVAL;
+    if (!file->ops || !file->ops->write) return -EBADF;
+    if (!(file->flags & FILE_MODE_WRITE)) return -EBADF;
+
+    uint32_t saved_offset = file->offset;
+    int32_t ret = -1;
+
+    /* Seek to the requested position */
+    if (file->ops && file->ops->seek) {
+        ret = file->ops->seek(file, (int32_t)offset, SEEK_SET);
+    } else {
+        file->offset = offset;
+        ret = 0;
+    }
+
+    if (ret < 0) return ret;
+
+    /* Write at that position */
+    ret = file->ops->write(file, buf, count);
+
+    /* Restore the original offset */
+    if (file->ops && file->ops->seek) {
+        file->ops->seek(file, (int32_t)saved_offset, SEEK_SET);
+    } else {
+        file->offset = saved_offset;
+    }
+
+    if (ret > 0) {
+        fs_stat_write((uint32_t)ret, 0);
+    } else if (ret < 0) {
+        fs_stat_write(0, 1);
+        fs_stat_error(-ret);
+    }
+    return ret;
+}
+
 int32_t vfs_write(file_t *file, const void *buf, uint32_t count) {
     if (!file || !buf) return -EINVAL;
     if (!file->ops || !file->ops->write) return -EBADF;

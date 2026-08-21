@@ -396,6 +396,7 @@ int  vfs_ext_aio_wait(uint32_t req_id);
 int  vfs_ext_aio_poll(uint32_t req_id, int *done, int *result);
 int  vfs_ext_aio_cancel(uint32_t req_id);
 int  vfs_ext_aio_process_all(void);
+int  vfs_ext_aio_process_one(void);
 int  vfs_ext_aio_cleanup(void);
 
 /* ================================================================ */

@@ -23,4 +23,4 @@ $(addsuffix .elf,$(GUI_APPS)): %.elf: crt0.o %.o gfx_adapter.o
 	$(LD) $(LDFLAGS) -o $@ $^ -L../lib -los
 
 clean:
-	rm -f *.o *.elf
+	@python -c "import glob, os; [os.remove(f) for f in glob.glob('*.o') + glob.glob('*.elf')]"

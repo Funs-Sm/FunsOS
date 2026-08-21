@@ -26,38 +26,46 @@ pcb_t *thread_create(func_t func, void *arg, const char *name)
     proc->pid = 0;
     proc->type = PROCESS_KERNEL;
     proc->state = PROCESS_READY;
+    proc->sched_policy = PROCESS_NORMAL;
+    /* Kernel threads share the kernel address space: without a valid
+     * page_dir the scheduler would load CR3=0 on the first switch. */
+    proc->page_dir = vmm_get_current_dir();
 
-    uint32_t stack_phys = (uint32_t)pmm_alloc_page();
-    if (!stack_phys) {
+    /* 2-page kernel stack, mapped into the shared kernel page directory */
+    void *phys0 = pmm_alloc_page();
+    void *phys1 = pmm_alloc_page();
+    if (!phys0 || !phys1) {
+        if (phys0) pmm_free_page(phys0);
+        if (phys1) pmm_free_page(phys1);
         kfree(proc);
         return (void *)0;
     }
-    uint32_t stack_virt = stack_phys + VMM_KERNEL_BASE;
-    vmm_map_page(proc->page_dir, stack_virt, stack_phys, VMM_PAGE_PRESENT | VMM_PAGE_WRITABLE);
+    uint32_t stack_virt = (uint32_t)phys0 + VMM_KERNEL_BASE;
+    vmm_map_page(proc->page_dir, stack_virt, (uint32_t)phys0,
+                 VMM_PAGE_PRESENT | VMM_PAGE_WRITABLE);
+    vmm_map_page(proc->page_dir, stack_virt + PMM_PAGE_SIZE, (uint32_t)phys1,
+                 VMM_PAGE_PRESENT | VMM_PAGE_WRITABLE);
 
-    proc->kernel_stack = stack_virt + PMM_PAGE_SIZE;
+    proc->kernel_stack = stack_virt + 2 * PMM_PAGE_SIZE;
+    proc->kstack_pages = 2;
 
+    /* Stack layout expected by context_switch:
+     *   [edi=0] [esi=0] [ebx=0] [ebp=0] [eflags=0x202] [ret=thread_wrapper]
+     * thread_wrapper fetches func from entry_point and arg from
+     * context.eax, then calls thread_exit() when it returns.  The initial
+     * EFLAGS must have IF=1 so the new thread can receive timer ticks. */
     uint32_t *stack_top = (uint32_t *)proc->kernel_stack;
-
-    *(--stack_top) = 0x202;
-    *(--stack_top) = 0x08;
     *(--stack_top) = (uint32_t)thread_wrapper;
-    *(--stack_top) = 0;
-    *(--stack_top) = 0;
-    *(--stack_top) = 0;
-    *(--stack_top) = (uint32_t)arg;
-    *(--stack_top) = 0;
-    *(--stack_top) = proc->kernel_stack;
-    *(--stack_top) = 0;
-    *(--stack_top) = 0;
-    *(--stack_top) = 0;
+    *(--stack_top) = 0x202;  /* eflags: IF=1 (+ reserved bit 1) */
+    *(--stack_top) = 0;  /* ebp */
+    *(--stack_top) = 0;  /* ebx */
+    *(--stack_top) = 0;  /* esi */
+    *(--stack_top) = 0;  /* edi */
 
+    proc->kernel_esp = (uint32_t)stack_top;
+    proc->entry_point = (uint32_t)func;
     proc->context.eax = (uint32_t)arg;
     proc->context.eip = (uint32_t)thread_wrapper;
-    proc->context.cs = 0x08;
-    proc->context.eflags = 0x202;
-    proc->context.esp_kernel = (uint32_t)stack_top;
-    proc->entry_point = (uint32_t)func;
 
     if (name) {
         int i;

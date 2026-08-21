@@ -575,13 +575,28 @@ static void init_root_files(void) {
 }
 
 void kernel_main(void) {
-    /* Initialize serial port FIRST - before any klog output.
-     * Without this, serial_putchar() polls LSR bit 5 which may
-     * never be set on an uninitialised UART, causing klog to hang. */
+    /* DBG-0: raw serial port write before anything */
+    outb(0x3F8, '0');
+    outb(0x3F8, '\r');
+    outb(0x3F8, '\n');
+
+    /* DBG-1: serial init */
     serial_init(COM1);
-    serial_print(COM1, "[early] serial COM1 initialized\n");
+    outb(0x3F8, 'a');
+    outb(0x3F8, '\r');
+    outb(0x3F8, '\n');
+    outb(0x3F8, 'b');
+    outb(0x3F8, '\r');
+    outb(0x3F8, '\n');
+    outb(0x3F8, 'c');
+    serial_print(COM1, "[1] serial ok\n");
+    outb(0x3F8, 'd');
+    outb(0x3F8, '\r');
+    outb(0x3F8, '\n');
+    outb(0x3F8, 'e');
 
     init_gdt();
+    serial_print(COM1, "[2] gdt ok\n");
     /* Set up TSS kernel stack for interrupt delivery */
     {
         extern void gdt_set_tss(uint32_t ss0, uint32_t esp0);
@@ -590,12 +605,17 @@ void kernel_main(void) {
         gdt_set_tss(0x10, kern_esp);
     }
     init_idt();
+    serial_print(COM1, "[3] idt ok\n");
     init_irq();
+    serial_print(COM1, "[4] irq ok\n");
     fpu_init();
+    serial_print(COM1, "[5] fpu ok\n");
     init_timer();
+    serial_print(COM1, "[6] timer ok\n");
 
     /* Initialize kernel RNG early - needed for ASLR, PID allocation, etc */
     krng_init();
+    serial_print(COM1, "[7] krng ok\n");
     klog_info("Kernel random number generator (xorshift128+) initialized");
 
     /* Initialize softirq/tasklet subsystem */
@@ -973,6 +993,15 @@ void kernel_main(void) {
     /* 扩展 VFS */
     vfs_ext_init();
     klog_info("Extended VFS initialized");
+
+    /* 注册 AIO tick hook: 每 8 个调度 tick 处理一个待处理的 AIO 请求,
+     * 这样 AIO 可以在后台异步执行而不阻塞调度器 */
+    {
+        extern int vfs_ext_aio_process_one(void);
+        extern void scheduler_set_aio_tick(aio_tick_fn_t fn);
+        scheduler_set_aio_tick((aio_tick_fn_t)vfs_ext_aio_process_one);
+        klog_info("AIO subsystem registered with scheduler");
+    }
 
     /* 扩展用户系统 */
     user_ext_init();

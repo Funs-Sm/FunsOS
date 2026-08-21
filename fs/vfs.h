@@ -113,6 +113,11 @@ typedef struct {
     int32_t (*write_inode)(inode_t *inode);
     int32_t (*alloc_inode)(superblock_t *sb, inode_t *inode);
     void (*free_inode)(inode_t *inode);
+    /* Write cached data pages back to disk for a given inode.
+     * Returns number of bytes written, or negative error code.
+     * This enables the page cache to perform real disk writeback by
+     * delegating to the filesystem's block allocation and I/O logic. */
+    int32_t (*write_data)(inode_t *inode, uint32_t offset, uint32_t size, const void *buf);
 } superblock_ops_t;
 
 struct superblock_t {
@@ -222,6 +227,8 @@ uint32_t vfs_get_mount_flags(const char *path);
 int32_t vfs_open(const char *path, uint32_t flags, file_t **file);
 int32_t vfs_close(file_t *file);
 int32_t vfs_read(file_t *file, void *buf, uint32_t count);
+int32_t vfs_pread(file_t *file, void *buf, uint32_t count, uint32_t offset);
+int32_t vfs_pwrite(file_t *file, const void *buf, uint32_t count, uint32_t offset);
 int32_t vfs_write(file_t *file, const void *buf, uint32_t count);
 int32_t vfs_seek(file_t *file, int32_t offset, int32_t whence);
 int32_t vfs_ioctl(file_t *file, uint32_t cmd, void *arg);

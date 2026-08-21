@@ -1,3 +1,23 @@
+/*
+ * notepad.c — DEPRECATED 旧版 GUI 记事本
+ *
+ * v0.8 状态:本文件**未被任何 Makefile 目标或 #include 引用**,实际运行的是
+ *         `kernel/shell.c` 中的 `app_notepad_main()`,后者直接调用
+ *         `gui_app_notepad()` (在 `kernel/gui_apps.c`) 或 `os/apps/text_editor.c`。
+ *
+ * 保留原因:与 `apps/desktop.c` 一起作为"独立 ELF 应用"的早期设计稿,
+ *         `apps/Makefile` 中确实有独立链接逻辑(`GUI_APPS = ... notepad ...`),
+ *         但顶层 Makefile 没有触发 `apps:` 目标。
+ *
+ * 重构建议:
+ *   - 短期:保留(0 字节二进制开销,因为不被链入)
+ *   - 长期:删除并将相关 Makefile 目标清理
+ *
+ * 替代实现:
+ *   - `os/apps/text_editor.c` — 当前权威的图形化文本编辑器(41 KB,多缓冲/查找替换)
+ *   - `kernel/gui_apps.c::gui_app_notepad()` — 简化版内嵌窗口
+ */
+
 #include "user_syscall.h"
 #include "string.h"
 #include "gui_common.h"

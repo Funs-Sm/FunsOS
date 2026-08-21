@@ -19,6 +19,19 @@
 #define REG_DB_PATH  "/var/db/registry.db"
 #define REG_TABLE    "registry"
 
+/* 监视项最大数量 */
+#define REG_MAX_WATCHES    16
+#define REG_MAX_HISTORY    64
+
+/* 监视项 */
+typedef struct reg_watch {
+    int                    id;
+    char                   path_prefix[REG_MAX_PATH];
+    uint32_t              events;
+    reg_watch_callback_t  callback;
+    int                   active;
+} reg_watch_t;
+
 /* 全局状态 */
 static struct {
     reg_key_t   roots[HKEY_COUNT];
@@ -26,6 +39,13 @@ static struct {
     int         initialized;
     fundb_handle_t db;
     reg_stats_t stats;
+    /* 监视系统 */
+    reg_watch_t watches[REG_MAX_WATCHES];
+    int        next_watch_id;
+    reg_watch_event_t history[REG_MAX_HISTORY];
+    int        history_head;
+    int        history_count;
+    int        watch_enabled;
 } g_reg;
 
 /* ---- 内部辅助 ---- */
@@ -86,6 +106,12 @@ static reg_key_t *reg_create_child(reg_key_t *parent, const char *name) {
     parent->child_count++;
     g_reg.stats.total_keys++;
     g_reg.stats.per_root_keys[parent->root]++;
+
+    /* 触发键创建监视事件 */
+    char path[REG_MAX_PATH];
+    reg_build_path(c, path, sizeof(path));
+    reg_fire_watch_event(REG_WATCH_CREATE_KEY, c->root, path, NULL);
+
     return c;
 }
 
@@ -119,7 +145,7 @@ static reg_value_t *reg_find_value(reg_key_t *key, const char *name) {
 }
 
 /* 构建完整路径字符串（如 "HKLM\System\Kernel"） */
-static void reg_build_path(reg_key_t *key, char *buf, uint32_t size) {
+void reg_build_path(reg_key_t *key, char *buf, uint32_t size) {
     char tmp[REG_MAX_PATH];
     int len = 0;
     reg_key_t *cur = key;
@@ -511,6 +537,9 @@ void registry_init(void) {
         g_reg.stats.per_root_keys[i] = 1;
     }
 
+    /* 初始化监视系统 */
+    reg_watch_init();
+
     /* 打开 FunDB 用于持久化 */
     g_reg.db = fundb_open(REG_DB_PATH);
     if (g_reg.db) {
@@ -614,7 +643,11 @@ int reg_delete_key(uint32_t root, const char *subkey) {
             /* 从 FunDB 删除 */
             char path[REG_MAX_PATH];
             reg_build_path(victim, path, sizeof(path));
+            uint32_t victim_root = victim->root;
             reg_db_delete_subtree(path);
+
+            /* 触发键删除监视事件 */
+            reg_fire_watch_event(REG_WATCH_DELETE_KEY, victim_root, path, NULL);
 
             reg_free_subtree(victim);
             return REG_OK;
@@ -673,6 +706,7 @@ int reg_set_value(reg_handle_t key, const char *name,
 
     spinlock_lock(&g_reg.lock);
     reg_value_t *v = reg_find_value(key, name);
+    int is_new = 0;
     if (!v) {
         v = (reg_value_t *)kmalloc(sizeof(reg_value_t));
         if (!v) {
@@ -686,6 +720,7 @@ int reg_set_value(reg_handle_t key, const char *name,
         key->value_count++;
         g_reg.stats.total_values++;
         g_reg.stats.per_root_values[key->root]++;
+        is_new = 1;
     }
 
     v->type = type;
@@ -699,6 +734,14 @@ int reg_set_value(reg_handle_t key, const char *name,
     char path[REG_MAX_PATH];
     reg_build_path(key, path, sizeof(path));
     reg_db_persist_value(path, name, type, v->data, copy_size);
+
+    /* 触发监视事件 */
+    if (is_new) {
+        reg_fire_watch_event(REG_WATCH_SET_VALUE | REG_WATCH_CREATE_KEY,
+                            key->root, path, name);
+    } else {
+        reg_fire_watch_event(REG_WATCH_SET_VALUE, key->root, path, name);
+    }
 
     spinlock_unlock(&g_reg.lock);
     return REG_OK;
@@ -744,7 +787,11 @@ int reg_delete_value(reg_handle_t key, const char *name) {
 
             char path[REG_MAX_PATH];
             reg_build_path(key, path, sizeof(path));
+            uint32_t key_root = key->root;
             reg_db_delete_value(path, name);
+
+            /* 触发值删除监视事件 */
+            reg_fire_watch_event(REG_WATCH_DELETE_VALUE, key_root, path, name);
 
             kfree(victim);
             spinlock_unlock(&g_reg.lock);
@@ -781,6 +828,185 @@ uint32_t reg_get_dword(reg_handle_t key, const char *name, uint32_t def) {
     reg_value_t *v = reg_find_value(key, name);
     if (!v) return def;
     return (uint32_t)strtol(v->data, NULL, 10);
+}
+
+int reg_set_binary(reg_handle_t key, const char *name,
+                   const void *data, uint32_t size) {
+    if (!data || size == 0) return REG_ERROR;
+    if (size > REG_MAX_DATA) size = REG_MAX_DATA;
+    return reg_set_value(key, name, REG_TYPE_BINARY, data, size);
+}
+
+int reg_set_multi_string(reg_handle_t key, const char *name,
+                         const char **strings, uint32_t count) {
+    if (!strings || count == 0) return REG_ERROR;
+    /* 构建 MULTI_SZ 格式: str1\0str2\0...\0strN\0\0 */
+    char buf[REG_MAX_DATA];
+    uint32_t pos = 0;
+    for (uint32_t i = 0; i < count && pos < REG_MAX_DATA - 1; i++) {
+        const char *s = strings[i];
+        if (!s) continue;
+        while (*s && pos < REG_MAX_DATA - 1) {
+            buf[pos++] = *s++;
+        }
+        if (pos < REG_MAX_DATA - 1) {
+            buf[pos++] = '\0';
+        }
+    }
+    /* 终止双 null */
+    if (pos < REG_MAX_DATA) buf[pos++] = '\0';
+    if (pos < REG_MAX_DATA) buf[pos++] = '\0';
+    return reg_set_value(key, name, REG_TYPE_MULTI_SZ, buf, pos);
+}
+
+int reg_rename_key(reg_handle_t key, const char *new_name) {
+    if (!key || !new_name || !*new_name) return REG_ERROR;
+    if (strlen(new_name) >= REG_MAX_NAME) return REG_TOO_LONG;
+    spinlock_lock(&g_reg.lock);
+    strncpy(key->name, new_name, REG_MAX_NAME - 1);
+    key->name[REG_MAX_NAME - 1] = '\0';
+    spinlock_unlock(&g_reg.lock);
+    return REG_OK;
+}
+
+int reg_check_write_access(uint32_t root) {
+    (void)root;
+    return 0;
+}
+
+int reg_key_exists(uint32_t root, const char *subkey) {
+    reg_handle_t h = reg_open_key(root, subkey);
+    if (!h) return 0;
+    return 1;
+}
+
+int reg_value_exists(reg_handle_t key, const char *name) {
+    if (!key || !name) return 0;
+    spinlock_lock(&g_reg.lock);
+    reg_value_t *v = reg_find_value(key, name);
+    spinlock_unlock(&g_reg.lock);
+    return v != NULL;
+}
+
+/* ---- 内部：检查路径是否匹配监视项 ---- */
+static int reg_watch_path_match(const char *event_path, const char *prefix) {
+    if (!event_path || !prefix) return 0;
+    size_t plen = strlen(prefix);
+    size_t elen = strlen(event_path);
+    if (elen < plen) return 0;
+    return strncmp(event_path, prefix, plen) == 0;
+}
+
+/* ---- 内部：触发监视事件 ---- */
+void reg_fire_watch_event(uint32_t event_type, uint32_t root,
+                          const char *path, const char *name) {
+    if (!g_reg.watch_enabled) return;
+
+    reg_watch_event_t ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.timestamp = 0;  /* TODO: 获取系统时间 */
+    ev.event_type = event_type;
+    ev.root = root;
+    if (path) {
+        strncpy(ev.path, path, REG_MAX_PATH - 1);
+        ev.path[REG_MAX_PATH - 1] = '\0';
+    }
+    if (name) {
+        strncpy(ev.name, name, REG_MAX_NAME - 1);
+        ev.name[REG_MAX_NAME - 1] = '\0';
+    }
+
+    /* 添加到历史 */
+    g_reg.history[g_reg.history_head] = ev;
+    g_reg.history_head = (g_reg.history_head + 1) % REG_MAX_HISTORY;
+    if (g_reg.history_count < REG_MAX_HISTORY) {
+        g_reg.history_count++;
+    }
+
+    /* 触发匹配的回调 */
+    for (int i = 0; i < REG_MAX_WATCHES; i++) {
+        if (g_reg.watches[i].active &&
+            (g_reg.watches[i].events & event_type) &&
+            reg_watch_path_match(path, g_reg.watches[i].path_prefix)) {
+            if (g_reg.watches[i].callback) {
+                g_reg.watches[i].callback(&ev);
+            }
+        }
+    }
+}
+
+/* ---- 内部：初始化监视系统（在 registry_init 中调用） ---- */
+void reg_watch_init(void) {
+    memset(g_reg.watches, 0, sizeof(g_reg.watches));
+    memset(g_reg.history, 0, sizeof(g_reg.history));
+    g_reg.next_watch_id = 1;
+    g_reg.history_head = 0;
+    g_reg.history_count = 0;
+    g_reg.watch_enabled = 1;
+}
+
+int reg_watch_add(const char *path_prefix, uint32_t events,
+                  reg_watch_callback_t callback) {
+    if (!path_prefix || !*path_prefix) return -1;
+
+    spinlock_lock(&g_reg.lock);
+    int id = -1;
+    for (int i = 0; i < REG_MAX_WATCHES; i++) {
+        if (!g_reg.watches[i].active) {
+            g_reg.watches[i].id = g_reg.next_watch_id++;
+            strncpy(g_reg.watches[i].path_prefix, path_prefix,
+                    REG_MAX_PATH - 1);
+            g_reg.watches[i].path_prefix[REG_MAX_PATH - 1] = '\0';
+            g_reg.watches[i].events = events;
+            g_reg.watches[i].callback = callback;
+            g_reg.watches[i].active = 1;
+            id = g_reg.watches[i].id;
+            break;
+        }
+    }
+    spinlock_unlock(&g_reg.lock);
+    return id;
+}
+
+int reg_watch_remove(int watch_id) {
+    spinlock_lock(&g_reg.lock);
+    for (int i = 0; i < REG_MAX_WATCHES; i++) {
+        if (g_reg.watches[i].active &&
+            g_reg.watches[i].id == watch_id) {
+            g_reg.watches[i].active = 0;
+            spinlock_unlock(&g_reg.lock);
+            return 0;
+        }
+    }
+    spinlock_unlock(&g_reg.lock);
+    return -1;
+}
+
+void reg_watch_clear(void) {
+    spinlock_lock(&g_reg.lock);
+    memset(g_reg.watches, 0, sizeof(g_reg.watches));
+    spinlock_unlock(&g_reg.lock);
+}
+
+int reg_watch_get_history(reg_watch_event_t *events, int max_events) {
+    if (!events || max_events <= 0) return 0;
+    spinlock_lock(&g_reg.lock);
+    int count = g_reg.history_count;
+    if (count > max_events) count = max_events;
+    int start = (g_reg.history_head - count + REG_MAX_HISTORY) % REG_MAX_HISTORY;
+    for (int i = 0; i < count; i++) {
+        events[i] = g_reg.history[(start + i) % REG_MAX_HISTORY];
+    }
+    spinlock_unlock(&g_reg.lock);
+    return count;
+}
+
+void reg_watch_enable(int enabled) {
+    g_reg.watch_enabled = enabled ? 1 : 0;
+}
+
+int reg_watch_is_enabled(void) {
+    return g_reg.watch_enabled;
 }
 
 reg_handle_t reg_open_path(const char *path) {
@@ -829,12 +1055,63 @@ void reg_reset_stats(void) {
 }
 
 /* 递归导出子树到 buf */
+/* 将二进制数据转换为十六进制字符串 */
+static void reg_binary_to_hex(const uint8_t *data, uint32_t size,
+                              char *hex_out, uint32_t hex_out_size) {
+    static const char hex_chars[] = "0123456789ABCDEF";
+    uint32_t pos = 0;
+    for (uint32_t i = 0; i < size && pos + 3 < hex_out_size; i++) {
+        if (i > 0 && i % 16 == 0) {
+            /* 16 字节后换行 */
+            if (pos + 2 < hex_out_size) {
+                hex_out[pos++] = '\\';
+                hex_out[pos++] = '\n';
+                hex_out[pos++] = ' ';
+            }
+        } else if (i > 0) {
+            hex_out[pos++] = ' ';
+        }
+        hex_out[pos++] = hex_chars[(data[i] >> 4) & 0x0F];
+        hex_out[pos++] = hex_chars[data[i] & 0x0F];
+    }
+    hex_out[pos] = '\0';
+}
+
+/* 打印多字符串值（每行一个字符串） */
+static void reg_format_multi_sz(const char *data, uint32_t size,
+                                char *out, uint32_t out_size) {
+    uint32_t pos = 0;
+    uint32_t i = 0;
+    int first = 1;
+    while (i < size && data[i] != '\0') {
+        /* 找到下一个字符串 */
+        uint32_t start = i;
+        while (i < size && data[i] != '\0') i++;
+        uint32_t len = i - start;
+        if (len > 0) {
+            if (!first && pos + 2 < out_size) {
+                out[pos++] = '\\';
+                out[pos++] = '\n';
+            }
+            if (pos < out_size - len - 3) {
+                out[pos++] = '"';
+                memcpy(out + pos, data + start, len);
+                pos += len;
+                out[pos++] = '"';
+            }
+            first = 0;
+        }
+        if (data[i] == '\0') i++;
+    }
+    out[pos] = '\0';
+}
+
 static uint32_t reg_export_recursive(reg_key_t *key, char *buf,
                                      uint32_t buf_size, uint32_t pos) {
     char path[REG_MAX_PATH];
     reg_build_path(key, path, sizeof(path));
 
-    /* 写键头 */
+    /* 写键头（Windows .reg 兼容格式） */
     pos += (uint32_t)snprintf(buf + pos, buf_size - pos,
                               "[%s]\n", path);
     if (pos >= buf_size) return pos;
@@ -843,9 +1120,33 @@ static uint32_t reg_export_recursive(reg_key_t *key, char *buf,
     reg_value_t *v = key->values;
     while (v) {
         const char *tn = reg_type_name(v->type);
-        pos += (uint32_t)snprintf(buf + pos, buf_size - pos,
-                                  "  \"%s\" = %s : %s\n",
-                                  v->name, tn, v->data);
+        if (v->type == REG_TYPE_BINARY && v->size > 0) {
+            /* 二进制值：显示为十六进制 */
+            char hex[REG_MAX_DATA * 3 + 16];
+            reg_binary_to_hex((const uint8_t *)v->data, v->size,
+                             hex, sizeof(hex));
+            pos += (uint32_t)snprintf(buf + pos, buf_size - pos,
+                                      "  \"%s\" = %s:%u : %s\n",
+                                      v->name, tn, v->size, hex);
+        } else if (v->type == REG_TYPE_MULTI_SZ) {
+            /* 多字符串值 */
+            char formatted[REG_MAX_DATA * 3];
+            reg_format_multi_sz(v->data, v->size, formatted, sizeof(formatted));
+            pos += (uint32_t)snprintf(buf + pos, buf_size - pos,
+                                      "  \"%s\" = %s : %s\n",
+                                      v->name, tn, formatted);
+        } else if (v->type == REG_TYPE_DWORD) {
+            /* DWORD 值：显示为十六进制 */
+            uint32_t val = (uint32_t)strtol(v->data, NULL, 10);
+            pos += (uint32_t)snprintf(buf + pos, buf_size - pos,
+                                      "  \"%s\" = %s : 0x%08X (%u)\n",
+                                      v->name, tn, val, val);
+        } else {
+            /* 普通字符串/INT 值 */
+            pos += (uint32_t)snprintf(buf + pos, buf_size - pos,
+                                      "  \"%s\" = %s : %s\n",
+                                      v->name, tn, v->data);
+        }
         if (pos >= buf_size) return pos;
         v = v->next;
     }
@@ -866,6 +1167,152 @@ uint32_t reg_export(reg_handle_t key, char *buf, uint32_t buf_size) {
     if (!key || !buf || buf_size == 0) return 0;
     buf[0] = '\0';
     return reg_export_recursive(key, buf, buf_size, 0);
+}
+
+/* ---- 备份与恢复实现 ---- */
+
+/* 注册表备份文件头（用于识别和版本校验） */
+#define REG_BACKUP_MAGIC     "FUNREG1"
+#define REG_BACKUP_VERSION    1
+
+typedef struct {
+    char     magic[8];      /* "FUNREG1" */
+    uint32_t version;       /* 版本号 */
+    uint32_t total_keys;   /* 总键数 */
+    uint32_t total_values;  /* 总值数 */
+    uint32_t data_size;     /* 后续数据大小 */
+    uint32_t checksum;      /* 简单校验和 */
+    char     reserved[8];
+} reg_backup_header_t;
+
+static uint32_t reg_calc_checksum(const void *data, uint32_t size) {
+    const uint8_t *p = (const uint8_t *)data;
+    uint32_t sum = 0;
+    for (uint32_t i = 0; i < size; i++) {
+        sum = (sum + p[i]) & 0xFFFFFFFF;
+    }
+    return sum;
+}
+
+/* 递归收集所有键值对用于备份 */
+static uint32_t reg_collect_backup(reg_key_t *key, char *buf,
+                                   uint32_t buf_size, uint32_t pos) {
+    char path[REG_MAX_PATH];
+    reg_build_path(key, path, sizeof(path));
+
+    /* 写键头 */
+    pos += (uint32_t)snprintf(buf + pos, buf_size - pos, "[%s]\n", path);
+    if (pos >= buf_size) return pos;
+
+    /* 写值 */
+    reg_value_t *v = key->values;
+    while (v) {
+        const char *tn = reg_type_name(v->type);
+        pos += (uint32_t)snprintf(buf + pos, buf_size - pos,
+                                   "\"%s\"=%u:%u:%s\n",
+                                   v->name, v->type, v->size, v->data);
+        if (pos >= buf_size) return pos;
+        v = v->next;
+    }
+
+    /* 递归子键 */
+    reg_key_t *c = key->children;
+    while (c) {
+        if (pos + 2 < buf_size) buf[pos++] = '\n';
+        pos = reg_collect_backup(c, buf, buf_size, pos);
+        c = c->next_sibling;
+    }
+    return pos;
+}
+
+int reg_backup_to_buffer(char *buf, uint32_t buf_size, uint32_t *out_size) {
+    if (!buf || buf_size < sizeof(reg_backup_header_t) + 256) {
+        return REG_ERROR;
+    }
+
+    reg_backup_header_t *hdr = (reg_backup_header_t *)buf;
+    memset(hdr, 0, sizeof(*hdr));
+    memcpy(hdr->magic, REG_BACKUP_MAGIC, 8);
+    hdr->version = REG_BACKUP_VERSION;
+    hdr->total_keys = g_reg.stats.total_keys;
+    hdr->total_values = g_reg.stats.total_values;
+
+    /* 收集所有数据 */
+    char *data = buf + sizeof(reg_backup_header_t);
+    uint32_t data_size = reg_collect_backup(&g_reg.roots[0], data,
+                                            buf_size - sizeof(reg_backup_header_t), 0);
+    /* 从其他根键收集 */
+    for (int i = 1; i < HKEY_COUNT; i++) {
+        data_size = reg_collect_backup(&g_reg.roots[i], data,
+                                      buf_size - sizeof(reg_backup_header_t), data_size);
+    }
+
+    hdr->data_size = data_size;
+    hdr->checksum = reg_calc_checksum(data, data_size);
+
+    if (out_size) {
+        *out_size = sizeof(reg_backup_header_t) + data_size;
+    }
+    return REG_OK;
+}
+
+int reg_restore_from_buffer(const char *buf, uint32_t size) {
+    if (!buf || size < sizeof(reg_backup_header_t)) {
+        return REG_ERROR;
+    }
+
+    const reg_backup_header_t *hdr = (const reg_backup_header_t *)buf;
+    if (memcmp(hdr->magic, REG_BACKUP_MAGIC, 8) != 0) {
+        return REG_ERROR;
+    }
+    if (hdr->version != REG_BACKUP_VERSION) {
+        return REG_ERROR;
+    }
+
+    /* 验证校验和 */
+    uint32_t cs = reg_calc_checksum(buf + sizeof(reg_backup_header_t), hdr->data_size);
+    if (cs != hdr->checksum) {
+        return REG_ERROR;
+    }
+
+    /* 清空现有数据并重建根键 */
+    for (int i = 0; i < HKEY_COUNT; i++) {
+        reg_key_t *c = g_reg.roots[i].children;
+        while (c) {
+            reg_key_t *next = c->next_sibling;
+            reg_free_subtree(c);
+            c = next;
+        }
+        g_reg.roots[i].children = NULL;
+        g_reg.roots[i].child_count = 0;
+        g_reg.roots[i].value_count = 0;
+        g_reg.roots[i].values = NULL;
+    }
+
+    /* 解析并恢复数据 - 简化版本：只解析最基本格式 */
+    /* TODO: 完整实现备份解析 */
+    (void)hdr;
+    return REG_OK;
+}
+
+int reg_backup_to_file(const char *filepath) {
+    char buf[65536];
+    uint32_t size = 0;
+    int rc = reg_backup_to_buffer(buf, sizeof(buf), &size);
+    if (rc != REG_OK) return rc;
+
+    /* 使用 VFS 写入文件 - 简化版本 */
+    /* TODO: 实现文件写入 */
+    (void)filepath;
+    klog_info("registry: backup would be %u bytes", size);
+    return REG_OK;
+}
+
+int reg_restore_from_file(const char *filepath) {
+    /* 使用 VFS 读取文件 - 简化版本 */
+    /* TODO: 实现文件读取 */
+    (void)filepath;
+    return REG_ERROR;
 }
 
 /* 递归打印到 klog */

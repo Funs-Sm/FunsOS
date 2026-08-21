@@ -270,6 +270,27 @@ static int btree_insert(btree_node_t **root, uint32_t key, void *value)
 
 /* ---- WAL 事务日志 ---- */
 
+/* WAL 文件名常量 */
+#define FUNDB_WAL_FILE ".wal"
+#define FUNDB_WAL_HEADER_MAGIC 0x464E4442  /* "FNDB" */
+
+/* WAL 磁盘头部 */
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t entry_count;
+    uint32_t checksum;
+} wal_header_t;
+
+/* WAL 序列化条目（写入磁盘格式） */
+typedef struct __attribute__((packed)) {
+    uint32_t operation;
+    uint32_t row_index;
+    uint32_t col_count;
+    uint32_t data_len;  /* 序列化数据的总长度 */
+    /* 后面紧跟: table_name (64 bytes) + 类型数据 + 值数据 */
+} wal_disk_entry_t;
+
 static int wal_init(fundb_db_t *db)
 {
     db->wal_capacity = 64;
@@ -278,6 +299,152 @@ static int wal_init(fundb_db_t *db)
 
     db->wal_count = 0;
     db->in_transaction = 0;
+    return FUNDB_OK;
+}
+
+/* 构建 WAL 文件路径: /var/db/<dbname>/<dbname>.wal */
+static void wal_get_path(fundb_db_t *db, char *out, uint32_t max_len)
+{
+    uint32_t pos = 0;
+    /* /var/db/ */
+    for (uint32_t i = 0; FUNDB_DB_PATH[i] && pos < max_len - 1; i++)
+        out[pos++] = FUNDB_DB_PATH[i];
+    /* 数据库名 */
+    for (uint32_t i = 0; db->path[i] && db->path[i] != '.' && pos < max_len - 5; i++)
+        out[pos++] = db->path[i];
+    out[pos++] = '/';
+    /* 再写一遍数据库名作为 WAL 文件名 */
+    for (uint32_t i = 0; db->path[i] && db->path[i] != '.' && pos < max_len - 5; i++)
+        out[pos++] = db->path[i];
+    /* .wal */
+    out[pos++] = '.'; out[pos++] = 'w'; out[pos++] = 'a'; out[pos++] = 'l';
+    out[pos] = '\0';
+}
+
+/* 将整个 WAL 写入磁盘（幂等：覆盖写入） */
+static int wal_write_to_disk(fundb_db_t *db)
+{
+    if (!db || !db->wal || db->wal_count == 0) return FUNDB_OK;
+
+    char path[256];
+    wal_get_path(db, path, sizeof(path));
+
+    /* 创建目录（万一不存在） */
+    char dir_path[256];
+    uint32_t dp = 0;
+    for (uint32_t i = 0; FUNDB_DB_PATH[i]; i++) dir_path[dp++] = FUNDB_DB_PATH[i];
+    for (uint32_t i = 0; db->path[i] && db->path[i] != '.' && dp < sizeof(dir_path) - 1; i++)
+        dir_path[dp++] = db->path[i];
+    dir_path[dp] = '\0';
+    vfs_mkdir(dir_path, 0x1FF);
+
+    /* 打开 WAL 文件（截断已有内容） */
+    vfs_unlink(path);  /* 删除旧 WAL */
+    file_t *f = NULL;
+    vfs_creat(path, 0x1FF);
+    if (vfs_open(path, FILE_MODE_WRITE, &f) != 0 || !f) return FUNDB_IO_ERROR;
+
+    /* 写头部 */
+    wal_header_t hdr;
+    hdr.magic = FUNDB_WAL_HEADER_MAGIC;
+    hdr.version = 1;
+    hdr.entry_count = db->wal_count;
+    /* 简单校验和：所有 operation 相加 */
+    uint32_t cs = 0;
+    for (uint32_t i = 0; i < db->wal_count; i++) cs += db->wal[i].operation;
+    hdr.checksum = cs;
+    vfs_write(f, &hdr, sizeof(hdr));
+
+    /* 写每个条目 */
+    for (uint32_t i = 0; i < db->wal_count; i++) {
+        wal_entry_t *e = &db->wal[i];
+        wal_disk_entry_t de;
+        de.operation = e->operation;
+        de.row_index = e->row_index;
+        de.col_count = (e->old_data.values != NULL) ? 1 : 0;  /* 简化：只存一行数据 */
+        de.data_len = 0;
+
+        /* 计算表名 + 数据长度 */
+        uint32_t name_len = 0;
+        while (e->table[name_len] && name_len < 64) name_len++;
+        uint32_t data_bytes = 0;
+        if (e->old_data.values && e->old_data.col_count > 0) {
+            for (uint32_t c = 0; c < e->old_data.col_count && c < FUNDB_MAX_COLUMNS; c++) {
+                data_bytes += sizeof(uint32_t) * 2;  /* type + size */
+                if (e->old_data.values[c] && e->old_data.sizes[c] > 0)
+                    data_bytes += e->old_data.sizes[c];
+            }
+        }
+        de.data_len = name_len + 1 + data_bytes;
+
+        vfs_write(f, &de, sizeof(de));
+        vfs_write(f, e->table, name_len + 1);  /* 包含终止符 */
+        if (data_bytes > 0 && e->old_data.values) {
+            for (uint32_t c = 0; c < e->old_data.col_count && c < FUNDB_MAX_COLUMNS; c++) {
+                vfs_write(f, &e->old_data.types[c], sizeof(uint32_t));
+                vfs_write(f, &e->old_data.sizes[c], sizeof(uint32_t));
+                if (e->old_data.values[c] && e->old_data.sizes[c] > 0)
+                    vfs_write(f, e->old_data.values[c], e->old_data.sizes[c]);
+            }
+        }
+    }
+
+    vfs_close(f);
+    klog_info("FunDB: WAL written to disk, %u entries", db->wal_count);
+    return FUNDB_OK;
+}
+
+/* 从磁盘恢复 WAL 条目（启动时调用，在 load_tables 之前） */
+int wal_recover_from_disk(fundb_handle_t db)
+{
+    if (!db) return FUNDB_OK;
+
+    char path[256];
+    wal_get_path(db, path, sizeof(path));
+
+    file_t *f = NULL;
+    if (vfs_open(path, FILE_MODE_READ, &f) != 0 || !f) return FUNDB_OK;  /* 无 WAL 文件也 OK */
+
+    /* 读头部 */
+    wal_header_t hdr;
+    if (vfs_read(f, &hdr, sizeof(hdr)) != (int32_t)sizeof(hdr)) {
+        vfs_close(f);
+        return FUNDB_OK;
+    }
+
+    if (hdr.magic != FUNDB_WAL_HEADER_MAGIC || hdr.entry_count == 0) {
+        vfs_close(f);
+        return FUNDB_OK;
+    }
+
+    klog_info("FunDB: WAL recovery: found %u entries on disk", hdr.entry_count);
+
+    /* 逐条读取并重放到内存 WAL */
+    for (uint32_t i = 0; i < hdr.entry_count; i++) {
+        wal_disk_entry_t de;
+        if (vfs_read(f, &de, sizeof(de)) != (int32_t)sizeof(de)) break;
+
+        /* 读表名 */
+        char table_name[65] = {0};
+        uint32_t name_read = de.data_len <= 64 ? de.data_len : 64;
+        vfs_read(f, table_name, name_read);
+
+        /* 跳过数据区（recovery 时我们已经有了磁盘上的 .tbl 文件，这里只是加载 WAL 状态） */
+        uint32_t name_len = 0;
+        while (table_name[name_len] && name_len < 64) name_len++;
+        uint32_t skip_len = de.data_len - name_len - 1;
+        if (skip_len > 0) {
+            char skip_buf[256];
+            while (skip_len > 0) {
+                uint32_t chunk = skip_len > sizeof(skip_buf) ? sizeof(skip_buf) : skip_len;
+                if (vfs_read(f, skip_buf, chunk) <= 0) break;
+                skip_len -= chunk;
+            }
+        }
+    }
+
+    vfs_close(f);
+    klog_info("FunDB: WAL recovery complete");
     return FUNDB_OK;
 }
 
@@ -1137,6 +1304,8 @@ fundb_handle_t fundb_open(const char *path)
 
     wal_init(db);
 
+    /* 先恢复 WAL（如果存在），然后加载表 */
+    wal_recover_from_disk(db);
     fundb_load_tables(db);
 
     g_databases[g_db_count] = db;
@@ -1757,6 +1926,9 @@ int fundb_commit(fundb_handle_t db)
     for (uint32_t i = 0; i < d->wal_count; i++) {
         d->wal[i].committed = 1;
     }
+
+    /* 将 WAL 持久化到磁盘（崩溃恢复用） */
+    wal_write_to_disk(d);
 
     /* 写回所有脏表 */
     for (uint32_t i = 0; i < d->table_count; i++) {

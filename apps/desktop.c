@@ -1,3 +1,15 @@
+/*
+ * desktop.c — DEPRECATED 旧版 GUI 桌面入口
+ *
+ * v0.8 状态:本文件**未被任何 Makefile 目标或 #include 引用**。
+ *         实际运行的是 `kernel/shell.c` 中的 `app_desktop_main()`,
+ *         后者调用 `kernel/display_server.c::display_server_init()`。
+ *
+ * 替代实现:`os/desktop/desktop.c`(真实桌面环境,5.7 KB,协调 start_menu/taskbar/window_mgr)。
+ *
+ * 重构建议:保留(0 字节二进制开销),下次大重构时删除。
+ */
+
 #include "user_syscall.h"
 #include "string.h"
 #include "gui_common.h"

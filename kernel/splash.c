@@ -6,7 +6,8 @@
 #include "version.h"
 #include "serial.h"
 
-#define SPLASH_SECONDS 3
+/* 欢迎界面停留时间: 从 3 秒缩短到 1 秒以加快启动 */
+#define SPLASH_SECONDS 1
 
 static void splash_puts(int row, int col, const char *str, uint8_t fg, uint8_t bg) {
     if (row < 0 || row >= VGA_HEIGHT) return;
@@ -91,7 +92,7 @@ void splash_show(void) {
     int msg_col = (VGA_WIDTH - msg_len) / 2;
     splash_puts(title_row + 4, msg_col, boot_msg, VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
 
-    serial_print(COM1, "[SPLASH] Waiting 3 seconds...\n");
+    serial_print(COM1, "[SPLASH] Waiting 1 second...\n");
     splash_wait_seconds(SPLASH_SECONDS);
     serial_print(COM1, "[SPLASH] Done, entering shell.\n");
 

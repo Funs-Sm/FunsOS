@@ -54,6 +54,7 @@ static const sys_color_t COLOR_DIR         = { 0x00, 0x00, 0xCC, 0xFF };
 static const sys_color_t COLOR_SELECTED    = { 0xCC, 0xDD, 0xFF, 0xFF };
 static const sys_color_t COLOR_TOOLBAR     = { 0xE8, 0xE8, 0xE8, 0xFF };
 static const sys_color_t COLOR_TOOLBAR_FG  = { 0x33, 0x33, 0x33, 0xFF };
+static const sys_color_t COLOR_TOOLBAR_BG  = { 0xD0, 0xD0, 0xD0, 0xFF };
 static const sys_color_t COLOR_STATUSBAR   = { 0xE8, 0xE8, 0xE8, 0xFF };
 static const sys_color_t COLOR_STATUSBAR_FG = { 0x33, 0x33, 0x33, 0xFF };
 static const sys_color_t COLOR_TREE_BG     = { 0xF5, 0xF5, 0xF5, 0xFF };
@@ -79,16 +80,33 @@ typedef struct {
     uint32_t   entry_count;
     int32_t    selected_index;
     int32_t    scroll_offset;
+    /* 多选支持 */
+    uint32_t   selection[MAX_ENTRIES];
+    uint32_t   selection_count;
     /* 排序 */
     uint32_t   sort_mode;
     uint8_t    sort_ascending;
     /* 目录树 */
-    char       tree_dirs[64][128];    /* 目录树节点 */
+    char       tree_dirs[64][128];
     uint32_t   tree_count;
-    int32_t    tree_expanded[64];     /* 是否展开 */
+    int32_t    tree_expanded[64];
     int32_t    tree_selected;
     /* 当前路径 */
     char       current_path[256];
+    /* 地址栏 */
+    uint8_t    addrbar_active;
+    char       addrbar_buf[256];
+    uint32_t   addrbar_len;
+    int32_t    addrbar_caret;
+    /* 右键菜单 */
+    uint8_t    context_menu_visible;
+    int        context_menu_x;
+    int        context_menu_y;
+    int        context_menu_sel;
+    /* 导航历史 */
+    char       history[20][256];
+    int32_t    history_pos;
+    int32_t    history_count;
     /* 对话框 */
     uint8_t    dialog_type;
     char       dialog_buf[256];
@@ -102,6 +120,14 @@ typedef struct {
     /* 窗口 */
     sys_window_t *win;
 } fm_state_t;
+
+/* 右键菜单项定义 */
+#define CTX_ITEMS 10
+static const char *g_ctx_labels[CTX_ITEMS] = {
+    "Open", "Copy", "Move / Rename", "Delete",
+    "New Folder", "Properties", "Select All", "Deselect All",
+    "Refresh", "Go Up"
+};
 
 static fm_state_t g_fm;
 
@@ -119,6 +145,8 @@ static void fm_render_file_list(sys_window_t *win);
 static void fm_render_statusbar(sys_window_t *win);
 static void fm_render_dialog(sys_window_t *win);
 static void fm_render_progress(sys_window_t *win);
+static void fm_render_context_menu(sys_window_t *win);
+static void fm_context_menu_action(int item);
 static void fm_handle_key(sys_window_t *win, uint32_t key, uint32_t mod);
 static void fm_handle_mouse(sys_window_t *win, int x, int y, int button);
 static void fm_handle_dialog_key(uint32_t key);
@@ -141,16 +169,45 @@ int file_manager_init(void)
     g_fm.tree_selected = -1;
     g_fm.dialog_type = DIALOG_NONE;
     g_fm.show_progress = 0;
+    g_fm.history_count = 0;
+    g_fm.history_pos = -1;
+    g_fm.context_menu_visible = 0;
+    g_fm.addrbar_active = 0;
+    g_fm.selection_count = 0;
+    /* 初始化导航历史 */
+    strncpy(g_fm.history[0], "/", 255);
+    g_fm.history_count = 1;
+    g_fm.history_pos = 0;
     return file_manager_navigate("/");
 }
 
 int file_manager_navigate(const char *path)
 {
     if (path == NULL) return -1;
+
+    /* 压入导航历史 */
+    if (g_fm.history_count < 20 && g_fm.history_pos < (int32_t)g_fm.history_count - 1) {
+        /* 如果当前不在历史末尾，截断未来历史 */
+        g_fm.history_count = g_fm.history_pos + 1;
+    }
+    if (g_fm.history_count < 20) {
+        strncpy(g_fm.history[g_fm.history_count], path, 255);
+        g_fm.history[g_fm.history_count][255] = '\0';
+        g_fm.history_count++;
+    }
+    g_fm.history_pos = g_fm.history_count - 1;
+
     strncpy(g_fm.current_path, path, 255);
     g_fm.current_path[255] = '\0';
+    /* 更新地址栏 */
+    strncpy(g_fm.addrbar_buf, path, 255);
+    g_fm.addrbar_buf[255] = '\0';
+    g_fm.addrbar_len = (uint32_t)strlen(path);
+    g_fm.addrbar_caret = (int32_t)g_fm.addrbar_len;
     g_fm.selected_index = -1;
     g_fm.scroll_offset = 0;
+    g_fm.selection_count = 0;
+    memset(g_fm.selection, 0, sizeof(g_fm.selection));
     fm_refresh_entries();
     fm_refresh_tree();
     return 0;
@@ -485,6 +542,9 @@ static void fm_render(sys_window_t *win)
     fm_render_tree_panel(win);
     fm_render_file_list(win);
     fm_render_statusbar(win);
+    if (g_fm.context_menu_visible) {
+        fm_render_context_menu(win);
+    }
     if (g_fm.dialog_type != DIALOG_NONE) {
         fm_render_dialog(win);
     }
@@ -493,13 +553,81 @@ static void fm_render(sys_window_t *win)
     }
 }
 
+/* 渲染右键上下文菜单 */
+static void fm_render_context_menu(sys_window_t *win)
+{
+    if (!g_fm.context_menu_visible) return;
+
+    int menu_x = g_fm.context_menu_x;
+    int menu_y = g_fm.context_menu_y;
+    int menu_w = 180;
+    int item_h = 18;
+    int menu_h = CTX_ITEMS * item_h + 4;
+    int menu_items = CTX_ITEMS;
+
+    /* 确保菜单在窗口范围内 */
+    if (menu_x + menu_w > WIN_W) menu_x = WIN_W - menu_w;
+    if (menu_y + menu_h > WIN_H) menu_y = WIN_H - menu_h;
+
+    /* 菜单背景 */
+    sys_draw_rect(win, menu_x, menu_y, menu_w, menu_h, (sys_color_t){0xF0,0xF0,0xF0,0xFF});
+    sys_draw_rect(win, menu_x, menu_y, menu_w, 1, (sys_color_t){0x80,0x80,0x80,0xFF});
+    sys_draw_rect(win, menu_x, menu_y + menu_h - 1, menu_w, 1, (sys_color_t){0x80,0x80,0x80,0xFF});
+    sys_draw_rect(win, menu_x, menu_y, 1, menu_h, (sys_color_t){0x80,0x80,0x80,0xFF});
+    sys_draw_rect(win, menu_x + menu_w - 1, menu_y, 1, menu_h, (sys_color_t){0x80,0x80,0x80,0xFF});
+
+    for (int i = 0; i < menu_items; i++) {
+        int iy = menu_y + 2 + i * item_h;
+        if (i == g_fm.context_menu_sel) {
+            sys_draw_rect(win, menu_x + 1, iy, menu_w - 2, item_h, (sys_color_t){0xCC,0xDD,0xFF,0xFF});
+        }
+        sys_draw_text(win, menu_x + 8, iy + 2, g_ctx_labels[i],
+                      i == g_fm.context_menu_sel ? (sys_color_t){0,0,0,0xFF} : (sys_color_t){0x20,0x20,0x20,0xFF});
+    }
+}
+
 static void fm_render_toolbar(sys_window_t *win)
 {
     sys_draw_rect(win, 0, 0, WIN_W, TOOLBAR_H, COLOR_TOOLBAR);
-    sys_draw_text(win, 4, 4, "FUNSOS File Manager", COLOR_TOOLBAR_FG);
 
-    /* 路径显示 */
-    sys_draw_text(win, 200, 4, g_fm.current_path, COLOR_TOOLBAR_FG);
+    /* 导航按钮区 */
+    static const char *btn_back   = "[<]";
+    static const char *btn_fwd    = "[>]";
+    static const char *btn_up     = "[^]";
+    static const char *btn_home   = "[H]";
+    static const char *btn_ref    = "[R]";
+
+    /* 绘制导航按钮 */
+    sys_draw_text(win, 4,  5, btn_back, g_fm.history_pos > 0 ? COLOR_TOOLBAR_FG : (sys_color_t){0xAA,0xAA,0xAA,0xFF});
+    sys_draw_text(win, 36, 5, btn_fwd,  (g_fm.history_pos < g_fm.history_count - 1) ? COLOR_TOOLBAR_FG : (sys_color_t){0xAA,0xAA,0xAA,0xFF});
+    sys_draw_text(win, 68, 5, btn_up,   COLOR_TOOLBAR_FG);
+    sys_draw_text(win, 96, 5, btn_home, COLOR_TOOLBAR_FG);
+    sys_draw_text(win, 124,5, btn_ref,  COLOR_TOOLBAR_FG);
+
+    /* 地址栏 */
+    int addrbar_x = 156;
+    int addrbar_y = 3;
+    int addrbar_w = WIN_W - addrbar_x - 4;
+    int addrbar_h = 20;
+    /* 地址栏背景 */
+    sys_draw_rect(win, addrbar_x, addrbar_y, addrbar_w, addrbar_h,
+                  g_fm.addrbar_active ? (sys_color_t){0xFF,0xFF,0xFF,0xFF} : COLOR_TOOLBAR);
+    /* 地址栏边框 */
+    sys_draw_rect(win, addrbar_x, addrbar_y, addrbar_w, 1, COLOR_SEPARATOR);
+    sys_draw_rect(win, addrbar_x, addrbar_y + addrbar_h - 1, addrbar_w, 1, COLOR_SEPARATOR);
+    sys_draw_rect(win, addrbar_x, addrbar_y, 1, addrbar_h, COLOR_SEPARATOR);
+    sys_draw_rect(win, addrbar_x + addrbar_w - 1, addrbar_y, 1, addrbar_h, COLOR_SEPARATOR);
+
+    /* 地址栏文字 */
+    if (!g_fm.addrbar_active) {
+        /* 非编辑模式：显示当前路径 */
+        sys_draw_text(win, addrbar_x + 4, addrbar_y + 3, g_fm.current_path, COLOR_TEXT);
+    } else {
+        /* 编辑模式：显示输入内容 */
+        sys_draw_text(win, addrbar_x + 4, addrbar_y + 3, g_fm.addrbar_buf, COLOR_TEXT);
+        /* 绘制光标 */
+        /* 简化：光标由窗口系统处理 */
+    }
 }
 
 static void fm_render_tree_panel(sys_window_t *win)
@@ -730,6 +858,62 @@ static void fm_handle_key(sys_window_t *win, uint32_t key, uint32_t mod)
         return;
     }
 
+    /* 右键菜单模式 */
+    if (g_fm.context_menu_visible) {
+        if (key == 0x1B || key == 27) { /* ESC */
+            g_fm.context_menu_visible = 0;
+            return;
+        }
+        if (key == 0x0D || key == '\r') { /* Enter: 执行选中项 */
+            fm_context_menu_action(g_fm.context_menu_sel);
+            g_fm.context_menu_visible = 0;
+            return;
+        }
+        if (key == 0xE0 || key == 0x00) { /* 扩展键 */
+            uint32_t ext_key = mod;
+            if (ext_key == 0x48) { /* 上箭头 */
+                if (g_fm.context_menu_sel > 0) g_fm.context_menu_sel--;
+                return;
+            }
+            if (ext_key == 0x50) { /* 下箭头 */
+                if (g_fm.context_menu_sel < CTX_ITEMS - 1) g_fm.context_menu_sel++;
+                return;
+            }
+        }
+        return;
+    }
+
+    /* 地址栏编辑模式：Enter 导航 */
+    if (g_fm.addrbar_active) {
+        if (key == 0x0D || key == '\r') {
+            /* 导航到地址栏输入的路径 */
+            if (g_fm.addrbar_len > 0) {
+                file_manager_navigate(g_fm.addrbar_buf);
+            }
+            g_fm.addrbar_active = 0;
+            return;
+        }
+        if (key == 0x1B || key == 27) { /* ESC: 取消编辑 */
+            g_fm.addrbar_active = 0;
+            strncpy(g_fm.addrbar_buf, g_fm.current_path, 255);
+            g_fm.addrbar_len = (uint32_t)strlen(g_fm.current_path);
+            return;
+        }
+        if (key == 0x08) { /* Backspace */
+            if (g_fm.addrbar_len > 0) g_fm.addrbar_len--;
+            g_fm.addrbar_buf[g_fm.addrbar_len] = '\0';
+            return;
+        }
+        if (key >= 0x20 && key < 0x7F) {
+            if (g_fm.addrbar_len < 255) {
+                g_fm.addrbar_buf[g_fm.addrbar_len++] = (char)key;
+                g_fm.addrbar_buf[g_fm.addrbar_len] = '\0';
+            }
+            return;
+        }
+        return;
+    }
+
     /* 功能键 */
     /* F2: 重命名 */
     if (key == 0x3C) { /* F2 扫描码 */
@@ -819,6 +1003,14 @@ static void fm_handle_key(sys_window_t *win, uint32_t key, uint32_t mod)
     /* 普通键 */
     if (key == 0x0D || key == '\r') { /* Enter */
         fm_open_selected();
+        return;
+    }
+    if (key == ' ') { /* Space: 切换选中状态（多选） */
+        if (g_fm.selected_index >= 0 && (uint32_t)g_fm.selected_index < g_fm.entry_count) {
+            g_fm.selection[g_fm.selected_index] ^= 1;
+            if (g_fm.selection[g_fm.selected_index]) g_fm.selection_count++;
+            else g_fm.selection_count--;
+        }
         return;
     }
     if (key == 0x08) { /* Backspace */
@@ -913,7 +1105,94 @@ static void fm_handle_dialog_key(uint32_t key)
 
 static void fm_handle_mouse(sys_window_t *win, int x, int y, int button)
 {
-    (void)button;
+    /* 关闭右键菜单：点击右键菜单外的任何位置 */
+    if (button == 1 && g_fm.context_menu_visible) {
+        int menu_x = g_fm.context_menu_x;
+        int menu_y = g_fm.context_menu_y;
+        int menu_w = 180;
+        int item_h = 18;
+        int menu_h = CTX_ITEMS * item_h + 4;
+        if (!(x >= menu_x && x < menu_x + menu_w && y >= menu_y && y < menu_y + menu_h)) {
+            g_fm.context_menu_visible = 0;
+        }
+        return;
+    }
+
+    /* 右键点击文件列表区域：显示上下文菜单 */
+    if (button == 2) {  /* 右键 */
+        if (x >= FILE_LIST_X && x < WIN_W && y >= CONTENT_Y && y < CONTENT_Y + CONTENT_H) {
+            int32_t clicked_idx = g_fm.scroll_offset + (y - CONTENT_Y - ITEM_H) / ITEM_H;
+            if (clicked_idx >= 0 && (uint32_t)clicked_idx < g_fm.entry_count) {
+                g_fm.selected_index = clicked_idx;
+            }
+            /* 显示右键菜单 */
+            g_fm.context_menu_visible = 1;
+            g_fm.context_menu_x = x;
+            g_fm.context_menu_y = y;
+            g_fm.context_menu_sel = 0;
+            return;
+        }
+        return;
+    }
+
+    /* 关闭右键菜单的左键点击 */
+    if (button == 1 && g_fm.context_menu_visible) {
+        int menu_x = g_fm.context_menu_x;
+        int menu_y = g_fm.context_menu_y;
+        int menu_w = 180;
+        int item_h = 18;
+        /* 检查是否点在菜单上 */
+        if (x >= menu_x && x < menu_x + menu_w && y >= menu_y + 2 && y < menu_y + CTX_ITEMS * item_h + 2) {
+            int item = (y - menu_y - 2) / item_h;
+            if (item >= 0 && item < CTX_ITEMS) {
+                g_fm.context_menu_sel = item;
+                fm_context_menu_action(item);
+            }
+        }
+        g_fm.context_menu_visible = 0;
+        return;
+    }
+
+    /* 点击地址栏区域：激活编辑模式 */
+    if (button == 1 && x >= 156 && x < WIN_W - 4 && y >= 3 && y < 23) {
+        g_fm.addrbar_active = 1;
+        return;
+    }
+
+    /* 点击导航按钮 */
+    if (button == 1 && y >= 0 && y < TOOLBAR_H) {
+        if (x >= 4 && x < 32 && g_fm.history_pos > 0) {
+            /* 后退 */
+            g_fm.history_pos--;
+            file_manager_navigate(g_fm.history[g_fm.history_pos]);
+            return;
+        }
+        if (x >= 36 && x < 64 && g_fm.history_pos < g_fm.history_count - 1) {
+            /* 前进 */
+            g_fm.history_pos++;
+            file_manager_navigate(g_fm.history[g_fm.history_pos]);
+            return;
+        }
+        if (x >= 68 && x < 96) {
+            /* 上一级 */
+            file_manager_go_up();
+            return;
+        }
+        if (x >= 96 && x < 120) {
+            /* 主目录 */
+            file_manager_navigate("/home");
+            return;
+        }
+        if (x >= 124 && x < 152) {
+            /* 刷新 */
+            file_manager_refresh();
+            return;
+        }
+        /* 左键点击非地址栏区域：取消地址栏编辑 */
+        if (!(x >= 156 && x < WIN_W - 4 && y >= 3 && y < 23)) {
+            g_fm.addrbar_active = 0;
+        }
+    }
 
     /* 点击文件列表区域 */
     if (x >= FILE_LIST_X && x < WIN_W && y >= CONTENT_Y + ITEM_H && y < CONTENT_Y + CONTENT_H) {
@@ -948,12 +1227,81 @@ static void fm_handle_mouse(sys_window_t *win, int x, int y, int button)
         if (clicked_tree >= 0 && (uint32_t)clicked_tree < g_fm.tree_count) {
             g_fm.tree_expanded[clicked_tree] = !g_fm.tree_expanded[clicked_tree];
             g_fm.tree_selected = clicked_tree;
-            /* 导航到选中的目录 */
             fm_navigate_to(g_fm.tree_dirs[clicked_tree]);
         }
     }
 
     (void)win;
+}
+
+/* 执行右键菜单操作 */
+static void fm_context_menu_action(int item)
+{
+    switch (item) {
+    case 0: /* Open */
+        fm_open_selected();
+        break;
+    case 1: { /* Copy */
+        if (g_fm.selected_index >= 0 && (uint32_t)g_fm.selected_index < g_fm.entry_count) {
+            fm_entry_t *sel = &g_fm.entries[g_fm.selected_index];
+            g_fm.dialog_buf[0] = '\0';
+            g_fm.dialog_len = 0;
+            strncpy(g_fm.dialog_title, "Copy to:", 63);
+            g_fm.dialog_type = DIALOG_RENAME;
+        }
+        break;
+    }
+    case 2: { /* Move / Rename */
+        if (g_fm.selected_index >= 0 && (uint32_t)g_fm.selected_index < g_fm.entry_count) {
+            fm_entry_t *sel = &g_fm.entries[g_fm.selected_index];
+            strncpy(g_fm.dialog_buf, sel->name, 255);
+            g_fm.dialog_len = (uint32_t)strlen(sel->name);
+            strncpy(g_fm.dialog_title, "Move / Rename to:", 63);
+            g_fm.dialog_type = DIALOG_RENAME;
+        }
+        break;
+    }
+    case 3: { /* Delete */
+        if (g_fm.selected_index >= 0 && (uint32_t)g_fm.selected_index < g_fm.entry_count) {
+            strncpy(g_fm.dialog_title, "Delete this item?", 63);
+            g_fm.dialog_buf[0] = 'y'; g_fm.dialog_buf[1] = '\0';
+            g_fm.dialog_len = 1;
+            g_fm.dialog_type = DIALOG_DELETE;
+        }
+        break;
+    }
+    case 4: /* New Folder */
+        g_fm.dialog_buf[0] = '\0';
+        g_fm.dialog_len = 0;
+        strncpy(g_fm.dialog_title, "New folder name:", 63);
+        g_fm.dialog_type = DIALOG_MKDIR;
+        break;
+    case 5: { /* Properties */
+        if (g_fm.selected_index >= 0 && (uint32_t)g_fm.selected_index < g_fm.entry_count) {
+            fm_entry_t *sel = &g_fm.entries[g_fm.selected_index];
+            strncpy(g_fm.dialog_buf, sel->name, 255);
+            g_fm.dialog_len = (uint32_t)strlen(sel->name);
+            strncpy(g_fm.dialog_title, "Properties:", 63);
+            g_fm.dialog_type = DIALOG_RENAME;
+        }
+        break;
+    }
+    case 6: { /* Select All */
+        for (uint32_t i = 0; i < g_fm.entry_count; i++) g_fm.selection[i] = 1;
+        g_fm.selection_count = g_fm.entry_count;
+        break;
+    }
+    case 7: /* Deselect All */
+        for (uint32_t i = 0; i < g_fm.entry_count; i++) g_fm.selection[i] = 0;
+        g_fm.selection_count = 0;
+        break;
+    case 8: /* Refresh */
+        file_manager_refresh();
+        break;
+    case 9: /* Go Up */
+        file_manager_go_up();
+        break;
+    }
 }
 
 /* ================================================================

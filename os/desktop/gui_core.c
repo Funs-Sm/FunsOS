@@ -64,9 +64,9 @@ static int      g_cursor_x        = 0;
 static int      g_cursor_y        = 0;
 static int      g_cursor_visible  = 1;
 
-/* 加载状态 */
+/* 加载状态 - 从 180 帧(~3s) 缩短到 60 帧(~1s) 加快启动 */
 static int      g_loading_frames  = 0;
-static int      g_loading_target  = 180;  /* ~3秒 @ 60fps = 180帧 */
+static int      g_loading_target  = 60;
 
 /* 鼠标按钮状态 */
 static uint8_t  g_mouse_buttons   = 0;
@@ -559,7 +559,7 @@ void gui_core_run(void) {
             loading_screen_set_progress("Welcome to FunsOS", 100);
             /* 最后一帧加载画面 */
             loading_screen_render_frame();
-            timer_sleep(500); /* 短暂停留 */
+            timer_sleep(150); /* 短暂停留 - 从 500ms 缩短到 150ms 加快启动 */
         }
     }
 

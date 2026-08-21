@@ -371,4 +371,10 @@ uint32_t sched_energy_estimate_capacity(void);
 
 void sched_print_policy_table(void);
 
+/* Scheduler hook: optional periodic callback for async I/O processing.
+ * Set by the VFS layer during init.  sched_tick() calls this periodically
+ * so AIO requests are driven forward without blocking the scheduler. */
+typedef int (*aio_tick_fn_t)(void);
+void scheduler_set_aio_tick(aio_tick_fn_t fn);
+
 #endif

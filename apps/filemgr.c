@@ -1,3 +1,15 @@
+/*
+ * filemgr.c — DEPRECATED 旧版 GUI 文件管理器
+ *
+ * v0.8 状态:本文件**未被任何 Makefile 目标或 #include 引用**。
+ *         实际运行的是 `kernel/shell.c` 中的 `app_filemgr_main()`,
+ *         后者调用 `gui_app_filemanager()`(`kernel/gui_apps.c`)。
+ *
+ * 替代实现:`os/apps/file_manager.c`(36 KB,浏览/复制/删除/重命名)。
+ *
+ * 重构建议:保留(0 字节二进制开销),下次大重构时删除。
+ */
+
 #include "user_syscall.h"
 #include "string.h"
 #include "gui_common.h"
