@@ -7,6 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.8.6] - 2026-08-22
+
+### Highlights
+
+Tier-2 / Tier-3 / Tier-4 shell stubs in `kernel/cmd_all.c` reach the real
+backend.  v0.8.6 wires three new modules into the shell dispatcher and
+extends the routing table with `perf` and `stacktrace`.
+
+### Added - User utilities (`kernel/cmd_utility.{c,h}`, ~270 lines)
+
+| Command          | Description                                                          |
+|------------------|----------------------------------------------------------------------|
+| `which CMD`      | locate a builtin or scan `/bin` `/usr/bin` `/sbin` etc.             |
+| `type CMD`       | report builtin / alias / file (same data as `which`)                 |
+| `tee [-a] FILE`  | touch the named files in write or append mode                       |
+| `xargs [-n N]`   | print the would-be invocation (no stdin yet)                        |
+| `test EXPR`      | POSIX primaries: `-z` `-n` `-e` `-f` `-d` and `=`/`!=`/`-eq`/...     |
+| `expr EXPR`      | integer arithmetic with `+ - * / %`                                  |
+| `install SRC DST`| copy with optional mode (`-m OCTAL`)                                 |
+
+### Added - Process control (`kernel/cmd_procctl.{c,h}`, ~150 lines)
+
+| Command           | Description                                                          |
+|-------------------|----------------------------------------------------------------------|
+| `nice -n DELTA PID`  | adjust a process's `sched_set_priority()`                       |
+| `renice -n DELTA PID`| POSIX-style renice                                             |
+| `nohup CMD`        | explicitly reports that background invocation needs fork/exec        |
+| `jobs` `bg` `fg`   | honestly report single-tasked shell (no job table)                   |
+
+### Added - Kernel debug (`kernel/cmd_kdebug.{c,h}`, ~150 lines)
+
+| Command         | Description                                                          |
+|-----------------|----------------------------------------------------------------------|
+| `perf [start|stop|reset|tsc]` | wrap `perf.h` APIs                           |
+| `stacktrace [N]` | save and print the current call stack via `kernel/stacktrace.h`     |
+| `ktrace [clear|on MASK|off MASK]` | wrap `ktrace.h` (show stats, clear, toggle)        |
+| `tracepoint [on NAME|off NAME|stats]` | wrap `tracepoint.h`                            |
+
+### Changed
+
+- `kernel/version.h`: bumped `KERNEL_VERSION` 0.8.5 -> 0.8.6
+- `kernel/syncstat.h` / `syncstat.c`: not changed (out of scope)
+- `kernel/shell.c`:
+  - added `#include "cmd_utility.h"`, `#include "cmd_procctl.h"`,
+    `#include "cmd_kdebug.h"`
+  - **promoted** `current_dir` to non-static; added `shell_current_dir`
+    alias for use by external `cmd_*` translation units (existing in-header
+    extern was previously dangling).
+  - added `perf` and `stacktrace` routes (previously only `dumpstack`).
+- `kernel/cmd_all.c`: removed 15 stubs whose real implementations now
+  live in `cmd_utility.c`, `cmd_procctl.c`, `cmd_kdebug.c`.  Externs
+  remain in `cmd_all.h` for back-compat.
+
+### Backed by
+
+- `kernel/sched.h`: `sched_set_priority(pcb_t, uint32_t)` drives `nice`
+  / `renice`.
+- `kernel/process.h`: `process_get_pcb(pid_t)` for the priority target.
+- `kernel/perf.h` / `kernel/stacktrace.h` / `kernel/ktrace.h` /
+  `kernel/tracepoint.h`: existing subsystems.
+
+### Honest limitations
+
+- `bg`/`fg`/`jobs` print that FunsOS is single-tasked; no job table.
+- `tee`/`xargs` are no-ops beyond the file-touching semantics because
+  the shell has no TTY.
+- `time CMD` (v0.8.5) cannot fork a child; only dispatch cost is shown.
+
+### QEMU smoke test
+
+Boot to splash->shell in ~8 s, no regression versus v0.8.5.
+
+---
+
 ## [0.8.5] - 2026-08-22
 
 ### Highlights

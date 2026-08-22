@@ -10,6 +10,9 @@
 #include "cmd_hash.h"
 #include "cmd_power.h"
 #include "cmd_time.h"
+#include "cmd_utility.h"
+#include "cmd_procctl.h"
+#include "cmd_kdebug.h"
 #include "cmd_path.h"
 #include "cmd_sysinfo2.h"
 #include "cmd_sysinfo.h"
@@ -319,7 +322,9 @@ static alias_t aliases[SHELL_MAX_ALIASES];
 
 static int alias_count = 0;
 
-static char current_dir[256] = "/";
+char current_dir[256] = "/";
+/* Alias for non-shell modules (cmd_*.c) that link against this symbol. */
+char shell_current_dir[256] = "/";
 
 int vbe_mode_active = 0;
 
@@ -3831,6 +3836,8 @@ static void shell_auto_login(void) {
     }
 
     current_dir[255] = '\0';
+    strncpy(shell_current_dir, current_dir, 255);
+    shell_current_dir[255] = '\0';
 
     env_set("PWD", current_dir);
 
@@ -5362,9 +5369,17 @@ static int shell_execute_single(const char *cmd) {
 
         cmd_virtio(arg);
 
-    } else if (strcmp(line, "dumpstack") == 0 || strcmp(line, "stacktrace") == 0) {
+    } else if (strcmp(line, "dumpstack") == 0) {
 
         cmd_dumpstack(arg);
+
+    } else if (strcmp(line, "stacktrace") == 0) {
+
+        cmd_stacktrace(arg);
+
+    } else if (strcmp(line, "perf") == 0) {
+
+        cmd_perf(arg);
 
     } else if (strcmp(line, "iosched") == 0) {
 
@@ -6397,6 +6412,8 @@ void shell_init(void) {
     current_dir[0] = '/';
 
     current_dir[1] = '\0';
+    shell_current_dir[0] = '/';
+    shell_current_dir[1] = '\0';
 
     env_init();
 

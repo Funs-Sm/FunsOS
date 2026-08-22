@@ -32,7 +32,7 @@ void cmd_copy(const char *arg) { (void)arg; shell_print("cmd_copy: stub\n"); she
 void cmd_del(const char *arg) { (void)arg; shell_print("cmd_del: stub\n"); shell_last_exit_code = 0; }
 void cmd_mkdir(const char *arg) { (void)arg; shell_print("cmd_mkdir: stub\n"); shell_last_exit_code = 0; }
 void cmd_ren(const char *arg) { (void)arg; shell_print("cmd_ren: stub\n"); shell_last_exit_code = 0; }
-void cmd_type(const char *arg) { (void)arg; shell_print("cmd_type: stub\n"); shell_last_exit_code = 0; }
+/* cmd_type / cmd_which moved to kernel/cmd_utility.c */
 void cmd_find(const char *arg) { (void)arg; shell_print("cmd_find: stub\n"); shell_last_exit_code = 0; }
 void cmd_size(const char *arg) { (void)arg; shell_print("cmd_size: stub\n"); shell_last_exit_code = 0; }
 void cmd_echo(const char *arg) { (void)arg; shell_print("cmd_echo: stub\n"); shell_last_exit_code = 0; }
@@ -43,17 +43,9 @@ void cmd_load(const char *arg) { (void)arg; shell_print("cmd_load: stub\n"); she
 void cmd_append(const char *arg) { (void)arg; shell_print("cmd_append: stub\n"); shell_last_exit_code = 0; }
 void cmd_setenv(const char *arg) { (void)arg; shell_print("cmd_setenv: stub\n"); shell_last_exit_code = 0; }
 void cmd_unsetenv(const char *arg) { (void)arg; shell_print("cmd_unsetenv: stub\n"); shell_last_exit_code = 0; }
-void cmd_bg(const char *arg) { (void)arg; shell_print("cmd_bg: stub\n"); shell_last_exit_code = 0; }
-void cmd_fg(const char *arg) { (void)arg; shell_print("cmd_fg: stub\n"); shell_last_exit_code = 0; }
-void cmd_jobs(const char *arg) { (void)arg; shell_print("cmd_jobs: stub\n"); shell_last_exit_code = 0; }
-void cmd_nice(const char *arg) { (void)arg; shell_print("cmd_nice: stub\n"); shell_last_exit_code = 0; }
-void cmd_renice(const char *arg) { (void)arg; shell_print("cmd_renice: stub\n"); shell_last_exit_code = 0; }
-void cmd_nohup(const char *arg) { (void)arg; shell_print("cmd_nohup: stub\n"); shell_last_exit_code = 0; }
+/* cmd_bg / cmd_fg / cmd_jobs / cmd_nice / cmd_renice / cmd_nohup moved to kernel/cmd_procctl.c */
 /* cmd_watch / cmd_sleep moved to kernel/cmd_time.c */
-void cmd_xargs(const char *arg) { (void)arg; shell_print("cmd_xargs: stub\n"); shell_last_exit_code = 0; }
-void cmd_tee(const char *arg) { (void)arg; shell_print("cmd_tee: stub\n"); shell_last_exit_code = 0; }
-void cmd_install(const char *arg) { (void)arg; shell_print("cmd_install: stub\n"); shell_last_exit_code = 0; }
-void cmd_which(const char *arg) { (void)arg; shell_print("cmd_which: stub\n"); shell_last_exit_code = 0; }
+/* cmd_xargs / cmd_tee / cmd_install / cmd_which moved to kernel/cmd_utility.c */
 void cmd_logrotate(const char *arg) { (void)arg; shell_print("cmd_logrotate: stub\n"); shell_last_exit_code = 0; }
 void cmd_logrotate_ext(const char *arg) { (void)arg; shell_print("cmd_logrotate_ext: stub\n"); shell_last_exit_code = 0; }
 void cmd_imgview(const char *arg) { (void)arg; shell_print("cmd_imgview: stub\n"); shell_last_exit_code = 0; }
@@ -70,8 +62,7 @@ void cmd_fc(const char *arg) { (void)arg; shell_print("cmd_fc: stub\n"); shell_l
 void cmd_save(const char *arg) { (void)arg; shell_print("cmd_save: stub\n"); shell_last_exit_code = 0; }
 void cmd_resume(const char *arg) { (void)arg; shell_print("cmd_resume: stub\n"); shell_last_exit_code = 0; }
 void cmd_logout(const char *arg) { (void)arg; shell_print("cmd_logout: stub\n"); shell_last_exit_code = 0; }
-void cmd_test(const char *arg) { (void)arg; shell_print("cmd_test: stub\n"); shell_last_exit_code = 0; }
-void cmd_expr(const char *arg) { (void)arg; shell_print("cmd_expr: stub\n"); shell_last_exit_code = 0; }
+/* cmd_test / cmd_expr moved to kernel/cmd_utility.c */
 void cmd_pidof(const char *arg) { (void)arg; shell_print("cmd_pidof: stub\n"); shell_last_exit_code = 0; }
 void cmd_pstree(const char *arg) { (void)arg; shell_print("cmd_pstree: stub\n"); shell_last_exit_code = 0; }
 void cmd_last(const char *arg) { (void)arg; shell_print("cmd_last: stub\n"); shell_last_exit_code = 0; }
@@ -84,7 +75,7 @@ void cmd_capsh(const char *arg) { (void)arg; shell_print("cmd_capsh: stub\n"); s
 void cmd_sysreport(const char *arg) { (void)arg; shell_print("cmd_sysreport: stub\n"); shell_last_exit_code = 0; }
 void cmd_dumpstack(const char *arg) { (void)arg; shell_print("cmd_dumpstack: stub\n"); shell_last_exit_code = 0; }
 void cmd_kwork(const char *arg) { (void)arg; shell_print("cmd_kwork: stub\n"); shell_last_exit_code = 0; }
-void cmd_ktrace(const char *arg) { (void)arg; shell_print("cmd_ktrace: stub\n"); shell_last_exit_code = 0; }
+/* cmd_ktrace moved to kernel/cmd_kdebug.c */
 void cmd_kprobe(const char *arg) { (void)arg; shell_print("cmd_kprobe: stub\n"); shell_last_exit_code = 0; }
 void cmd_notifier(const char *arg) { (void)arg; shell_print("cmd_notifier: stub\n"); shell_last_exit_code = 0; }
 void cmd_sysctl(const char *arg) { (void)arg; shell_print("cmd_sysctl: stub\n"); shell_last_exit_code = 0; }
@@ -130,7 +121,7 @@ void cmd_hwmon(const char *arg) { (void)arg; shell_print("cmd_hwmon: stub\n"); s
 void cmd_ftrace(const char *arg) { (void)arg; shell_print("cmd_ftrace: stub\n"); shell_last_exit_code = 0; }
 void cmd_dmabuf(const char *arg) { (void)arg; shell_print("cmd_dmabuf: stub\n"); shell_last_exit_code = 0; }
 void cmd_namespace(const char *arg) { (void)arg; shell_print("cmd_namespace: stub\n"); shell_last_exit_code = 0; }
-void cmd_tracepoint(const char *arg) { (void)arg; shell_print("cmd_tracepoint: stub\n"); shell_last_exit_code = 0; }
+/* cmd_tracepoint moved to kernel/cmd_kdebug.c */
 void cmd_uprobe(const char *arg) { (void)arg; shell_print("cmd_uprobe: stub\n"); shell_last_exit_code = 0; }
 void cmd_kmod(const char *arg) { (void)arg; shell_print("cmd_kmod: stub\n"); shell_last_exit_code = 0; }
 void cmd_iio(const char *arg) { (void)arg; shell_print("cmd_iio: stub\n"); shell_last_exit_code = 0; }
