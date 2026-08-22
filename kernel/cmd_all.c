@@ -24,11 +24,8 @@ void cmd_ver(const char *arg) { (void)arg; shell_print("cmd_ver: stub\n"); shell
 void cmd_help(const char *arg) { (void)arg; shell_print("cmd_help: stub\n"); shell_last_exit_code = 0; }
 void cmd_schedpolicy(const char *arg) { (void)arg; shell_print("cmd_schedpolicy: stub\n"); shell_last_exit_code = 0; }
 void cmd_mempolicy(const char *arg) { (void)arg; shell_print("cmd_mempolicy: stub\n"); shell_last_exit_code = 0; }
-void cmd_reboot(const char *arg) { (void)arg; shell_print("cmd_reboot: stub\n"); shell_last_exit_code = 0; }
-void cmd_halt(const char *arg) { (void)arg; shell_print("cmd_halt: stub\n"); shell_last_exit_code = 0; }
-void cmd_shutdown(const char *arg) { (void)arg; shell_print("cmd_shutdown: stub\n"); shell_last_exit_code = 0; }
-void cmd_time_cmd(const char *arg) { (void)arg; shell_print("cmd_time_cmd: stub\n"); shell_last_exit_code = 0; }
-void cmd_time(const char *arg) { (void)arg; shell_print("cmd_time: stub\n"); shell_last_exit_code = 0; }
+/* cmd_reboot / cmd_halt / cmd_shutdown / cmd_sleep / cmd_watch /
+ * cmd_time / cmd_time_cmd moved to kernel/cmd_power.c and kernel/cmd_time.c */
 void cmd_mem(const char *arg) { (void)arg; shell_print("cmd_mem: stub\n"); shell_last_exit_code = 0; }
 void cmd_dev(const char *arg) { (void)arg; shell_print("cmd_dev: stub\n"); shell_last_exit_code = 0; }
 void cmd_copy(const char *arg) { (void)arg; shell_print("cmd_copy: stub\n"); shell_last_exit_code = 0; }
@@ -52,8 +49,7 @@ void cmd_jobs(const char *arg) { (void)arg; shell_print("cmd_jobs: stub\n"); she
 void cmd_nice(const char *arg) { (void)arg; shell_print("cmd_nice: stub\n"); shell_last_exit_code = 0; }
 void cmd_renice(const char *arg) { (void)arg; shell_print("cmd_renice: stub\n"); shell_last_exit_code = 0; }
 void cmd_nohup(const char *arg) { (void)arg; shell_print("cmd_nohup: stub\n"); shell_last_exit_code = 0; }
-void cmd_watch(const char *arg) { (void)arg; shell_print("cmd_watch: stub\n"); shell_last_exit_code = 0; }
-void cmd_sleep(const char *arg) { (void)arg; shell_print("cmd_sleep: stub\n"); shell_last_exit_code = 0; }
+/* cmd_watch / cmd_sleep moved to kernel/cmd_time.c */
 void cmd_xargs(const char *arg) { (void)arg; shell_print("cmd_xargs: stub\n"); shell_last_exit_code = 0; }
 void cmd_tee(const char *arg) { (void)arg; shell_print("cmd_tee: stub\n"); shell_last_exit_code = 0; }
 void cmd_install(const char *arg) { (void)arg; shell_print("cmd_install: stub\n"); shell_last_exit_code = 0; }

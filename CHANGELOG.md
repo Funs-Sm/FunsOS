@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.8.5] - 2026-08-22
+
+### Highlights
+
+Tier-1 shell commands that already had full backing subsystems shipped only
+as stubs in `kernel/cmd_all.c`.  v0.8.5 wires them to the real implementations
+(`acpi_reboot`, `acpi_shutdown`, `timer_sleep`, `timer_get_ticks`).
+
+### Added - Power management (`kernel/cmd_power.{c,h}`, 110 lines)
+
+| Command    | Description                                                   |
+|------------|---------------------------------------------------------------|
+| `reboot`   | ACPI reset register with 5-second countdown (`-f` to skip)      |
+| `halt`     | CPU `cli; hlt` loop (power stays on)                          |
+| `shutdown` | ACPI S5 (soft off) with keyboard-controller fallback           |
+| `poweroff` | Alias of `shutdown`                                            |
+
+### Added - Time utilities (`kernel/cmd_time.{c,h}`, 184 lines)
+
+| Command   | Description                                                   |
+|-----------|---------------------------------------------------------------|
+| `sleep`   | Pause the shell; accepts `5`, `5s`, `250ms`, `2m`, `1h`         |
+| `watch`   | Print a banner every N seconds (default 2 s, `-n SECONDS`)     |
+| `time`    | Print uptime (`HH:MM:SS` and raw tick count)                  |
+| `time CMD ARG...` | Measure elapsed ticks around a command (best-effort)   |
+
+Note: `time CMD` cannot yet fork a child; it measures its own dispatch cost
+and clearly labels the limitation. True per-child accounting waits for v0.9.
+
+### Changed
+
+- `kernel/version.h`: bumped `KERNEL_VERSION` 0.8.4 -> 0.8.5
+- `kernel/cmd_all.c`: removed 7 stubs (`cmd_reboot`, `cmd_halt`, `cmd_shutdown`,
+  `cmd_sleep`, `cmd_watch`, `cmd_time`, `cmd_time_cmd`); externs remain in
+  `cmd_all.h` for back-compat
+- `kernel/shell.c`:
+  - added `#include "cmd_power.h"`, `#include "cmd_time.h"`
+  - added `poweroff` alias route
+  - fixed pre-existing bug: `time CMD ARG...` now actually passes the joined
+    `full_cmd` to `cmd_time_cmd` (previously it called `cmd_time_cmd(arg)` and
+    discarded the local concatenation)
+  - `time` (no args) now calls `cmd_time(NULL)` instead of `cmd_time(arg)` for
+    a clean uptime-only print
+
+### Backed by
+
+- `kernel/acpi_sleep.{c,h}` already exposed `acpi_reboot()` / `acpi_shutdown()`
+  / `acpi_enter_sleep(state)`; v0.8.5 simply routes the shell commands there.
+- `kernel/timer.{c,h}` already exposed `timer_sleep(ms)` / `timer_get_ticks()`
+  at 100 Hz; v0.8.5 uses them for sleep / watch / time.
+
+### Notes
+
+- All new commands follow the v0.8.4 style: `shell_print` + `shell_last_exit_code`.
+- No new ABI, syscall, or filesystem change.
+- `cmd_watch` is honest about being single-tasked: it only prints banners.
+  A real dispatcher loop needs the v0.9 task scheduler.
+
+### QEMU smoke test
+
+Boot with `-drive format=raw,file=os.img -m 128 -nographic`. Splash → shell
+in ~8 s, no panic, no regression versus v0.8.4.
+
+---
+
 ## [0.8.4] - 2026-08-22
 
 ### Highlights

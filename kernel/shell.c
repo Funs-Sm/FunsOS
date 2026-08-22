@@ -8,6 +8,8 @@
 #include "cmd_data.h"
 #include "cmd_text.h"
 #include "cmd_hash.h"
+#include "cmd_power.h"
+#include "cmd_time.h"
 #include "cmd_path.h"
 #include "cmd_sysinfo2.h"
 #include "cmd_sysinfo.h"
@@ -4144,6 +4146,10 @@ static int shell_execute_single(const char *cmd) {
 
         cmd_shutdown(arg);
 
+    } else if (strcmp(line, "poweroff") == 0) {
+
+        cmd_poweroff(arg);
+
     } else if (strcmp(line, "time") == 0) {
 
         if (arg && *arg) {
@@ -4176,11 +4182,11 @@ static int shell_execute_single(const char *cmd) {
 
             }
 
-            cmd_time_cmd(arg);
+            cmd_time_cmd(full_cmd);
 
         } else {
 
-            cmd_time(arg);
+            cmd_time(NULL);
 
         }
 
