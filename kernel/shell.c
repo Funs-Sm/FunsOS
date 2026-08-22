@@ -16,6 +16,7 @@
 #include "cmd_hw.h"
 #include "cmd_ns.h"
 #include "cmd_procinfo.h"
+#include "cmd_quota.h"
 #include "cmd_util2.h"
 #include "cmd_path.h"
 #include "cmd_sysinfo2.h"
@@ -5017,6 +5018,14 @@ static int shell_execute_single(const char *cmd) {
 
         }
 
+    } else if (strcmp(line, "setquota") == 0) {
+
+        cmd_setquota(arg);
+
+    } else if (strcmp(line, "repquota") == 0) {
+
+        cmd_repquota(arg);
+
     } else if (strcmp(line, "logrotate") == 0) {
 
         /* 扩展子命令优先 */
@@ -5593,6 +5602,29 @@ static int shell_execute_single(const char *cmd) {
 
         cmd_io(arg);
 
+    } else if (strcmp(line, "eventfd") == 0) {
+
+        cmd_eventfd(arg);
+
+    } else if (strcmp(line, "timerfd") == 0) {
+
+        cmd_timerfd(arg);
+
+    } else if (strcmp(line, "signalfd") == 0) {
+
+        cmd_signalfd(arg);
+
+    } else if (strcmp(line, "evloop") == 0) {
+
+        cmd_evloop(arg);
+
+<<<<<<< HEAD
+    } else if (strcmp(line, "path_hash") == 0) {
+
+        cmd_path_hash(arg);
+
+=======
+>>>>>>> 7160e70 (v0.9: add eventfd/timerfd/signalfd + lib/tinyevloop + 4 new cmd_*)
     } else if (strcmp(line, "icache") == 0) {
 
         cmd_icache(arg);

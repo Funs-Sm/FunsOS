@@ -5,6 +5,7 @@
 #include "sched.h"
 #include "io.h"
 #include "usb_core.h"
+#include "../fs/timerfd.h"
 
 #define PIT_CHANNEL0 0x40
 #define PIT_COMMAND  0x43
@@ -32,6 +33,7 @@ static void timer_handler(regs_t *regs) {
     (void)regs;
     ticks++;
     sched_tick();
+    timerfd_tick(ticks);
 
     /* Drive the network stack once every 10 ms (= once per tick at 100 Hz). */
     net_tick_divider++;

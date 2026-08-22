@@ -1,4 +1,5 @@
 #include "quota.h"
+#include "quota_db.h"
 #include "kheap.h"
 #include "string.h"
 #include "sync.h"
@@ -403,6 +404,11 @@ int quota_list(quota_entry_t *entries, uint32_t max_entries, uint8_t type) {
 }
 
 int quota_sync(void) {
-    /* 预留：未来用于将配额信息持久化到磁盘 */
-    return 0;
+    int ret = quota_db_sync();
+    if (ret == 0) {
+        klog_info("quota: synced all entries to persistent storage");
+    } else {
+        klog_warn("quota: sync failed with error %d", ret);
+    }
+    return ret;
 }

@@ -26,6 +26,7 @@
 #include "vfs.h"
 #include "quota.h"
 #include "ramfs.h"
+#include "io_uring.h"
 #include "krng.h"
 #include "iosched.h"
 #include "softirq.h"
@@ -1012,6 +1013,25 @@ void kernel_main(void) {
     fun_loader_init();
     klog_info(".FUN executable loader initialized");
 
+    /* Initialize *fd family (eventfd / timerfd / signalfd) — FunsOS v0.9 */
+    extern void eventfd_init(void);
+    extern void timerfd_init(void);
+    extern void signalfd_init(void);
+    eventfd_init();
+    timerfd_init();
+    signalfd_init();
+    klog_info("eventfd/timerfd/signalfd initialized");
+
+<<<<<<< HEAD
+    /* Initialize io_uring async I/O ring — FunsOS v0.9 */
+    {
+        extern void io_uring_reset_stats(void);
+        io_uring_reset_stats();
+        klog_info("io_uring subsystem initialized");
+    }
+
+=======
+>>>>>>> 7160e70 (v0.9: add eventfd/timerfd/signalfd + lib/tinyevloop + 4 new cmd_*)
     /* Initialize syslog service */
     syslog_init();
     klog_info("Syslog service initialized");
