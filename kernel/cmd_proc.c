@@ -14,7 +14,7 @@
 
 extern uint32_t timer_get_ticks(void);
 
-/* cmd_ps - 列出所有进程 */
+/* cmd_ps - 列出所有进�?*/
 void cmd_ps(void) {
     shell_print("  PID  STATE       NAME\n");
     for (int i = 0; i < MAX_PROCESSES; i++) {

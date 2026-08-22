@@ -12,7 +12,7 @@
 #include "stdio.h"
 #include "string.h"
 
-/* 将日志级别数字转换为名称字符串 */
+/* 将日志级别数字转换为名称字符�?*/
 static const char *level_to_name(uint32_t level) {
     static const char *names[] = {
         "EMERG", "ALERT", "CRIT", "ERR", "WARN", "NOTICE", "INFO", "DEBUG"
@@ -23,9 +23,9 @@ static const char *level_to_name(uint32_t level) {
     return names[level];
 }
 
-/* 将名称字符串或数字字符串转换为级别值；成功返回 0-7，失败返回 -1 */
+/* 将名称字符串或数字字符串转换为级别值；成功返回 0-7，失败返�?-1 */
 static int parse_level_arg(const char *arg) {
-    /* 先尝试解析数字参数 0-7 */
+    /* 先尝试解析数字参�?0-7 */
     if (arg[0] >= '0' && arg[0] <= '7' && arg[1] == '\0') {
         return arg[0] - '0';
     }
@@ -42,23 +42,23 @@ static int parse_level_arg(const char *arg) {
 }
 
 /*
- * cmd_dmesg - 读取并显示内核环形缓冲区的内容
+ * cmd_dmesg - 读取并显示内核环形缓冲区的内�?
  *
- * 选项：
- *   -l LEVEL  按级别过滤 (emerg/alert/crit/err/warn/notice/info/debug 或 0-7)
- *   -n COUNT 只显示最后 N 行
+ * 选项�?
+ *   -l LEVEL  按级别过�?(emerg/alert/crit/err/warn/notice/info/debug �?0-7)
+ *   -n COUNT 只显示最�?N �?
  *   -c       读取后清空缓冲区
  *   -h       显示帮助
- *   无参数   显示全部内容
+ *   无参�?  显示全部内容
  */
 void cmd_dmesg(const char *args) {
-    int filter_level = -1;   /* -1 表示不过滤 */
+    int filter_level = -1;   /* -1 表示不过�?*/
     int last_n = -1;         /* -1 表示显示全部 */
     int clear_after = 0;
     const char *p = args;
     char buf[16];
 
-    /* 解析选项字符串 (空格分隔的选项列表) */
+    /* 解析选项字符�?(空格分隔的选项列表) */
     if (p && *p) {
         /* 处理前导空格 */
         while (*p == ' ') p++;
@@ -149,13 +149,13 @@ void cmd_dmesg(const char *args) {
         }
     }
 
-    /* 从 klog 读取环形缓冲区内容 */
+    /* �?klog 读取环形缓冲区内�?*/
     char log_buf[4096];
     uint32_t total_lines = klog_get_line_count();
     uint32_t read_len;
 
-    /* 确定读取策略：
-     * - 如果需要最后 N 行且有足够的行，从适当位置开始读取
+    /* 确定读取策略�?
+     * - 如果需要最�?N 行且有足够的行，从适当位置开始读�?
      * - 否则读取全部 */
     if (last_n > 0 && (uint32_t)last_n < total_lines) {
         uint32_t start_line = total_lines - last_n;
@@ -171,7 +171,7 @@ void cmd_dmesg(const char *args) {
     char *line_end;
 
     while (*line) {
-        /* 找到当前行结尾 */
+        /* 找到当前行结�?*/
         line_end = line;
         while (*line_end && *line_end != '\n' && *line_end != '\r') {
             line_end++;
@@ -182,12 +182,12 @@ void cmd_dmesg(const char *args) {
             char tmp[16];
             int printed = 0;
 
-            /* 提取行首的级别标签，格式如 "[KERN EMERG] " 或 "<0> " */
+            /* 提取行首的级别标签，格式�?"[KERN EMERG] " �?"<0> " */
             if (line[0] == '[') {
-                /* 格式: [KERN XXXX] 或 [LEVEL] */
+                /* 格式: [KERN XXXX] �?[LEVEL] */
                 const char *bracket_end = strchr(line, ']');
                 if (bracket_end && bracket_end < line_end) {
-                    int blen = bracket_end - line - 1; /* 不含方括号 */
+                    int blen = bracket_end - line - 1; /* 不含方括�?*/
                     if (blen < (int)sizeof(tmp) - 1) {
                         strncpy(tmp, line + 1, blen);
                         tmp[blen] = '\0';
@@ -208,7 +208,7 @@ void cmd_dmesg(const char *args) {
                             if (lvl >= 0 && lvl <= 7) {
                                 /* 检查过滤器 */
                                 if (filter_level < 0 || (uint32_t)lvl <= filter_level) {
-                                    /* 行尾恢复并打印整行 */
+                                    /* 行尾恢复并打印整�?*/
                                     *line_end = save;
                                     shell_print(line);
                                     *line_end = '\0';
@@ -237,7 +237,7 @@ void cmd_dmesg(const char *args) {
                 }
             }
 
-            /* 如果没有按级别解析，仍输出该行（非结构化日志） */
+            /* 如果没有按级别解析，仍输出该行（非结构化日志�?*/
             if (!printed) {
                 *line_end = save;
                 shell_print(line);
@@ -247,7 +247,7 @@ void cmd_dmesg(const char *args) {
             }
         }
 
-        /* 前进到下一行 */
+        /* 前进到下一�?*/
         line = line_end;
         if (*line == '\n') line++;
         if (*line == '\r') line++;
@@ -267,9 +267,9 @@ void cmd_dmesg(const char *args) {
 }
 
 /*
- * cmd_loglevel - 获取或设置内核日志级别
+ * cmd_loglevel - 获取或设置内核日志级�?
  *
- * 无参数   显示当前级别
+ * 无参�?  显示当前级别
  * 数字 0-7 设置级别
  * 名称     设置级别 (emerg/alert/crit/err/warn/notice/info/debug)
  */
@@ -284,7 +284,7 @@ void cmd_loglevel(const char *args) {
         return;
     }
 
-    /* 解析并设置级别 */
+    /* 解析并设置级�?*/
     int level = parse_level_arg(args);
     if (level < 0) {
         shell_print("loglevel: invalid level '");
@@ -304,12 +304,12 @@ void cmd_loglevel(const char *args) {
 }
 
 /*
- * cmd_syslog - 控制日志系统的配置和缓冲区
+ * cmd_syslog - 控制日志系统的配置和缓冲�?
  *
  * show     显示当前配置（级别、行数）
  * reset    恢复默认级别 KLOG_INFO
  * rotate   将缓冲区 dump 到串口（归档旧日志）
- * flush    清空环形缓冲区
+ * flush    清空环形缓冲�?
  */
 void cmd_syslog(const char *args) {
     if (!args || !*args) {

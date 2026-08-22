@@ -1,5 +1,5 @@
 /*
- * kernel/cmd_procinfo.h - Process-information shell commands (PR-7, v0.8.7)
+ * kernel/cmd_procinfo.h - Process-information shell commands (PR-7, v0.9)
  *
  *   strace PID         toggle syscall trace on a PID (best-effort)
  *   lsof [PATH]        list open file descriptors (informational)

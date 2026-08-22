@@ -1,5 +1,5 @@
 /*
- * kernel/cmd_util2.h - Misc user-facing shell commands (PR-7, v0.8.7)
+ * kernel/cmd_util2.h - Misc user-facing shell commands (PR-7, v0.9)
  *
  *   clr / clear           clear screen via ANSI
  *   ver                   print kernel version

@@ -1,5 +1,5 @@
 /*
- * kernel/cmd_time.h - Time-related commands (PR-5, v0.8.5)
+ * kernel/cmd_time.h - Time-related commands (PR-5, v0.9)
  *   sleep, watch, time [CMD...]
  */
 #ifndef _KERNEL_CMD_TIME_H

@@ -1,5 +1,5 @@
 /*
- * kernel/cmd_util2.c - Misc user-facing shell commands (PR-7, v0.8.7)
+ * kernel/cmd_util2.c - Misc user-facing shell commands (PR-7, v0.9)
  *
  * Many of these are shell-level variable store and GUI/FS placeholder
  * commands.  Where shell.c had its own static state (env/history/alias),

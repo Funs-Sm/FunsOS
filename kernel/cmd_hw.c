@@ -1,5 +1,5 @@
 /*
- * kernel/cmd_hw.c - Hardware-subsystem shell commands (PR-7, v0.8.7)
+ * kernel/cmd_hw.c - Hardware-subsystem shell commands (PR-7, v0.9)
  *
  * All commands call the print_stats / set_* APIs of the corresponding
  * kernel submodule.  They are honest reporting tools: if a subsystem

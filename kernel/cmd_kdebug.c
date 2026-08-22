@@ -1,5 +1,5 @@
 /*
- * kernel/cmd_kdebug.c - Kernel-debug shell commands (PR-5, v0.8.5)
+ * kernel/cmd_kdebug.c - Kernel-debug shell commands (PR-5, v0.9)
  *
  *   perf        print perf counters (TSC + profile counters)
  *   perf start  begin a recording

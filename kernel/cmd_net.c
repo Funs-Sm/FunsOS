@@ -1,4 +1,4 @@
-﻿/*
+/*
  * kernel/cmd_net.c - FunsOS Shell network commands.
  *
  * Provides a full set of Linux-style network utilities with rich help

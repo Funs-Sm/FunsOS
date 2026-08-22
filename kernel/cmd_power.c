@@ -1,5 +1,5 @@
 /*
- * kernel/cmd_power.c - Power management commands (PR-5, v0.8.5)
+ * kernel/cmd_power.c - Power management commands (PR-5, v0.9)
  *
  * All four commands delegate to the ACPI sleep state machine in
  * kernel/acpi_sleep.c.  In QEMU without a full FADT, the keyboard

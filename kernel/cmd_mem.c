@@ -1,11 +1,11 @@
 /*
  * kernel/cmd_mem.c - FunsOS Shell 内存管理命令模块 (PR-4 iter2)
  *
- * 从 kernel/shell.c 中拆分出来的内存相关命令实现:
+ * �?kernel/shell.c 中拆分出来的内存相关命令实现:
  *   - cmd_free       : 显示内存使用情况 (PR-4 iter2)
  *   - cmd_meminfo    : 详细内存信息 (PR-4 iter3, 计划)
  *
- * 共享状态: shell_last_exit_code (定义在 shell.c, 在 shell.h 中 extern)
+ * 共享状�? shell_last_exit_code (定义�?shell.c, �?shell.h �?extern)
  */
 
 #include "shell.h"
@@ -15,7 +15,7 @@
 
 /* ============================================================
  * cmd_free - 显示内存使用情况
- * 迁移自 kernel/shell.c (PR-4 iter2)
+ * 迁移�?kernel/shell.c (PR-4 iter2)
  * ============================================================ */
 void cmd_free(void) {
     uint32_t total_pages = pmm_get_total_pages();
@@ -37,7 +37,7 @@ void cmd_free(void) {
 
 /* ============================================================
  * cmd_meminfo - 详细内存信息
- * 迁移自 kernel/shell.c (PR-4 iter3)
+ * 迁移�?kernel/shell.c (PR-4 iter3)
  * ============================================================ */
 void cmd_meminfo(void) {
     uint32_t total_pages = pmm_get_total_pages();
@@ -72,8 +72,8 @@ void cmd_mem_module_init(void) {
 }
 
 /*
- * PR-4 iter3 (v0.8.4 计划):
- *   - cmd_meminfo (12277 行, 详细内容)
+ * PR-4 iter3 (v0.9 计划):
+ *   - cmd_meminfo (12277 �? 详细内容)
  *   - cmd_vmstat
  *   - cmd_kmemleak
  *   - cmd_slabinfo

@@ -5,7 +5,7 @@
 #ifndef _KERNEL_CMD_NET_H
 #define _KERNEL_CMD_NET_H
 
-/* 网络命令实现 (从 kernel/shell.c 迁移) */
+/* 网络命令实现 (�?kernel/shell.c 迁移) */
 void cmd_ping(const char *ip_str);
 void cmd_ifconfig(void);
 void cmd_route(void);

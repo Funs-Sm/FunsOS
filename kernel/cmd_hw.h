@@ -1,5 +1,5 @@
 /*
- * kernel/cmd_hw.h - Hardware-subsystem shell commands (PR-7, v0.8.7)
+ * kernel/cmd_hw.h - Hardware-subsystem shell commands (PR-7, v0.9)
  *
  *   sensors            list / read sensor values
  *   cpufreq [mhz|gov]  show / set CPU frequency / governor

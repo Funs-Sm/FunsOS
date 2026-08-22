@@ -1,5 +1,5 @@
 /*
- * kernel/cmd_utility.c - User-facing utility commands (PR-5, v0.8.5)
+ * kernel/cmd_utility.c - User-facing utility commands (PR-5, v0.9)
  *
  *   which CMD          locate a command in the builtin table / PATH dirs
  *   type CMD           report builtin / alias / file

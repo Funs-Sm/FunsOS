@@ -1,5 +1,5 @@
 /*
- * kernel/cmd_procctl.c - Process-control shell commands (PR-5, v0.8.5)
+ * kernel/cmd_procctl.c - Process-control shell commands (PR-5, v0.9)
  *
  * nice / renice:  backed by sched_set_priority() on the target PCB.
  * nohup / jobs / bg / fg:  FunsOS is single-tasked, so these commands

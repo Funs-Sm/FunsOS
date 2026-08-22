@@ -4,10 +4,10 @@
  *
  * Network diagnostic commands.
  *
- *  cmd_wol       â€” Wake-on-LAN magic packet (UDP broadcast, full impl)
- *  cmd_speedtest â€” TCP loopback throughput benchmark (full impl)
- *  cmd_iptraf    â€” interface traffic counters via net/ netdev list
- *  cmd_ftp       â€” FTP client (stub, next-version placeholder)
+ *  cmd_wol       â€?Wake-on-LAN magic packet (UDP broadcast, full impl)
+ *  cmd_speedtest â€?TCP loopback throughput benchmark (full impl)
+ *  cmd_iptraf    â€?interface traffic counters via net/ netdev list
+ *  cmd_ftp       â€?FTP client (stub, next-version placeholder)
  */
 
 #include "cmd_netdiag.h"
@@ -88,7 +88,7 @@ static void print_uint64(const char *label, uint64_t val) {
 }
 
 /* ========================================================================
- * cmd_wol â€” Wake-on-LAN magic packet
+ * cmd_wol â€?Wake-on-LAN magic packet
  *
  * Protocol:
  *   - 6 Ã— 0xFF sync bytes
@@ -215,7 +215,7 @@ void cmd_wol(const char *args) {
 }
 
 /* ========================================================================
- * cmd_speedtest â€” TCP loopback throughput benchmark
+ * cmd_speedtest â€?TCP loopback throughput benchmark
  *
  * Connects to 127.0.0.1:<port>, sends 1 MiB of data in chunks,
  * measures elapsed ticks, reports throughput.
@@ -264,7 +264,7 @@ void cmd_speedtest(const char *args) {
         return;
     }
 
-    /* Prepare 1 MiB of test data (all zeros â€” fast to generate) */
+    /* Prepare 1 MiB of test data (all zeros â€?fast to generate) */
     #define TEST_SIZE   (1024 * 1024)  /* 1 MiB */
     #define CHUNK_SIZE  (4096)
 
@@ -310,7 +310,7 @@ void cmd_speedtest(const char *args) {
 }
 
 /* ========================================================================
- * cmd_iptraf â€” IP traffic monitor
+ * cmd_iptraf â€?IP traffic monitor
  *
  * Reads interface statistics from the net/ netdev list (net_get_interface_*)
  * and displays RX/TX bytes and packet counts for each registered interface.
@@ -431,7 +431,7 @@ void cmd_iptraf(const char *args) {
 }
 
 /* ========================================================================
- * cmd_ftp â€” FTP client stub
+ * cmd_ftp â€?FTP client stub
  *
  * Full FTP client requires a complete TCP protocol-stack implementation
  * with proper state machine (PORT/PASV/EPRT/EPSV, binary mode, etc.).

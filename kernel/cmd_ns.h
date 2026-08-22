@@ -1,5 +1,5 @@
 /*
- * kernel/cmd_ns.h - Namespace and security shell commands (PR-7, v0.8.7)
+ * kernel/cmd_ns.h - Namespace and security shell commands (PR-7, v0.9)
  *
  *   devtmpfs           show devtmpfs stats
  *   sysfs              show sysfs stats

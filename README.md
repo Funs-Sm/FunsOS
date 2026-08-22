@@ -1,7 +1,7 @@
 # FunsCore / FunsOS
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-0.8-blue" alt="Version"/>
+  <img src="https://img.shields.io/badge/Version-0.9-blue" alt="Version"/>
   <img src="https://img.shields.io/badge/Platform-x86_32bit-green" alt="Platform"/>
   <img src="https://img.shields.io/badge/Language-C%2FASM-orange" alt="Language"/>
   <img src="https://img.shields.io/badge/License-MIT-blue" alt="License"/>
@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Kernel-FunsCore-v0.8-orange" alt="Kernel"/>
+  <img src="https://img.shields.io/badge/Kernel-FunsCore-v0.9-orange" alt="Kernel"/>
   <img src="https://img.shields.io/badge/SDK-v1.5.0-purple" alt="SDK"/>
   <img src="https://img.shields.io/badge/Renderer-FunRender-blue" alt="Renderer"/>
 </p>
@@ -28,7 +28,7 @@
 
 ## 项目简介
 
-**FunsCore** 是本项目的内核名称（**v0.8**），**FunsOS** 是基于 FunsCore 构建的完整操作系统。这是一个从零开始、不依赖任何现有操作系统代码的 **x86 32 位操作系统项目**，使用 **C 语言和 x86 汇编语言**编写。
+**FunsCore** 是本项目的内核名称（**v0.9**），**FunsOS** 是基于 FunsCore 构建的完整操作系统。这是一个从零开始、不依赖任何现有操作系统代码的 **x86 32 位操作系统项目**，使用 **C 语言和 x86 汇编语言**编写。
 
 FunsOS 实现了现代操作系统的核心子系统：
 
@@ -509,6 +509,6 @@ SOFTWARE.
 ---
 
 <p align="center">
-  <strong>FunsCore v0.8 — 从零构建的 x86 操作系统</strong><br/>
-  <em>FunsCore v0.8 — An operating system built from scratch</em>
+  <strong>FunsCore v0.9 — 从零构建的 x86 操作系统</strong><br/>
+  <em>FunsCore v0.9 — An operating system built from scratch</em>
 </p>

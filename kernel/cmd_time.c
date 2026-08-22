@@ -1,5 +1,5 @@
 /*
- * kernel/cmd_time.c - Time-related commands (PR-5, v0.8.5)
+ * kernel/cmd_time.c - Time-related commands (PR-5, v0.9)
  *
  *   sleep N         -- pause for N seconds (also accepts Ns/Nms/Nm suffix)
  *   watch [-n SEC] CMD ARG...  -- run CMD every N seconds (default 2)
@@ -8,7 +8,7 @@
  *
  * The kernel is single-tasked, so `time CMD` cannot actually fork a child to
  * measure.  Instead it records start/end ticks around a *dispatch* that we run
- * inline; for v0.8.5 we only report the wall time of the run itself.  Real
+ * inline; for v0.9 we only report the wall time of the run itself.  Real
  * per-child accounting waits until the scheduler supports exec().
  */
 
@@ -147,7 +147,7 @@ void cmd_time(const char *args)
 
 /* ------------------------------------------------------------------ *
  * cmd_time_cmd - elapsed time around a dispatched command.
- * We can't fork in v0.8.5, so we measure the lookup cost only and
+ * We can't fork in v0.9, so we measure the lookup cost only and
  * clearly tell the user.  This deliberately *exits 0* so that scripts
  * using `time true` don't think it failed.
  * ------------------------------------------------------------------ */

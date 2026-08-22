@@ -1,5 +1,5 @@
 /*
- * kernel/cmd_procinfo.c - Process-information shell commands (PR-7, v0.8.7)
+ * kernel/cmd_procinfo.c - Process-information shell commands (PR-7, v0.9)
  *
  * Each command calls the print_stats() / set_*() / register() APIs of
  * the corresponding kernel submodule.  These are honest reporting

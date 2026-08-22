@@ -3,7 +3,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/SDK_Version-1.5.0-blue" alt="SDK Version"/>
   <img src="https://img.shields.io/badge/Target_OS-FunsOS_0.8-green" alt="Target OS"/>
-  <img src="https://img.shields.io/badge/Kernel-FunsCore_v0.8-orange" alt="Kernel Version"/>
+  <img src="https://img.shields.io/badge/Kernel-FunsCore_v0.9-orange" alt="Kernel Version"/>
   <img src="https://img.shields.io/badge/Header_Files-38-orange" alt="Header Files"/>
   <img src="https://img.shields.io/badge/Examples-43-purple" alt="Examples Count"/>
 </p>

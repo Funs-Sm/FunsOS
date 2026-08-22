@@ -1,5 +1,5 @@
 /*
- * kernel/cmd_procctl.h - Process-control shell commands (PR-5, v0.8.5)
+ * kernel/cmd_procctl.h - Process-control shell commands (PR-5, v0.9)
  *
  *   nice [-n N] PID     - adjust a process's scheduling priority
  *   renice -n N PID     - POSIX renice (with -g / -u for group/user)

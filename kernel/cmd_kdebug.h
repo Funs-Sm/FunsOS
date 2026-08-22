@@ -1,5 +1,5 @@
 /*
- * kernel/cmd_kdebug.h - Kernel-debug shell commands (PR-5, v0.8.5)
+ * kernel/cmd_kdebug.h - Kernel-debug shell commands (PR-5, v0.9)
  *
  *   perf                - print performance counters
  *   perf start|stop|reset
