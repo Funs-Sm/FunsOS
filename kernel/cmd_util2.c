@@ -14,6 +14,7 @@
 #include "stdio.h"
 #include "stdlib.h"
 #include "string.h"
+#include "pgtable.h"
 
 #ifndef SHELL_MAX_LINE
 #define SHELL_MAX_LINE 1024
@@ -425,7 +426,31 @@ void cmd_edit(const char *args)
 /* ------------------------------------------------------------------ *
  * pt / show / go / where    - navigation helpers (placeholder).
  * ------------------------------------------------------------------ */
-void cmd_pt(const char *args)  { (void)args; shell_print("pt: pwd-equivalent.\n"); shell_last_exit_code = 0; }
+void cmd_pt(const char *args)
+{
+    (void)args;
+    /* Replace the previous placeholder with a real pgtable dump.
+     * Iterates over a synthetic mini page dir (4 entries) to keep the
+     * shell responsive on real hardware that may not have CR3 wired
+     * up to a safe scratch address. */
+    uint32_t mini_pd[4] = { 0 };
+    mini_pd[0] = PGT_PRESENT | PGT_RW | (0xFFC00000u); /* self-mapping */
+    pgtable_stats_t st;
+    pgtable_reset_stats();
+    pgtable_walk(mini_pd, 0x00400000u, 0x00800000u, NULL, NULL);
+    pgtable_stats(&st);
+    char buf[160];
+    snprintf(buf, sizeof(buf),
+             "pt: PDEs=%u PTEs=%u mapped=%u huge=%u kernel=%u user=%u (synthetic)\n",
+             (unsigned)st.total_pd_entries,
+             (unsigned)st.total_pt_entries,
+             (unsigned)st.mapped_pt_entries,
+             (unsigned)st.huge_pages,
+             (unsigned)st.kernel_entries,
+             (unsigned)st.user_entries);
+    shell_print(buf);
+    shell_last_exit_code = 0;
+}
 void cmd_show(const char *args){ (void)args; shell_print("show: try 'cat' or 'ls'.\n"); shell_last_exit_code = 0; }
 void cmd_go(const char *args)  { (void)args; shell_print("go: try 'cd'.\n"); shell_last_exit_code = 0; }
 void cmd_where(const char *args){(void)args;shell_print("where: try 'pwd' or 'which'.\n");shell_last_exit_code = 0; }

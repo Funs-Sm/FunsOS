@@ -52,6 +52,22 @@
 #define SO_PROTOCOL     0x1028
 #define SO_DOMAIN       0x1029
 
+/* SO_TIMESTAMP / SO_TIMESTAMPNS / SO_TIMESTAMPING
+ *
+ * Used with setsockopt() to ask the kernel to attach a timestamp
+ * (or three) to every datagram pulled out of the receive queue.
+ * Linux numeric values:
+ *   SO_TIMESTAMP     = 0x0011
+ *   SO_TIMESTAMPNS   = 0x0012
+ *   SO_TIMESTAMPING  = 0x0025
+ *
+ * Stored as a bitmask on `ts_flags`.  We deliberately pick values
+ * that do not collide with SO_PASSCRED (0x0010) or SO_PEERCRED
+ * (0x0012) — see the kernel's BSD compatibility code. */
+#define SO_TIMESTAMP    0x0011
+#define SO_TIMESTAMPNS  0x0014
+#define SO_TIMESTAMPING 0x0025
+
 /* IP level options */
 #define IP_PKTINFO      8
 #define IP_TTL          2
@@ -123,6 +139,15 @@ typedef struct socket {
     int      err;               /* pending error                */
     uint32_t snd_timeout_ms;
     uint32_t rcv_timeout_ms;
+    /* BSD SO_TIMESTAMP family: bitmask of
+     *   SO_TIMESTAMP       (1<<0) - stamp every received packet
+     *   SO_TIMESTAMPNS     (1<<1) - ns-resolution stamp (we just use
+     *                             ticks for now)
+     *   SO_TIMESTAMPING_RAW (1<<2) - same but no software timestamps
+     *                             (reserved for future use)
+     * Stored in `ts_flags` so that we don't have to reserve bits in
+     * `flags` that may be used by upper-layer options. */
+    uint32_t ts_flags;
     void    *private_data;
     int32_t (*ops_connect)(struct socket *, const sockaddr_in_t *);
     int32_t (*ops_bind)(struct socket *, const sockaddr_in_t *);

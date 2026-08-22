@@ -257,6 +257,8 @@
 | **net/tcp SACK** | `tcp_sack_advance_retransmit()` 公开 helper | ✅ | `net/tcp_state.c` |
 | | `rtx_partial_advance()` 从 static 提升为全局 | ✅ | `net/tcp.c` |
 | | TCP 自带 SACK 路径 → fan-in via heap-friendly out param | ✅ | `net/tcp_state.c` |
+| **net/socket timestamping** | `SO_TIMESTAMP` / `SO_TIMESTAMPNS` / `SO_TIMESTAMPING` setsockopt/getsockopt | ✅ | `net/socket.{h,c}` |
+| | `s->ts_flags` bitfield (bit0=TS, bit1=NS, bit2..7=TSING flags) | ✅ | `net/socket.c` |
 | **signal/SA_RESTORER** | 用户注册带 SA_RESTORER 的 handler | ✅ | `kernel/signal.c` `signal_sigaction` |
 | | 内置 `funsos_default_sigreturn_trampoline` 兜底 | ✅ | `lib/sigtramp.asm` |
 | | per-pcb `signal_restorer` 槽位 + 持久化 | ✅ | `kernel/kernel_proc.h` |

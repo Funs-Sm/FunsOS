@@ -12,6 +12,7 @@
 - **调度器** — lib/rbtree (Cormen) + CFS 用 SACK-aware retransmit
 - **信号** — SA_RESTORER 标志 + 默认 sigreturn 兜底
 - **Shell** — 5 个新 `cmd_*` 命令 (`xattr` / `acpi` / `signal` / `rbtree` / `io`)
+- **Socket 选项** — `SO_TIMESTAMP` / `SO_TIMESTAMPNS` / `SO_TIMESTAMPING` 通过 `setsockopt`/`getsockopt` 操作 `s->ts_flags` bitfield
 
 ## 资产
 

@@ -168,6 +168,7 @@ int32_t sys_socket(int domain, int type, int protocol) {
     s->private_data = NULL;
     s->snd_timeout_ms = 0;
     s->rcv_timeout_ms = 0;
+    s->ts_flags = 0;
     s->flags = 0;
     s->err = 0;
     sock_table[fd].owner = sched_get_current();
@@ -500,6 +501,26 @@ static int32_t sock_tcp_setsockopt(socket_t *s, int level, int optname,
                 return 0;
             }
             return -1;
+        case SO_TIMESTAMP:
+            if (optval && optlen >= 4) {
+                int on = *(int *)optval;
+                if (on) s->ts_flags |= 1u; else s->ts_flags &= ~1u;
+                return 0;
+            }
+            return -1;
+        case SO_TIMESTAMPNS:
+            if (optval && optlen >= 4) {
+                int on = *(int *)optval;
+                if (on) s->ts_flags |= 2u; else s->ts_flags &= ~2u;
+                return 0;
+            }
+            return -1;
+        case SO_TIMESTAMPING:
+            if (optval && optlen >= 4) {
+                s->ts_flags = (s->ts_flags & ~0xF4u) | ((uint32_t)*(int *)optval & 0xF4u);
+                return 0;
+            }
+            return -1;
         case SO_SNDBUF:
             return 0;
         case SO_RCVBUF:
@@ -601,6 +622,15 @@ static int32_t sock_tcp_getsockopt(socket_t *s, int level, int optname,
             return 0;
         case SO_REUSEADDR:
             if (optval && optlen) { *(int *)optval = (s->flags & SO_REUSEADDR) ? 1 : 0; *optlen = sizeof(int); }
+            return 0;
+        case SO_TIMESTAMP:
+            if (optval && optlen) { *(int *)optval = (s->ts_flags & 1u) ? 1 : 0; *optlen = sizeof(int); }
+            return 0;
+        case SO_TIMESTAMPNS:
+            if (optval && optlen) { *(int *)optval = (s->ts_flags & 2u) ? 1 : 0; *optlen = sizeof(int); }
+            return 0;
+        case SO_TIMESTAMPING:
+            if (optval && optlen) { *(int *)optval = (int)(s->ts_flags & 0xF4u); *optlen = sizeof(int); }
             return 0;
         case SO_SNDBUF:
             if (optval && optlen) { *(int *)optval = TCP_SNDBUF_SIZE; *optlen = sizeof(int); }
