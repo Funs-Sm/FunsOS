@@ -7,6 +7,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.8.7] - 2026-08-22
+
+### Highlights
+
+Tier-5 shell stubs in `kernel/cmd_all.c` reach the real backend.  v0.8.7
+adds four new modules and replaces **82 stub bodies** with honest
+implementations that call the matching kernel subsystem.
+
+### Added - Hardware commands (`kernel/cmd_hw.{c,h}`, ~170 lines)
+
+| Command              | Description                                                |
+|----------------------|------------------------------------------------------------|
+| `sensors`            | list sensors / read CPU/GPU temperature                    |
+| `cpufreq [set MHZ\|gov NAME]` | wrap `kernel/cpufreq.h`                       |
+| `rtc`                | read RTC clock and stats                                   |
+| `i2c / spi`          | bus / controller stats                                     |
+| `gpio N [0\|1]`      | read / write a GPIO line                                   |
+| `pinctrl / clk / dmaengine / mfd` | subsystem stats                       |
+
+### Added - Namespace and security (`kernel/cmd_ns.{c,h}`, ~180 lines)
+
+| Command                | Description                                              |
+|------------------------|----------------------------------------------------------|
+| `devtmpfs / sysfs`     | mount-point summary                                      |
+| `netns [list\|create NAME]` | wrap `kernel/netns.h`                              |
+| `netfilter`            | per-hook drop counters                                   |
+| `seccomp / apparmor / keyring` | subsystem stats                              |
+| `audit [on\|off]`      | toggle the audit subsystem                               |
+| `sysctl [NAME=VAL]`    | read / write a sysctl entry                              |
+| `capsh`                | capability state summary                                 |
+
+### Added - Process information (`kernel/cmd_procinfo.{c,h}`, ~200 lines)
+
+| Command            | Description                                                |
+|--------------------|------------------------------------------------------------|
+| `strace PID`       | announce per-PID syscall trace                             |
+| `lsof`             | honest placeholder (no fd table yet)                      |
+| `prlimit`          | placeholder with reserved limits                           |
+| `sysreport`        | clean version / uptime / subsystem status                 |
+| `kprobe [dump\|count]` | wrap `kernel/kprobe.h`                                |
+| `notifier`         | informational summary                                      |
+| `kwork`            | workqueue stats via `kernel/kwork.h`                       |
+| `mem`              | total / used / free pages via `kernel/pmm.h`               |
+| `dev`              | device-tree pointer                                        |
+| `schedpolicy / mempolicy` | policy table / flat memory model                     |
+| `taskset / chrt`   | affinity / scheduling-class summary                        |
+| `last / pidof / pstree / dumpstack` | process information                       |
+
+### Added - Long-tail utilities (`kernel/cmd_util2.{c,h}`, ~410 lines)
+
+| Group             | Commands                                                                  |
+|-------------------|---------------------------------------------------------------------------|
+| Screen / version  | `clr` `ver` `help`                                                        |
+| Shell variables   | `echo` `set` `unset` `setenv` `unsetenv` `env` `history` `alias` `unalias`|
+| File navigation   | `find` `size` `pt` `show` `go` `where`                                    |
+| File operations   | `copy` `del` `mkdir` `ren` `run` `load` `append`                          |
+| Editor / FC       | `edit` `fc` `save` `resume` `logout`                                      |
+| GUI app hooks     | `taskbar` `guistop` `search` `run_app` `exec` `gui` `imgview` `vol` `sound` `crepl` |
+| Logs              | `logrotate` `logrotate_ext`                                               |
+| Filesystem tools  | `fsck` `fsck_ext` `losetup` `fallocate` `filefrag`                        |
+
+`cmd_edit`, `cmd_size`, and the variable-store commands now actually
+work against a local table in `cmd_util2.c`.  `cmd_dumpstack` is an
+alias for `cmd_stacktrace`.
+
+### Changed
+
+- `kernel/version.h`: bumped `KERNEL_VERSION` 0.8.6 -> 0.8.7
+- `kernel/shell.c`: added `#include "cmd_hw.h"`, `"cmd_ns.h"`,
+  `"cmd_procinfo.h"`, `"cmd_util2.h"`.
+- `kernel/cmd_all.c`: removed **82** one-line stubs whose real
+  implementations now live in the four new modules.  Extern
+  declarations remain in `cmd_all.h` for back-compat.
+
+### Honest limitations
+
+- `sysreport` prints a textual summary only; no file I/O and no
+  crash-dump style output.
+- `strace`, `lsof`, `prlimit`, `capsh` are honest placeholders that
+  say so explicitly.
+- `logrotate` / `fsck` / `losetup` / `fallocate` / `filefrag` admit
+  the underlying feature isn't bundled.
+
+### QEMU smoke test
+
+Boot to splash->shell in ~8 s, no regression versus v0.8.6.
+
+---
+
 ## [0.8.6] - 2026-08-22
 
 ### Highlights
