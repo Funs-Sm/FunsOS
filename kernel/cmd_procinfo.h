@@ -46,5 +46,14 @@ void cmd_acpi(const char *args);
 void cmd_signal(const char *args);
 void cmd_rbtree(const char *args);
 void cmd_io(const char *args);
+void cmd_eventfd(const char *args);
+void cmd_timerfd(const char *args);
+void cmd_signalfd(const char *args);
+void cmd_evloop(const char *args);
+<<<<<<< HEAD
+void cmd_xattr(const char *args);
+void cmd_path_hash(const char *args);
+=======
+>>>>>>> 7160e70 (v0.9: add eventfd/timerfd/signalfd + lib/tinyevloop + 4 new cmd_*)
 
 #endif

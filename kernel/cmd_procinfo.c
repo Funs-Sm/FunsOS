@@ -21,8 +21,22 @@
 #include "acpi_aml.h"
 #include "stdio.h"
 #include "../lib/rbtree.h"
+<<<<<<< HEAD
+#include "../lib/tinyevloop.h"
+#include "../lib/path_hash.h"
+#include "../fs/eventfd.h"
+#include "../fs/timerfd.h"
+#include "../fs/signalfd.h"
+#include "../fs/xattr.h"
+=======
+#include "../fs/eventfd.h"
+#include "../fs/timerfd.h"
+#include "../fs/signalfd.h"
+>>>>>>> 7160e70 (v0.9: add eventfd/timerfd/signalfd + lib/tinyevloop + 4 new cmd_*)
+#include "../lib/tinyevloop.h"
 #include "stdlib.h"
 #include "string.h"
+#include "vfs.h"
 
 #ifndef SHELL_MAX_LINE
 #define SHELL_MAX_LINE 1024
@@ -321,6 +335,10 @@ void cmd_dcache(const char *args)
 extern acpi_aml_state_t *acpi_aml_global_state(void);
 void cmd_rbtree(const char *args);
 void cmd_io(const char *args);
+void cmd_eventfd(const char *args);
+void cmd_timerfd(const char *args);
+void cmd_signalfd(const char *args);
+void cmd_evloop(const char *args);
 void cmd_signal(const char *args)
 {
     (void)args;
@@ -405,4 +423,288 @@ void cmd_io(const char *args)
              (unsigned long long)st.ring_closes);
     shell_print(buf);
     shell_last_exit_code = 0;
+}
+
+/* ------------------------------------------------------------------
+ * eventfd - report eventfd statistics (fs/eventfd).
+ *
+ * eventfd_create(0)        -> counter mode
+ * eventfd_create(EFD_SEM)  -> semaphore mode (read decrements by 1)
+ * ------------------------------------------------------------------ */
+void cmd_eventfd(const char *args)
+{
+    (void)args;
+    eventfd_stats_t st;
+    eventfd_get_stats(&st);
+    char buf[200];
+    snprintf(buf, sizeof(buf),
+             "eventfd: created=%llu closed=%llu reads=%llu writes=%llu "
+             "wakeups=%llu sem_decrements=%llu\n",
+             (unsigned long long)st.created,
+             (unsigned long long)st.closed,
+             (unsigned long long)st.reads,
+             (unsigned long long)st.writes,
+             (unsigned long long)st.wakeups,
+             (unsigned long long)st.semaphore_decrements);
+    shell_print(buf);
+    shell_last_exit_code = 0;
+}
+
+/* ------------------------------------------------------------------
+ * timerfd - report timerfd statistics (fs/timerfd).
+ *
+ * Backed by ticks; the kernel ISR calls timerfd_tick() periodically.
+ * ------------------------------------------------------------------ */
+void cmd_timerfd(const char *args)
+{
+    (void)args;
+    timerfd_stats_t st;
+    timerfd_get_stats(&st);
+    char buf[200];
+    snprintf(buf, sizeof(buf),
+             "timerfd: created=%llu closed=%llu settime=%llu reads=%llu "
+             "expirations=%llu wakeups=%llu\n",
+             (unsigned long long)st.created,
+             (unsigned long long)st.closed,
+             (unsigned long long)st.settime_calls,
+             (unsigned long long)st.reads,
+             (unsigned long long)st.expirations,
+             (unsigned long long)st.wakeups);
+    shell_print(buf);
+    shell_last_exit_code = 0;
+}
+
+/* ------------------------------------------------------------------
+ * signalfd - report signalfd statistics (fs/signalfd).
+ *
+ * signalfd_signal(signo) forwards a signal to all signalfds whose mask
+ * includes it; signals outside any mask are counted as "dropped".
+ * ------------------------------------------------------------------ */
+void cmd_signalfd(const char *args)
+{
+    (void)args;
+    signalfd_stats_t st;
+    signalfd_get_stats(&st);
+    char buf[200];
+    snprintf(buf, sizeof(buf),
+             "signalfd: created=%llu closed=%llu delivered=%llu "
+             "dropped_mask=%llu reads=%llu wakeups=%llu\n",
+             (unsigned long long)st.created,
+             (unsigned long long)st.closed,
+             (unsigned long long)st.signals_delivered,
+             (unsigned long long)st.signals_dropped_mask,
+             (unsigned long long)st.reads,
+             (unsigned long long)st.wakeups);
+    shell_print(buf);
+    shell_last_exit_code = 0;
+}
+
+/* ------------------------------------------------------------------
+ * evloop - report tinyevloop helper stats.
+ *
+ * Mainly tracks adds/dels/dispatches across all tinyev_t instances
+ * created by the kernel.
+ * ------------------------------------------------------------------ */
+void cmd_evloop(const char *args)
+{
+    (void)args;
+    tinyev_stats_t st;
+    tinyev_get_stats(&st);
+    char buf[200];
+    snprintf(buf, sizeof(buf),
+             "tinyevloop: adds=%llu dels=%llu dispatches=%llu "
+             "ready_hits=%llu ready_misses=%llu\n",
+             (unsigned long long)st.adds,
+             (unsigned long long)st.dels,
+             (unsigned long long)st.dispatches,
+             (unsigned long long)st.ready_hits,
+             (unsigned long long)st.ready_misses);
+    shell_print(buf);
+    shell_last_exit_code = 0;
+<<<<<<< HEAD
+}
+
+/* ------------------------------------------------------------------
+ * xattr - extended attribute operations on files.
+ *
+ * Usage:
+ *   xattr -l FILE           list xattrs
+ *   xattr -g FILE NAME      get xattr value
+ *   xattr -s FILE NAME VAL  set xattr value
+ *   xattr -r FILE NAME      remove xattr
+ *   xattr                   show subsystem stats
+ * ------------------------------------------------------------------ */
+static const char *xattr_next_token(const char **p)
+{
+    while (**p == ' ') (*p)++;
+    if (**p == '\0') return NULL;
+    const char *start = *p;
+    while (**p && **p != ' ') (*p)++;
+    return start;
+}
+
+void cmd_xattr(const char *args)
+{
+    if (!args || args[0] == '\0') {
+        /* Show subsystem stats */
+        xattr_stats_t st;
+        xattr_get_stats(&st);
+        char buf[200];
+        snprintf(buf, sizeof(buf),
+                 "xattr: sets=%llu gets=%llu lists=%llu removes=%llu misses=%llu\n",
+                 (unsigned long long)st.sets,
+                 (unsigned long long)st.gets,
+                 (unsigned long long)st.lists,
+                 (unsigned long long)st.removes,
+                 (unsigned long long)st.misses);
+        shell_print(buf);
+        shell_last_exit_code = 0;
+        return;
+    }
+
+    const char *p = args;
+    const char *tok = xattr_next_token(&p);
+    if (!tok) {
+        shell_print("Usage: xattr [-l|-g|-s|-r] FILE [NAME [VALUE]]\n");
+        shell_last_exit_code = 1;
+        return;
+    }
+
+    char op = 0;
+    if (strcmp(tok, "-l") == 0) op = 'l';
+    else if (strcmp(tok, "-g") == 0) op = 'g';
+    else if (strcmp(tok, "-s") == 0) op = 's';
+    else if (strcmp(tok, "-r") == 0) op = 'r';
+
+    if (!op) {
+        shell_print("xattr: unknown option (use -l, -g, -s, -r)\n");
+        shell_last_exit_code = 1;
+        return;
+    }
+
+    tok = xattr_next_token(&p);
+    if (!tok) {
+        shell_print("xattr: missing FILE argument\n");
+        shell_last_exit_code = 1;
+        return;
+    }
+
+    inode_t stat_buf;
+    if (vfs_stat(tok, &stat_buf) != 0) {
+        shell_print("xattr: cannot stat file\n");
+        shell_last_exit_code = 1;
+        return;
+    }
+
+    char buf[256];
+
+    if (op == 'l') {
+        /* List xattrs */
+        char list_buf[XATTR_MAX_PER_INODE * (XATTR_NAME_MAX + 16)];
+        int len = xattr_list(&stat_buf, list_buf, sizeof(list_buf));
+        if (len < 0) {
+            shell_print("xattr: list failed\n");
+            shell_last_exit_code = 1;
+            return;
+        }
+        if (len == 0) {
+            shell_print("No xattrs found.\n");
+        } else {
+            char *ptr = list_buf;
+            while (*ptr) {
+                shell_print(ptr);
+                shell_print("\n");
+                ptr += strlen(ptr) + 1;
+            }
+        }
+        shell_last_exit_code = 0;
+        return;
+    }
+
+    tok = xattr_next_token(&p);
+    if (!tok) {
+        shell_print("xattr: missing NAME argument\n");
+        shell_last_exit_code = 1;
+        return;
+    }
+    const char *name = tok;
+
+    if (op == 'g') {
+        /* Get xattr */
+        char value_buf[XATTR_VALUE_MAX];
+        int len = xattr_get(&stat_buf, name, value_buf, sizeof(value_buf));
+        if (len < 0) {
+            snprintf(buf, sizeof(buf), "xattr: get failed for '%s'\n", name);
+            shell_print(buf);
+            shell_last_exit_code = 1;
+            return;
+        }
+        snprintf(buf, sizeof(buf), "%.*s\n", len, value_buf);
+        shell_print(buf);
+        shell_last_exit_code = 0;
+        return;
+    }
+
+    if (op == 'r') {
+        /* Remove xattr */
+        int ret = xattr_remove(&stat_buf, name);
+        if (ret < 0) {
+            snprintf(buf, sizeof(buf), "xattr: remove failed for '%s'\n", name);
+            shell_print(buf);
+            shell_last_exit_code = 1;
+            return;
+        }
+        snprintf(buf, sizeof(buf), "xattr: '%s' removed\n", name);
+        shell_print(buf);
+        shell_last_exit_code = 0;
+        return;
+    }
+
+    if (op == 's') {
+        /* Set xattr */
+        tok = xattr_next_token(&p);
+        if (!tok) {
+            shell_print("xattr: missing VALUE argument\n");
+            shell_last_exit_code = 1;
+            return;
+        }
+        const char *value = tok;
+        uint32_t value_len = 0;
+        while (value[value_len]) value_len++;
+
+        int ret = xattr_set(&stat_buf, name, value, value_len, 0);
+        if (ret < 0) {
+            snprintf(buf, sizeof(buf), "xattr: set failed for '%s'\n", name);
+            shell_print(buf);
+            shell_last_exit_code = 1;
+            return;
+        }
+        snprintf(buf, sizeof(buf), "xattr: '%s' set on file\n", name);
+        shell_print(buf);
+        shell_last_exit_code = 0;
+        return;
+    }
+
+    shell_last_exit_code = 0;
+}
+
+/* ------------------------------------------------------------------
+ * path_hash - report path hashing statistics (fs/path_hash.c).
+ *
+ * FNV-1a 32-bit hashing for fast dentry lookups.
+ * ------------------------------------------------------------------ */
+void cmd_path_hash(const char *args)
+{
+    (void)args;
+    path_hash_stats_t st;
+    path_hash_get_stats(&st);
+    char buf[200];
+    snprintf(buf, sizeof(buf),
+             "path_hash: calls=%llu collisions=%llu\n",
+             (unsigned long long)st.hash_calls,
+             (unsigned long long)st.hash_collisions);
+    shell_print(buf);
+    shell_last_exit_code = 0;
+=======
+>>>>>>> 7160e70 (v0.9: add eventfd/timerfd/signalfd + lib/tinyevloop + 4 new cmd_*)
 }

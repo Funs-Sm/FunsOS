@@ -406,8 +406,6 @@ extern void cmd_pkg(const char *arg);
 
 extern void cmd_play(const char *arg);
 
-extern void cmd_quota(const char *arg);
-
 extern void cmd_quota_ext(const char *arg);
 
 extern void cmd_rcu(const char *arg);

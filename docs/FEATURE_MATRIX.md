@@ -270,6 +270,14 @@
 | | io_uring syscall 入口 235/236/237 | ✅ | `kernel/syscall_impl.c` |
 | | `cmd_io` 报 submitted/completed/bytes | ✅ | `kernel/cmd_procinfo.c` |
 | **kernel/cgroup + sysacct** | 用户登录自动落到 `user/<name>` cgroup | ✅ | `kernel/sysacct.c` `sysacct_audit_login_success` |
+| **fs/eventfd** | kernel-side 计数器 + EFD_SEMAPHORE | ✅ | `fs/eventfd.{h,c}` |
+| | `cmd_eventfd` 报 created/closed/reads/writes/wakeups/sem_decrements | ✅ | `kernel/cmd_procinfo.c` |
+| **fs/timerfd** | setitimer/interval + tick-driven expiration | ✅ | `fs/timerfd.{h,c}` |
+| | `cmd_timerfd` 报 settime/expirations/wakeups | ✅ | `kernel/cmd_procinfo.c` |
+| **fs/signalfd** | per-fd 信号 mask + bitmap pending queue | ✅ | `fs/signalfd.{h,c}` |
+| | `cmd_signalfd` 报 delivered/dropped/reads | ✅ | `kernel/cmd_procinfo.c` |
+| **lib/tinyevloop** | epoll-ish poll-set (add/del/one_shot) | ✅ | `lib/tinyevloop.{h,c}` |
+| | `cmd_evloop` 报 adds/dels/dispatches/ready_hits | ✅ | `kernel/cmd_procinfo.c` |
 | **misc** | `cmd_signal` 报 SA_RESTORER 0x04000000 | ✅ |  |
 | | `lib/stdbool.h` 从 typedef 改成 #define (避免 GCC 警告) | ✅ | `lib/stdbool.h` |
 | | `kprintf.h` 提供 PRI* + KPRI_STR/CONCAT 宏 | ✅ | `lib/kprintf.{h,c}` |

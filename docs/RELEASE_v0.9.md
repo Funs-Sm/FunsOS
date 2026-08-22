@@ -8,11 +8,11 @@
 ## 亮点
 
 - **文件系统** — xattr (4 个 namespace) + quota (soft/hard/grace) + io_uring + path hash + icache hit-rate improvement
-- **网络栈** — ICMPv6 + PMTUD + TCP SACK 公开 helper
+- **网络栈** — ICMPv6 + PMTUD + TCP SACK 公开 helper + SO_TIMESTAMP/NS/ING
 - **调度器** — lib/rbtree (Cormen) + CFS 用 SACK-aware retransmit
-- **信号** — SA_RESTORER 标志 + 默认 sigreturn 兜底
-- **Shell** — 5 个新 `cmd_*` 命令 (`xattr` / `acpi` / `signal` / `rbtree` / `io`)
-- **Socket 选项** — `SO_TIMESTAMP` / `SO_TIMESTAMPNS` / `SO_TIMESTAMPING` 通过 `setsockopt`/`getsockopt` 操作 `s->ts_flags` bitfield
+- **信号** — SA_RESTORER 标志 + 默认 sigreturn 兜底 + signalfd
+- **fd 家族** — eventfd / timerfd / signalfd + lib/tinyevloop 轮询集
+- **Shell** — 9 个新 `cmd_*` 命令 (`xattr`/`acpi`/`signal`/`rbtree`/`io`/`eventfd`/`timerfd`/`signalfd`/`evloop`/`pt`)
 
 ## 资产
 

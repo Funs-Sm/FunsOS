@@ -189,7 +189,6 @@ void cmd_pagecache(const char *arg) { (void)arg; shell_print("cmd_pagecache: stu
 void cmd_passwd(const char *arg) { (void)arg; shell_print("cmd_passwd: stub\n"); shell_last_exit_code = 0; }
 void cmd_pkg(const char *arg) { (void)arg; shell_print("cmd_pkg: stub\n"); shell_last_exit_code = 0; }
 void cmd_play(const char *arg) { (void)arg; shell_print("cmd_play: stub\n"); shell_last_exit_code = 0; }
-void cmd_quota(const char *arg) { (void)arg; shell_print("cmd_quota: stub\n"); shell_last_exit_code = 0; }
 void cmd_quota_ext(const char *arg) { (void)arg; shell_print("cmd_quota_ext: stub\n"); shell_last_exit_code = 0; }
 void cmd_rcu(const char *arg) { (void)arg; shell_print("cmd_rcu: stub\n"); shell_last_exit_code = 0; }
 void cmd_readahead_stat(const char *arg) { (void)arg; shell_print("cmd_readahead_stat: stub\n"); shell_last_exit_code = 0; }
@@ -220,7 +219,6 @@ void cmd_version(const char *arg) { (void)arg; shell_print("cmd_version: stub\n"
 void cmd_watch_dir(const char *arg) { (void)arg; shell_print("cmd_watch_dir: stub\n"); shell_last_exit_code = 0; }
 void cmd_wc(const char *arg) { (void)arg; shell_print("cmd_wc: stub\n"); shell_last_exit_code = 0; }
 void cmd_workqueue(const char *arg) { (void)arg; shell_print("cmd_workqueue: stub\n"); shell_last_exit_code = 0; }
-void cmd_xattr(const char *arg) { (void)arg; shell_print("cmd_xattr: stub\n"); shell_last_exit_code = 0; }
 void cmd_df(void) { shell_print("cmd_df: stub\n"); shell_last_exit_code = 0; }
 void cmd_httpget(const char *a, const char *b) { (void)a, (void)b; shell_print("cmd_httpget: stub\n"); shell_last_exit_code = 0; }
 void cmd_ipcs(void) { shell_print("cmd_ipcs: stub\n"); shell_last_exit_code = 0; }
