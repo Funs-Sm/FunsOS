@@ -71,7 +71,6 @@ void cmd_run_app(const char *arg) { (void)arg; shell_print("cmd_run_app: stub\n"
 void cmd_taskbar(const char *arg) { (void)arg; shell_print("cmd_taskbar: stub\n"); shell_last_exit_code = 0; }
 void cmd_search(const char *arg) { (void)arg; shell_print("cmd_search: stub\n"); shell_last_exit_code = 0; }
 void cmd_fc(const char *arg) { (void)arg; shell_print("cmd_fc: stub\n"); shell_last_exit_code = 0; }
-void cmd_hash(const char *arg) { (void)arg; shell_print("cmd_hash: stub\n"); shell_last_exit_code = 0; }
 void cmd_save(const char *arg) { (void)arg; shell_print("cmd_save: stub\n"); shell_last_exit_code = 0; }
 void cmd_resume(const char *arg) { (void)arg; shell_print("cmd_resume: stub\n"); shell_last_exit_code = 0; }
 void cmd_logout(const char *arg) { (void)arg; shell_print("cmd_logout: stub\n"); shell_last_exit_code = 0; }

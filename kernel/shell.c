@@ -7,6 +7,7 @@
 #include "cmd_archive.h"
 #include "cmd_data.h"
 #include "cmd_text.h"
+#include "cmd_hash.h"
 #include "cmd_path.h"
 #include "cmd_sysinfo2.h"
 #include "cmd_sysinfo.h"
@@ -5068,6 +5069,14 @@ static int shell_execute_single(const char *cmd) {
     } else if (strcmp(line, "hash") == 0) {
 
         cmd_hash(arg);
+
+    } else if (strcmp(line, "sha256sum") == 0) {
+
+        cmd_sha256sum(arg);
+
+    } else if (strcmp(line, "md5sum") == 0) {
+
+        cmd_md5sum(arg);
 
     } else if (strcmp(line, "compress") == 0) {
 
