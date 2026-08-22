@@ -389,7 +389,7 @@ static void registry_load_defaults(void) {
     h = reg_create_key(HKEY_LOCAL_MACHINE, "System");
     reg_set_str(h, "hostname", "funsos-pc");
     reg_set_str(h, "os_name", "FUNSOS");
-    reg_set_str(h, "kernel_version", "0.8");
+    reg_set_str(h, "kernel_version", "0.9");
     reg_set_str(h, "build_date", __DATE__);
     reg_set_dw(h, "uptime_ticks", 0);
     reg_set_dw(h, "multi_user", 1);

@@ -233,7 +233,7 @@ sdk/
 // 目标操作系统信息
 #define FUNSOS_OS_NAME    "FUNSOS"
 #define FUNSOS_KERNEL_NAME   "FunsCore"
-#define FUNSOS_KERNEL_VERSION "0.8"
+#define FUNSOS_KERNEL_VERSION "0.9"
 ```
 
 ---

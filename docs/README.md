@@ -1,6 +1,6 @@
 # docs/ — 项目文档
 
-> v0.8.1 起集中存放重构与架构说明的位置。**单文件级别**的说明放在该文件自身的头部注释中;
+> v0.9 起，`docs/` 目录集中存放重构与架构说明。**单文件级别**的说明放在该文件自身的头部注释中;
 > **跨模块**的说明放在这里。
 
 ## 文档索引
@@ -20,17 +20,14 @@
 ## 重构路线图(2026-08 起)
 
 ```
-v0.8.1          ── 用户态+GUI+renderer 结构清理
-                   ↑ 已完成
-
-v0.8.2 (当前)  ── renderer/src/effect.c 实际拆分
-                   ├─ Phase 1 (DONE): opacity 迁出 → effect_s8.c (2 KB, 自包含)
-                   ├─ Phase 2: sections 9-12 (高级/色彩/阴影扩展/发光描边)
-                   │           需要整组迁出(内部互相调用)
-                   └─ Phase 3: sections 0-7 (与主模块互相依赖,高风险)
-v0.8.3          ── kernel/shell.c 实际拆分(5~8 次迭代)
-v0.8.4          ── renderer/src/widgets.c 按控件拆(15+ 文件)
-v0.8.5          ── GUI 边界标准化(gui/window_server 独立化)
-
-v0.9            ── 真正用户态进程隔离(init ELF / shell ELF 独立)
+v0.9 (当前)    ── 真正用户态进程隔离 + fd 族(eventfd/timerfd/signalfd)
+                    ├─ eventfd/timerfd/signalfd 内核对象实现
+                    ├─ lib/tinyevloop epoll-lite 轮询集
+                    ├─ xattr (4 个 namespace) + quota (soft/hard/grace)
+                    ├─ io_uring 异步 I/O ring
+                    ├─ ICMPv6 + PMTUD + TCP SACK helper
+                    ├─ SA_RESTORER + signalfd
+                    ├─ lib/rbtree (Cormen) + CFS
+                    └─ 9 个新 shell 命令 (xattr/acpi/signal/rbtree/io/eventfd/timerfd/signalfd/evloop)
+v1.0 (目标)    ── GUI 桌面完善 + 用户态 ELF 进程
 ```
