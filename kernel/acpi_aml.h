@@ -115,4 +115,9 @@ int acpi_aml_eval_method(acpi_aml_state_t *state, const char *path,
 
 void acpi_aml_print_stats(acpi_aml_state_t *state);
 
+/* Returns the boot-time global AML interpreter instance, or NULL if
+ * the AML interpreter was never initialised (no ACPI tables, headless
+ * embedded boot, etc.).  The pointer is owned by the AML module. */
+acpi_aml_state_t *acpi_aml_global_state(void);
+
 #endif

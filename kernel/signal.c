@@ -31,6 +31,14 @@ typedef struct {
  * 全局信号子系统初始化
  * ============================================================ */
 
+/* Built-in kernel-side sigreturn trampoline used when the user-space
+ * handler doesn't pass SA_RESTORER.  Executed in user-mode (caller
+ * stubs the trampoline into the signal frame), it issues the
+ * SYS_SIGRETURN syscall which restores the saved context.  The actual
+ * instruction sequence is set up at install time in user.ld; here we
+ * only document its contract. */
+extern void funsos_default_sigreturn_trampoline(void);
+
 void signal_init(void) {
     /* 全局信号子系统初始化 - 目前无需额外操作 */
 }
@@ -49,6 +57,7 @@ void signal_init_proc(pcb_t *proc) {
     proc->signal_sa_mask = 0;
     proc->alarm_ticks = 0;
     proc->signal_frame_addr = 0;
+    proc->signal_restorer = NULL;
 
     /* 初始化待处理信号位图（用于实时信号） */
     for (int i = 0; i < (NSIG + 31) / 32; i++) {
@@ -425,7 +434,7 @@ int signal_sigaction(pcb_t *proc, int sig, const struct sigaction *act, struct s
         oact->sa_handler = proc->signal_handlers[sig - 1];
         oact->sa_mask = proc->signal_sa_mask;
         oact->sa_flags = proc->signal_sa_flags;
-        oact->sa_restorer = NULL;
+        oact->sa_restorer = proc->signal_restorer;
     }
 
     /* 设置新的处理方式 */
@@ -433,6 +442,12 @@ int signal_sigaction(pcb_t *proc, int sig, const struct sigaction *act, struct s
         proc->signal_handlers[sig - 1] = act->sa_handler;
         proc->signal_sa_flags = act->sa_flags;
         proc->signal_sa_mask = act->sa_mask;
+        /* SA_RESTORER: user-space supplied trampoline that issues
+         * sigreturn.  Honoring it lets glibc/musl register handlers
+         * without having to spin its own trampoline. */
+        if (act->sa_flags & SA_RESTORER) {
+            proc->signal_restorer = act->sa_restorer;
+        }
     }
 
     return 0;

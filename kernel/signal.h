@@ -65,6 +65,7 @@ typedef void (*sighandler_t)(int);
 #define SA_NODEFER    0x00000008  /* 在处理程序运行时不要阻止信号 */
 #define SA_RESETHAND  0x00000010  /* 在进入处理程序时将动作重置为SIG_DFL */
 #define SA_ONSTACK    0x00000020  /* 在备用信号栈上调用处理程序 */
+#define SA_RESTORER   0x04000000  /* sa_restorer 字段有效（Linux 语义） */
 
 /* ============================================================
  * sigprocmask操作码

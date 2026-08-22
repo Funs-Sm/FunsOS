@@ -17,7 +17,10 @@
 #include "version.h"
 #include "timer.h"
 #include "pmm.h"
+#include "dcache.h"
+#include "acpi_aml.h"
 #include "stdio.h"
+#include "../lib/rbtree.h"
 #include "stdlib.h"
 #include "string.h"
 
@@ -278,4 +281,128 @@ void cmd_dumpstack(const char *args)
 {
     extern void cmd_stacktrace(const char *args);
     cmd_stacktrace(args);
+}
+
+/* ------------------------------------------------------------------ *
+ * dcache - dentry-cache hit-rate / stats (backs the 'dcache' route).
+ * ------------------------------------------------------------------ */
+void cmd_dcache(const char *args)
+{
+    (void)args;
+    dcache_stats_t st;
+    dcache_get_stats(&st);
+    uint32_t pct = 0;
+    if (st.lookups) {
+        pct = (uint32_t)((st.hits * 100U) / st.lookups);
+    }
+    char buf[160];
+    snprintf(buf, sizeof(buf),
+             "dcache: entries=%u max=%u lookups=%llu hits=%llu misses=%llu "
+             "hit_rate=%u%% reclaims=%llu invalidations=%llu\n",
+             (unsigned)st.total_entries,
+             (unsigned)st.max_entries,
+             (unsigned long long)st.lookups,
+             (unsigned long long)st.hits,
+             (unsigned long long)st.misses,
+             (unsigned)pct,
+             (unsigned long long)st.reclaims,
+             (unsigned long long)st.invalidations);
+    shell_print(buf);
+    shell_last_exit_code = 0;
+}
+
+/* ------------------------------------------------------------------ *
+ * acpi - dump ACPI/AML interpreter stats (backed by acpi_aml).
+ *
+ * The subsystem is best-effort - if the AML interpreter was never
+ * initialised (no ACPI tables), the global state is NULL and we
+ * print "not initialised" instead of crashing.
+ * ------------------------------------------------------------------ */
+extern acpi_aml_state_t *acpi_aml_global_state(void);
+void cmd_rbtree(const char *args);
+void cmd_io(const char *args);
+void cmd_signal(const char *args)
+{
+    (void)args;
+    /* Print a per-process summary of the signal subsystem.  Today this
+     * just reports that signal_*() handlers exist and the SA_RESTORER
+     * trampoline location is wired up; later PRs will expose per-proc
+     * counters. */
+    extern void funsos_default_sigreturn_trampoline(void);
+    char buf[160];
+    snprintf(buf, sizeof(buf),
+             "signal: SA_RESTORER=0x%x trampoline=%p "
+             "(SYS_SIGRETURN=48)\n",
+             (unsigned)SA_RESTORER,
+             (void *)&funsos_default_sigreturn_trampoline);
+    shell_print(buf);
+    shell_last_exit_code = 0;
+}
+void cmd_acpi(const char *args)
+{
+    (void)args;
+    acpi_aml_state_t *st = acpi_aml_global_state();
+    char buf[160];
+    if (!st) {
+        snprintf(buf, sizeof(buf), "acpi: not initialised\n");
+    } else {
+        acpi_aml_print_stats(st);
+        snprintf(buf, sizeof(buf),
+                 "acpi: ops=%llu methods=%llu devices=%llu "
+                 "call_depth=%d pc=%u/%u\n",
+                 (unsigned long long)st->ops_executed,
+                 (unsigned long long)st->methods_invoked,
+                 (unsigned long long)st->devices_seen,
+                 st->call_depth,
+                 (unsigned)st->pc, (unsigned)st->bytecode_len);
+    }
+    shell_print(buf);
+    shell_last_exit_code = 0;
+}
+
+/* ------------------------------------------------------------------ *
+ * rbtree - report generic red-black tree statistics (lib/rbtree).
+ * ------------------------------------------------------------------ */
+void cmd_rbtree(const char *args)
+{
+    (void)args;
+    rbtree_stats_t st;
+    rbtree_get_stats(&st);
+    char buf[160];
+    snprintf(buf, sizeof(buf),
+             "rbtree: inserts=%llu erases=%llu finds=%llu rotations=%llu "
+             "max_depth=%u\n",
+             (unsigned long long)st.inserts,
+             (unsigned long long)st.erases,
+             (unsigned long long)st.finds,
+             (unsigned long long)st.rotations,
+             (unsigned)st.max_depth);
+    shell_print(buf);
+    shell_last_exit_code = 0;
+}
+
+/* ------------------------------------------------------------------ *
+ * io - report io_uring statistics (backed by fs/io_uring).
+ * ------------------------------------------------------------------ */
+void cmd_io(const char *args)
+{
+    (void)args;
+    extern void io_uring_get_stats(void *out);
+    typedef struct { uint64_t submitted, completed, read_bytes,
+                     write_bytes, ring_opens, ring_closes; } stats_t;
+    stats_t st;
+    memset(&st, 0, sizeof(st));
+    io_uring_get_stats(&st);
+    char buf[200];
+    snprintf(buf, sizeof(buf),
+             "io_uring: submitted=%llu completed=%llu read_bytes=%llu "
+             "write_bytes=%llu opens=%llu closes=%llu\n",
+             (unsigned long long)st.submitted,
+             (unsigned long long)st.completed,
+             (unsigned long long)st.read_bytes,
+             (unsigned long long)st.write_bytes,
+             (unsigned long long)st.ring_opens,
+             (unsigned long long)st.ring_closes);
+    shell_print(buf);
+    shell_last_exit_code = 0;
 }

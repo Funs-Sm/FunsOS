@@ -153,6 +153,7 @@
 #include "path.h"
 #include "dentry.h"
 #include "string.h"
+#include "printf_test.h"
 
 static inline void sti(void) {
     asm volatile("sti");
@@ -1150,6 +1151,9 @@ void kernel_main(void) {
     }
     shell_init();
     klog_info("Shell initialized (available via Terminal app)");
+
+    /* v0.9: printf-format regression smoke (tests %llu/%lld/%z and friends). */
+    printf_selftest();
 
     /* 构建标准 Unix 风格目录结构 */
     fs_build_layout();

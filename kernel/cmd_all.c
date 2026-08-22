@@ -143,7 +143,7 @@ void cmd_column(const char *arg) { (void)arg; shell_print("cmd_column: stub\n");
 void cmd_compress(const char *arg) { (void)arg; shell_print("cmd_compress: stub\n"); shell_last_exit_code = 0; }
 void cmd_config(const char *arg) { (void)arg; shell_print("cmd_config: stub\n"); shell_last_exit_code = 0; }
 void cmd_db(const char *arg) { (void)arg; shell_print("cmd_db: stub\n"); shell_last_exit_code = 0; }
-void cmd_dcache(const char *arg) { (void)arg; shell_print("cmd_dcache: stub\n"); shell_last_exit_code = 0; }
+/* cmd_dcache moved to kernel/cmd_procinfo.c */
 void cmd_dd_full(const char *arg) { (void)arg; shell_print("cmd_dd_full: stub\n"); shell_last_exit_code = 0; }
 void cmd_decompress(const char *arg) { (void)arg; shell_print("cmd_decompress: stub\n"); shell_last_exit_code = 0; }
 void cmd_diff(const char *arg) { (void)arg; shell_print("cmd_diff: stub\n"); shell_last_exit_code = 0; }

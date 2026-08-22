@@ -11,18 +11,18 @@
 
 /* SDK 版本 */
 #define FUNSOS_SDK_VERSION_MAJOR  1
-#define FUNSOS_SDK_VERSION_MINOR  5
-#define FUNSOS_SDK_VERSION_PATCH  1
-#define FUNSOS_SDK_VERSION "1.5.1"
+#define FUNSOS_SDK_VERSION_MINOR  6
+#define FUNSOS_SDK_VERSION_PATCH  0
+#define FUNSOS_SDK_VERSION "1.6.0"
 
 /* 版本检查 - 用于编译期检查 SDK 版本兼容性 */
 #define FUNSOS_VERSION_CODE(major, minor, patch) (((major) << 16) | ((minor) << 8) | (patch))
-#define FUNSOS_SDK_VERSION_CODE  FUNSOS_VERSION_CODE(1, 5, 1)
+#define FUNSOS_SDK_VERSION_CODE  FUNSOS_VERSION_CODE(1, 6, 0)
 
 /* 操作系统信息（与内核 version.h 保持一致） */
 #define FUNSOS_OS_NAME    "FUNSOS"
 #define FUNSOS_KERNEL_NAME "FunsCore"
-#define FUNSOS_KERNEL_VERSION "0.8.3"
+#define FUNSOS_KERNEL_VERSION "0.9"
 
 /* ---- 功能特性宏 ----
  * 用于在编译时检测当 SDK/内核支持的功能

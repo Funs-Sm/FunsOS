@@ -41,5 +41,10 @@ void cmd_last(const char *args);
 void cmd_pidof(const char *args);
 void cmd_pstree(const char *args);
 void cmd_dumpstack(const char *args);
+void cmd_dcache(const char *args);
+void cmd_acpi(const char *args);
+void cmd_signal(const char *args);
+void cmd_rbtree(const char *args);
+void cmd_io(const char *args);
 
 #endif

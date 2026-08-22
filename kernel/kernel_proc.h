@@ -90,6 +90,7 @@ struct pcb_t {
     void (*signal_handlers[32])(int);
     uint32_t signal_sa_flags;     /* sigaction 标志 */
     uint32_t signal_sa_mask;      /* sigaction 掩码 */
+    void   (*signal_restorer)(void); /* SA_RESTORER trampoline */
     uint32_t alarm_ticks;         /* alarm 定时器 (时钟滴答) */
     uint32_t signal_frame_addr;   /* 当前信号帧地址 (用于 sigreturn) */
 

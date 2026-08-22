@@ -267,8 +267,21 @@ static int read_name(acpi_aml_state_t *s, char *out) {
 
 /* ---- opcode dispatch ---- */
 
-static int run_block(acpi_aml_state_t *s, uint32_t start, uint32_t end);
+/* ------------------------------------------------------------------
+ * Global AML state accessor.
+ *
+ * Many call sites (cmd_acpi, ACPI sleep, fan-control) want to read
+ * live interpreter stats without owning a state object.  We keep a
+ * single shared state for the boot-time firmware and let callers
+ * obtain it via acpi_aml_global_state().  NULL means "AML was not
+ * brought up on this boot" (e.g. embedded board without an ACPI
+ * table).
+ * ------------------------------------------------------------------ */
+static acpi_aml_state_t *g_aml_state;
 
+acpi_aml_state_t *acpi_aml_global_state(void) { return g_aml_state; }
+
+static int run_block(acpi_aml_state_t *s, uint32_t start, uint32_t end);
 static int execute_op(acpi_aml_state_t *s, uint16_t op) {
     s->ops_executed++;
     switch (op) {
@@ -755,6 +768,9 @@ int acpi_aml_init(acpi_aml_state_t *state,
     state->root = ns_new("\\", (acpi_ns_node_t *)0);
     if (!state->root) return -1;
     state->current_scope = state->root;
+    /* Publish to the global accessor so debug commands and the ACPI
+     * sleep path can introspect this boot's interpreter instance. */
+    g_aml_state = state;
     return 0;
 }
 

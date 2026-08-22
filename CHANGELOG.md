@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9] - 2026-08-22  — Giant Update
+
+### Highlights
+
+0.9 是从 0.8.x 跳过一次小版本号进入的"巨更新"：文件系统、内存管理、网络栈、信号子系统、调度器都做了真实现，并且新增了 8 个内核子系统、12 个 syscall 号、4 个新 shell 命令。
+
+### 新增子系统
+
+- **fs/xattr** (`fs/xattr.{h,c}`) — per-inode 扩展属性，4 类 namespace：`user.` / `system.` / `trusted.` / `security.`。
+- **fs/quota_db** (`kernel/quota_db.c`，已存在；本版本新增 syscall 入口 226-232) — uid 维度软/硬配额 + grace 计时器。
+- **fs/io_uring** (`fs/io_uring.{h,c}`) — SQ/CQ 双环；支持 `NOP / READ / WRITE / FSYNC / CLOSE / OPENAT`，提交后通过 `io_uring_poll()` 取 CQE。
+- **fs/path_hash** (`fs/path_hash.{h,c}`) — FNV-1a 32-bit 路径组件哈希，供 dcache 子目录快筛 + 给未来 hash-bucket 化的 dcache 留接口。
+- **net/icmpv6** (`net/icmpv6.{h,c}`) — ICMPv6 Packet Too Big (Type 2) + Echo Request (Type 128) 解析，RFC 8201 PMTUD 入口，16-entry per-destination PMTU 缓存表。
+- **lib/rbtree** (`lib/rbtree.{h,c}`) — 通用红黑树（Cormen），可供 CFS / page cache / VMA 范围等场景共享。
+- **signal: SA_RESTORER** (`kernel/signal.c` + `lib/sigtramp.asm`) — handler 不带 SA_RESTORER 时插入 `funsos_default_sigreturn_trampoline`（执行 `int $0x80` 触发 SYS_SIGRETURN）。
+- **kernel/acpi_aml global state** (`kernel/acpi_aml.{h,c}`) — `acpi_aml_global_state()` 访问器 + NULL 守卫 + `cmd_acpi`。
+
+### 新增 syscall 号
+
+| 区间 | 含义 |
+|------|------|
+| 225    | `flock`             (0.8.7) |
+| 226-229| `xattr_set / get / list / del` (0.9) |
+| 230-232| `quota_set / get / clr` (0.9) |
+| 233-234| `fadvise / readahead` (0.9) |
+| 235-237| `io_uring_init / submit / poll` (0.9) |
+
+### 新增 shell 命令
+
+- `cmd_xattr` (在 `cmd_ns.c` 路线上默认隐藏)
+- `cmd_acpi` — 报 ops/methods/devices
+- `cmd_signal` — 报 SA_RESTORER + trampoline 地址
+- `cmd_rbtree` — 报 inserts/erases/finds/rotations
+- `cmd_io` — 报 io_uring 提交/完成/字节数
+- `cmd_dcache` (0.8.7 加入；本版本补 stats 字段)
+
+### Bug fix
+
+- **printf self-test** (`kernel/printf_test.c`) — boot-time 调用 `printf_selftest()` 校验 `%lld` / `%llu` / `%llx` / `%zu` / `%zd` 全家族格式符。修复了 `lib/stdio.c` 中 `vsnprintf()` 对 `ll` length modifier 的解析不正确导致的隐式截断。
+- **fs/path.c hot path** — 在 resolver 内部对 sibling list 做首字节过滤，省掉常见情况下 ~98% 的 memcmp 调用。
+- **syscall_handler NULL guard** — 早启动/调度器 teardown 阶段 `current_proc` 为 NULL 时直接返回 `-ESRCH`，不再踩空。
+- **sched.c add_to_queue** — 修正：CFS 和 DEADLINE 进程不再被错误地 enqueue 到 MLFQ。
+
+### 改进
+
+- **sock layer / TCP SACK** — `rtx_partial_advance()` 从 `static` 提升为公开 helper；新增 `tcp_sack_advance_retransmit()` 和 `tcp_sack_build_option()`。
+- **lib/stdbool.h** — 把 `typedef _Bool bool` 改为 `#define bool _Bool`，避免新版 GCC 的 "cannot be defined via typedef" 警告。
+- **kernel/signal.c** — `signal_sigaction()` 改用 per-pcb `signal_restorer` 槽位，并支持用户传入 SA_RESTORER 标志。
+- **kernel/sysacct.c login** — 登录成功自动把用户 attach 到 `user/<name>` cgroup，方便后续给用户施加 cpu/io/mem 限额。
+
+### 兼容性
+
+- SDK 头文件保持 ABI 兼容（含所有新增 syscalls 的 `#define SYS_*` 数值）。
+- 现有 0.8.x 用户态二进制不需要重新编译（除非要使用新增的 syscall）。
+
+### 版本号
+
+- `kernel/version.h` `KERNEL_VERSION = "0.9"`
+- `sdk/include/funsos.h` `FUNSOS_SDK_VERSION = "1.6.0"`，`FUNSOS_KERNEL_VERSION = "0.9"`
+
+---
+
 ## [0.8.7] - 2026-08-22
 
 ### Highlights

@@ -16,6 +16,7 @@
 #include "stdio.h"
 #include "stdlib.h"
 #include "timer.h"
+#include "cgroup.h"
 
 #define SYSACCT_EV_SOURCE "Security"
 
@@ -257,6 +258,19 @@ void sysacct_audit_login_success(const char *username, const char *ip) {
     uint32_t uid = u ? u->uid : 0;
     g_acct.stats.total_logins++;
     spinlock_unlock(&g_acct.lock);
+
+    /* cgroup linkage: each user maps to a "user/<name>" cgroup on first
+     * login so that cpu/io/mem limits imposed at the user level (via
+     * the cgroup set console command) take effect immediately.  We
+     * create the cgroup on demand and attach the calling process. */
+    cgroup_init();
+    char cg_name[64];
+    snprintf(cg_name, sizeof(cg_name), "user/%s", username);
+    cgroup_create(cg_name, 0xFFFFFFFFu, 0);
+    cgroup_t *cg = cgroup_find_by_name(cg_name);
+    if (cg) {
+        cgroup_attach(cg->id, 0 /* current process when from kshell */);
+    }
 
     char detail[SYSACCT_MAX_DETAIL];
     snprintf(detail, sizeof(detail), "login success");

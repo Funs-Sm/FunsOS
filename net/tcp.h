@@ -318,6 +318,16 @@ int  tcp_state_is_closed(uint32_t state);
 void tcp_state_log_transition(tcp_socket_t *sock, uint32_t from, uint32_t to);
 int  tcp_describe_segment(tcp_header_t *hdr, char *out, uint32_t out_size);
 
+/* SACK helpers (RFC 2018) - exposed so the socket layer can call them
+ * from its ACK-emit path. */
+int tcp_sack_advance_retransmit(tcp_socket_t *sock);
+int tcp_sack_build_option(tcp_socket_t *sock, uint8_t *out, uint32_t max_len,
+                          uint8_t max_blocks);
+
+/* Internal but exposed for tcp_state.c SACK helpers. */
+void rtx_partial_advance(tcp_socket_t *sock, uint32_t ack,
+                          sack_range_t *blk, uint8_t n);
+
 /* ---- Congestion Control API ---- */
 void  tcp_cc_set_algo(tcp_socket_t *sock, uint8_t algo);
 uint8_t tcp_cc_get_algo(tcp_socket_t *sock);

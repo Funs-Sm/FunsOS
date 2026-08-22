@@ -38,7 +38,7 @@ SDK_EXCLUDE = $(SDK_OBJ)
 KERNEL_C = $(wildcard kernel/*.c)
 # Kernel ASM sources (all .asm in kernel/ and lib/, excluding conflicts)
 KERNEL_ASM = kernel/entry.asm kernel/interrupt.asm kernel/context.asm kernel/spinlock_asm.asm kernel/fpu_asm.asm kernel/acpi_asm.asm kernel/smp_trampoline.asm
-LIB_ASM    = lib/memops.asm lib/atomic.asm lib/string_asm.asm lib/setjmp.asm
+LIB_ASM    = lib/memops.asm lib/atomic.asm lib/string_asm.asm lib/setjmp.asm lib/sigtramp.asm
 
 # All assembly sources
 ALL_ASM = $(KERNEL_ASM) $(LIB_ASM)

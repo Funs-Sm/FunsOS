@@ -5577,6 +5577,22 @@ static int shell_execute_single(const char *cmd) {
 
         cmd_dcache(arg);
 
+    } else if (strcmp(line, "acpi") == 0) {
+
+        cmd_acpi(arg);
+
+    } else if (strcmp(line, "signal") == 0) {
+
+        cmd_signal(arg);
+
+    } else if (strcmp(line, "rbtree") == 0) {
+
+        cmd_rbtree(arg);
+
+    } else if (strcmp(line, "io") == 0) {
+
+        cmd_io(arg);
+
     } else if (strcmp(line, "icache") == 0) {
 
         cmd_icache(arg);

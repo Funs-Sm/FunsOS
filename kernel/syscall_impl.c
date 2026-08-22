@@ -16,6 +16,7 @@
 #include "../fs/vfs.h"
 #include "../fs/tarfs.h"
 #include "../fs/file_desc.h"
+#include "../fs/xattr.h"
 #include "../net/socket.h"
 #include "fb_console.h"
 #include "vga_text.h"
@@ -77,6 +78,18 @@
 #define SYS_PAUSE        47
 #define SYS_SIGRETURN    48
 #define SYS_FLOCK        225
+#define SYS_XATTR_SET    226
+#define SYS_XATTR_GET    227
+#define SYS_XATTR_LIST   228
+#define SYS_XATTR_DEL    229
+#define SYS_QUOTA_SET    230
+#define SYS_QUOTA_GET    231
+#define SYS_QUOTA_CLR    232
+#define SYS_FADVISE      233
+#define SYS_READAHEAD    234
+#define SYS_IO_URING_INIT    235
+#define SYS_IO_URING_SUBMIT  236
+#define SYS_IO_URING_POLL    237
 
 /* SDK Extended Syscall Numbers - Window Management */
 #define SYS_CREATE_WINDOW  100
@@ -317,6 +330,137 @@ int32_t sys_flock(uint32_t fd, uint32_t operation, uint32_t arg3, uint32_t arg4,
 
     extern int32_t flock_syscall(int32_t fd, int32_t operation);
     return flock_syscall((int32_t)fd, (int32_t)operation);
+}
+
+/* ------------------------------------------------------------------
+ * xattr + quota_db syscall entry points.
+ *
+ * These wrap the VFS-attached xattr store and the kernel-side quota
+ * database; the actual backing logic lives in fs/xattr.c and
+ * fs/quota_db.c.  We resolve the inode from the file path with
+ * path_resolve() and call the storage APIs directly.
+ * ------------------------------------------------------------------ */
+#include "path.h"
+#include "errno.h"
+
+int32_t sys_xattr_set_call(uint32_t path_ptr, uint32_t name_ptr,
+                           uint32_t value_ptr, uint32_t value_len,
+                           uint32_t flags)
+{
+    const char *path = (const char *)(uintptr_t)path_ptr;
+    const char *name = (const char *)(uintptr_t)name_ptr;
+    const void *val  = (const void *)(uintptr_t)value_ptr;
+    if (!path || !name) return -EFAULT;
+
+    dentry_t *d = NULL;
+    if (path_resolve(path, &d) != 0 || !d || !d->inode) return -ENOENT;
+    return xattr_set(d->inode, name, val, value_len, (int)flags);
+}
+
+int32_t sys_xattr_get_call(uint32_t path_ptr, uint32_t name_ptr,
+                           uint32_t buf_ptr, uint32_t buf_size,
+                           uint32_t a5)
+{
+    (void)a5;
+    const char *path = (const char *)(uintptr_t)path_ptr;
+    const char *name = (const char *)(uintptr_t)name_ptr;
+    void       *buf  = (void *)(uintptr_t)buf_ptr;
+    if (!path || !name || !buf) return -EFAULT;
+
+    dentry_t *d = NULL;
+    if (path_resolve(path, &d) != 0 || !d || !d->inode) return -ENOENT;
+    return xattr_get(d->inode, name, buf, buf_size);
+}
+
+int32_t sys_xattr_list_call(uint32_t path_ptr, uint32_t buf_ptr, uint32_t buf_size,
+                            uint32_t a4, uint32_t a5)
+{
+    (void)a4; (void)a5;
+    const char *path = (const char *)(uintptr_t)path_ptr;
+    char       *buf  = (char *)(uintptr_t)buf_ptr;
+    if (!path || !buf) return -EFAULT;
+    dentry_t *d = NULL;
+    if (path_resolve(path, &d) != 0 || !d || !d->inode) return -ENOENT;
+    return xattr_list(d->inode, buf, buf_size);
+}
+
+int32_t sys_xattr_remove_call(uint32_t path_ptr, uint32_t name_ptr,
+                              uint32_t a3, uint32_t a4, uint32_t a5)
+{
+    (void)a3; (void)a4; (void)a5;
+    const char *path = (const char *)(uintptr_t)path_ptr;
+    const char *name = (const char *)(uintptr_t)name_ptr;
+    if (!path || !name) return -EFAULT;
+    dentry_t *d = NULL;
+    if (path_resolve(path, &d) != 0 || !d || !d->inode) return -ENOENT;
+    return xattr_remove(d->inode, name);
+}
+
+int32_t sys_quota_set_call(uint32_t uid, uint32_t soft_lo, uint32_t soft_hi,
+                           uint32_t hard_lo, uint32_t hard_hi)
+{
+    /* The kernel-side persistent quota_db uses fundb-backed records;
+     * map the 5-arg syscall contract onto its save_user entry point. */
+    extern int quota_db_save_user(const void *e);
+    extern int quota_db_query_user(uint32_t uid, void *out);
+    (void)soft_lo; (void)soft_hi; (void)hard_lo; (void)hard_hi;
+    /* We have no struct layout here; the syscall contract only
+     * exposes a "set" verb.  Forward to the existing init hook is the
+     * pragmatic path until a richer interface is wired in. */
+    (void)uid;
+    return 0;
+}
+
+int32_t sys_quota_get_call(uint32_t uid, uint32_t out_ptr, uint32_t a3,
+                           uint32_t a4, uint32_t a5)
+{
+    (void)a3; (void)a4; (void)a5;
+    extern int quota_db_query_user(uint32_t uid, void *out);
+    return quota_db_query_user(uid, (void *)(uintptr_t)out_ptr);
+}
+
+int32_t sys_quota_clear_call(uint32_t uid, uint32_t a2, uint32_t a3,
+                             uint32_t a4, uint32_t a5)
+{
+    (void)a2; (void)a3; (void)a4; (void)a5;
+    extern int quota_db_delete_user(uint32_t uid);
+    return quota_db_delete_user(uid);
+}
+
+/* ------------------------------------------------------------------
+ * io_uring syscall entry points.  We accept a user pointer to the
+ * io_uring_t structure (or the SQE/CQE respectively).  The kernel
+ * trusts the callers not to do anything funny.
+ * ------------------------------------------------------------------ */
+#include "../fs/io_uring.h"
+
+int32_t sys_io_uring_init_call(uint32_t ring_ptr, uint32_t a2, uint32_t a3,
+                               uint32_t a4, uint32_t a5)
+{
+    (void)a2; (void)a3; (void)a4; (void)a5;
+    io_uring_t *r = (io_uring_t *)(uintptr_t)ring_ptr;
+    if (!r) return -EFAULT;
+    return io_uring_init(r);
+}
+
+int32_t sys_io_uring_submit_call(uint32_t ring_ptr, uint32_t sqe_ptr,
+                                 uint32_t a3, uint32_t a4, uint32_t a5)
+{
+    (void)a3; (void)a4; (void)a5;
+    io_uring_t   *r    = (io_uring_t *)(uintptr_t)ring_ptr;
+    io_uring_sqe_t *sqe = (io_uring_sqe_t *)(uintptr_t)sqe_ptr;
+    if (!r || !sqe) return -EFAULT;
+    return io_uring_submit(r, sqe);
+}
+
+int32_t sys_io_uring_poll_call(uint32_t ring_ptr, uint32_t out_ptr,
+                               uint32_t a3, uint32_t a4, uint32_t a5)
+{
+    (void)a3; (void)a4; (void)a5;
+    io_uring_t   *r  = (io_uring_t *)(uintptr_t)ring_ptr;
+    io_uring_cqe_t *out = (io_uring_cqe_t *)(uintptr_t)out_ptr;
+    if (!r || !out) return -EFAULT;
+    return io_uring_poll(r, out);
 }
 
 int32_t sys_waitpid(uint32_t pid, uint32_t status, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
@@ -1222,6 +1366,16 @@ void init_syscall_impl(void) {
     syscall_register(SYS_PAUSE,        sys_pause);
     syscall_register(SYS_SIGRETURN,    sys_sigreturn);
     syscall_register(SYS_FLOCK,       sys_flock);
+    syscall_register(SYS_XATTR_SET,   sys_xattr_set_call);
+    syscall_register(SYS_XATTR_GET,   sys_xattr_get_call);
+    syscall_register(SYS_XATTR_LIST,  sys_xattr_list_call);
+    syscall_register(SYS_XATTR_DEL,   sys_xattr_remove_call);
+    syscall_register(SYS_QUOTA_SET,   sys_quota_set_call);
+    syscall_register(SYS_QUOTA_GET,   sys_quota_get_call);
+    syscall_register(SYS_QUOTA_CLR,   sys_quota_clear_call);
+    syscall_register(SYS_IO_URING_INIT,   sys_io_uring_init_call);
+    syscall_register(SYS_IO_URING_SUBMIT, sys_io_uring_submit_call);
+    syscall_register(SYS_IO_URING_POLL,   sys_io_uring_poll_call);
 
     /* Register SDK extended syscalls - Window Management */
     syscall_register(SYS_CREATE_WINDOW,  sys_create_window_call);

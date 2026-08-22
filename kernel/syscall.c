@@ -7,6 +7,7 @@
 #include "kheap.h"
 #include "signal.h"
 #include "../lib/string.h"
+#include "../lib/errno.h"
 
 #define ENOSYS 38
 #define MAX_SYSCALL 256
@@ -101,7 +102,19 @@ enum {
     SYS_FOCUS_WINDOW=222,
     SYS_RAISE_WINDOW=223,
     SYS_GET_WIN_RECT=224,
-    SYS_FLOCK      = 225
+    SYS_FLOCK      = 225,
+    SYS_XATTR_SET  = 226,
+    SYS_XATTR_GET  = 227,
+    SYS_XATTR_LIST = 228,
+    SYS_XATTR_DEL  = 229,
+    SYS_QUOTA_SET  = 230,
+    SYS_QUOTA_GET  = 231,
+    SYS_QUOTA_CLR  = 232,
+    SYS_FADVISE    = 233,
+    SYS_READAHEAD  = 234,
+    SYS_IO_URING_INIT   = 235,
+    SYS_IO_URING_SUBMIT = 236,
+    SYS_IO_URING_POLL   = 237
 };
 
 extern volatile int need_resched;
@@ -110,9 +123,14 @@ static syscall_func_t syscall_table[256];
 
 void syscall_handler(regs_t *regs) {
     pcb_t *current = sched_get_current();
-    if (current) {
-        current->kernel_stack = regs->esp_kernel;
+    if (!current) {
+        /* No current PCB (e.g. very early boot, or scheduler tearing down).
+         * Refuse the syscall with ESRCH.  Returning -ENOSYS would be wrong
+         * because the syscall slot is valid; the process context is not. */
+        regs->eax = (uint32_t)(-ESRCH);
+        return;
     }
+    current->kernel_stack = regs->esp_kernel;
 
     uint32_t num = regs->eax;
 

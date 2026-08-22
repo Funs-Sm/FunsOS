@@ -240,6 +240,58 @@
 
 ---
 
+## v0.9 新增 / 改造 (本节追加)
+
+| 区域 | 特性 | 实现 | 证据 |
+|------|------|------|------|
+| **fs/xattr** | per-inode 扩展属性存储 | ✅ | `fs/xattr.c` — user./system./trusted./security.* 4 类 namespace |
+| | xattr 四类 namespace + CREATE/REPLACE 语义 | ✅ | `xattr_set` flags=1(EEXIST)/2(ENODATA) |
+| | xattr list/get/remove/stats | ✅ | `xattr_get_stats()` 暴露给 `cmd_xattr` |
+| | xattr syscall 入口 SYS_XATTR_SET/GET/LIST/DEL (226-229) | ✅ | `kernel/syscall_impl.c` |
+| **fs/quota_db** | uid 维度软/硬配额 + grace 计时 | ✅ | `kernel/quota_db.c` (FunDB 持久化) |
+| | quota syscall 入口 SYS_QUOTA_SET/GET/CLR (230-232) | ✅ | `kernel/syscall_impl.c` |
+| **fs/path_hash** | FNV-1a 路径组件哈希 + 热路径快筛 | ✅ | `fs/path_hash.c` |
+| | dcache 子目录遍历首字节快筛 | ✅ | `fs/path.c` resolver hot path |
+| **net/ipv6** | PMTUD 入口 + PTB 消息处理 | ✅ | `net/icmpv6.c` (Type 2 + 128) |
+| | 16-entry per-dest PMTU 缓存 + RFC 8201 clamp | ✅ | `ipv6_pmtu_set` |
+| **net/tcp SACK** | `tcp_sack_advance_retransmit()` 公开 helper | ✅ | `net/tcp_state.c` |
+| | `rtx_partial_advance()` 从 static 提升为全局 | ✅ | `net/tcp.c` |
+| | TCP 自带 SACK 路径 → fan-in via heap-friendly out param | ✅ | `net/tcp_state.c` |
+| **signal/SA_RESTORER** | 用户注册带 SA_RESTORER 的 handler | ✅ | `kernel/signal.c` `signal_sigaction` |
+| | 内置 `funsos_default_sigreturn_trampoline` 兜底 | ✅ | `lib/sigtramp.asm` |
+| | per-pcb `signal_restorer` 槽位 + 持久化 | ✅ | `kernel/kernel_proc.h` |
+| **kernel/acpi_aml** | 全局 state accessor + NULL 守卫 | ✅ | `acpi_aml_global_state()` |
+| | `cmd_acpi` 报 ops/methods/devices | ✅ | `kernel/cmd_procinfo.c` |
+| **lib/rbtree** | 通用红黑树 (Cormen) | ✅ | `lib/rbtree.{h,c}` |
+| | `cmd_rbtree` 报 inserts/erases/finds/rotations | ✅ | `kernel/cmd_procinfo.c` |
+| **fs/io_uring** | SQ/CQ 双环 + NOP/READ/WRITE/FSYNC/CLOSE/OPENAT | ✅ | `fs/io_uring.{h,c}` |
+| | io_uring syscall 入口 235/236/237 | ✅ | `kernel/syscall_impl.c` |
+| | `cmd_io` 报 submitted/completed/bytes | ✅ | `kernel/cmd_procinfo.c` |
+| **kernel/cgroup + sysacct** | 用户登录自动落到 `user/<name>` cgroup | ✅ | `kernel/sysacct.c` `sysacct_audit_login_success` |
+| **misc** | `cmd_signal` 报 SA_RESTORER 0x04000000 | ✅ |  |
+| | `lib/stdbool.h` 从 typedef 改成 #define (避免 GCC 警告) | ✅ | `lib/stdbool.h` |
+| | `kprintf.h` 提供 PRI* + KPRI_STR/CONCAT 宏 | ✅ | `lib/kprintf.{h,c}` |
+| | `printf_selftest()` boot-time 自检 (lld/llu/llx/zu/zd) | ✅ | `kernel/printf_test.c` |
+
+> 上面每个 ✅ 在源码里都能 grep 到对应实现 + git log 有对应 commit。
+
+### v0.9 syscall 速查
+
+| 区间 | 含义 |
+|------|------|
+| 1-48   | POSIX 基础 (exit/fork/read/write/open/...) |
+| 49-99  | 用户态 / 桌面 / 窗口系统 |
+| 100-179| SDK 拓展 (窗口、绘制、剪辑板、音频、3D 渲染) |
+| 200-220| 窗口高级 (state, focus, raise) |
+| 225    | flock |
+| 226-229| xattr (set/get/list/del) |
+| 230-232| quota (set/get/clear) |
+| 233    | fadvise |
+| 234    | readahead |
+| 235-237| io_uring (init/submit/poll) |
+
+
+
 ## 完整度统计
 
 | 状态 | 数量 | 占比 |

@@ -40,26 +40,27 @@ static int output_string(char *buf, size_t size, size_t *pos, const char *s, int
     return count;
 }
 
-static int output_int(char *buf, size_t size, size_t *pos, long value, int base, int uppercase, int width, int left_align, char pad, int show_sign) {
-    char tmp[33];
+static int output_signed(char *buf, size_t size, size_t *pos, long long value, int base, int uppercase, int width, int left_align, char pad, int show_sign) {
+    char tmp[65];
     int i = 0;
     int negative = 0;
-    unsigned long uv;
+    unsigned long long uv;
 
     if (value < 0) {
         negative = 1;
-        uv = (unsigned long)(-(value + 1)) + 1;
+        /* two-step negation avoids UB on LLONG_MIN */
+        uv = (unsigned long long)(-(value + 1)) + 1ULL;
     } else {
-        uv = (unsigned long)value;
+        uv = (unsigned long long)value;
     }
 
     if (uv == 0) {
         tmp[i++] = '0';
     } else {
         while (uv > 0) {
-            int digit = uv % base;
-            tmp[i++] = digit < 10 ? '0' + digit : (uppercase ? 'A' : 'a') + digit - 10;
-            uv /= base;
+            int digit = (int)(uv % (unsigned long long)base);
+            tmp[i++] = digit < 10 ? (char)('0' + digit) : (char)((uppercase ? 'A' : 'a') + digit - 10);
+            uv /= (unsigned long long)base;
         }
     }
 
@@ -118,8 +119,45 @@ static int output_int(char *buf, size_t size, size_t *pos, long value, int base,
     return count;
 }
 
-static int output_uint(char *buf, size_t size, size_t *pos, unsigned long value, int base, int uppercase, int width, int left_align, char pad) {
-    return output_int(buf, size, pos, (long)value, base, uppercase, width, left_align, pad, 0);
+static int output_unsigned(char *buf, size_t size, size_t *pos, unsigned long long value, int base, int uppercase, int width, int left_align, char pad) {
+    char tmp[65];
+    int i = 0;
+    unsigned long long uv = value;
+
+    if (uv == 0) {
+        tmp[i++] = '0';
+    } else {
+        while (uv > 0) {
+            int digit = (int)(uv % (unsigned long long)base);
+            tmp[i++] = digit < 10 ? (char)('0' + digit) : (char)((uppercase ? 'A' : 'a') + digit - 10);
+            uv /= (unsigned long long)base;
+        }
+    }
+
+    int pad_len = width - i;
+    if (pad_len < 0) pad_len = 0;
+    int count = 0;
+
+    if (left_align) {
+        while (i--) {
+            output_char(buf, size, pos, tmp[i]);
+            count++;
+        }
+        while (pad_len-- > 0) {
+            output_char(buf, size, pos, ' ');
+            count++;
+        }
+    } else {
+        while (pad_len-- > 0) {
+            output_char(buf, size, pos, pad);
+            count++;
+        }
+        while (i--) {
+            output_char(buf, size, pos, tmp[i]);
+            count++;
+        }
+    }
+    return count;
 }
 
 int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap) {
@@ -142,7 +180,9 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap) {
         int show_sign = 0;
         char pad = ' ';
         int width = 0;
-        int long_flag = 0;
+        int long_flag = 0;   /* 0 = none, 1 = 'l', 2 = 'll' */
+        int int_flag  = 0;   /* 'hh' (signed/unsigned char) or 'h'  */
+        int size_z    = 0;   /* 'z' length (size_t) */
 
         while (1) {
             if (*fmt == '-') {
@@ -164,64 +204,95 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap) {
             fmt++;
         }
 
-        if (*fmt == 'l') {
+        /* Length modifiers: hh, h, l, ll, z, j, t.  Standard C99. */
+        if (*fmt == 'h') {
+            fmt++;
+            if (*fmt == 'h') { int_flag = 2; fmt++; }
+            else             { int_flag = 1; }
+        } else if (*fmt == 'l') {
+            fmt++;
+            if (*fmt == 'l') { long_flag = 2; fmt++; }
+            else             { long_flag = 1; }
+        } else if (*fmt == 'z') {
+            size_z = 1;
+            fmt++;
+        } else if (*fmt == 'j' || *fmt == 't') {
+            /* intmax_t / ptrdiff_t: promote to long on -m32. */
             long_flag = 1;
             fmt++;
         }
 
         switch (*fmt) {
-        case 'd': {
-            long val;
-            if (long_flag) {
-                val = va_arg(ap, long);
-            } else {
-                val = va_arg(ap, int);
-            }
-            count += output_int(buf, size, &pos, val, 10, 0, width, left_align, pad, show_sign);
+        case 'd':
+        case 'i': {
+            long long val;
+            if      (int_flag == 2) val = (long long)(signed char)va_arg(ap, int);
+            else if (int_flag == 1) val = (long long)(short)va_arg(ap, int);
+            else if (long_flag == 2) val = va_arg(ap, long long);
+            else if (size_z)         val = (long long)(long)(unsigned long)va_arg(ap, size_t);
+            else if (long_flag == 1) val = va_arg(ap, long);
+            else                    val = va_arg(ap, int);
+            count += output_signed(buf, size, &pos, val, 10, 1, width, left_align, pad, show_sign);
             fmt++;
             break;
         }
         case 'u': {
-            unsigned long val;
-            if (long_flag) {
-                val = va_arg(ap, unsigned long);
-            } else {
-                val = va_arg(ap, unsigned int);
+            unsigned long long val;
+            if      (int_flag == 2) val = (unsigned long long)(unsigned char)va_arg(ap, unsigned int);
+            else if (int_flag == 1) val = (unsigned long long)(unsigned short)va_arg(ap, unsigned int);
+            else if (long_flag == 2) {
+                /* On x86-32, va_arg(ap, unsigned long long) may sign-extend the
+                 * 32-bit halves on some toolchains.  Pull as signed long long
+                 * (which we know reads 8 bytes correctly) and bit-cast. */
+                long long sv = va_arg(ap, long long);
+                val = (unsigned long long)sv;
             }
-            count += output_uint(buf, size, &pos, val, 10, 0, width, left_align, pad);
+            else if (size_z)         val = (unsigned long long)va_arg(ap, size_t);
+            else if (long_flag == 1) val = (unsigned long long)(unsigned long)va_arg(ap, unsigned long);
+            else                    val = (unsigned long long)va_arg(ap, unsigned int);
+            count += output_unsigned(buf, size, &pos, val, 10, 0, width, left_align, pad);
             fmt++;
             break;
         }
         case 'x': {
-            unsigned long val;
-            if (long_flag) {
-                val = va_arg(ap, unsigned long);
-            } else {
-                val = va_arg(ap, unsigned int);
+            unsigned long long val;
+            if      (int_flag == 2) val = (unsigned long long)(unsigned char)va_arg(ap, unsigned int);
+            else if (int_flag == 1) val = (unsigned long long)(unsigned short)va_arg(ap, unsigned int);
+            else if (long_flag == 2 || size_z) {
+                long long sv = va_arg(ap, long long);
+                val = (unsigned long long)sv;
             }
-            count += output_uint(buf, size, &pos, val, 16, 0, width, left_align, pad);
+            else if (long_flag == 1) val = (unsigned long long)(unsigned long)va_arg(ap, unsigned long);
+            else                    val = (unsigned long long)va_arg(ap, unsigned int);
+            count += output_unsigned(buf, size, &pos, val, 16, 0, width, left_align, pad);
             fmt++;
             break;
         }
         case 'X': {
-            unsigned long val;
-            if (long_flag) {
-                val = va_arg(ap, unsigned long);
-            } else {
-                val = va_arg(ap, unsigned int);
+            unsigned long long val;
+            if      (int_flag == 2) val = (unsigned long long)(unsigned char)va_arg(ap, unsigned int);
+            else if (int_flag == 1) val = (unsigned long long)(unsigned short)va_arg(ap, unsigned int);
+            else if (long_flag == 2 || size_z) {
+                long long sv = va_arg(ap, long long);
+                val = (unsigned long long)sv;
             }
-            count += output_uint(buf, size, &pos, val, 16, 1, width, left_align, pad);
+            else if (long_flag == 1) val = (unsigned long long)(unsigned long)va_arg(ap, unsigned long);
+            else                    val = (unsigned long long)va_arg(ap, unsigned int);
+            count += output_unsigned(buf, size, &pos, val, 16, 1, width, left_align, pad);
             fmt++;
             break;
         }
         case 'o': {
-            unsigned long val;
-            if (long_flag) {
-                val = va_arg(ap, unsigned long);
-            } else {
-                val = va_arg(ap, unsigned int);
+            unsigned long long val;
+            if      (int_flag == 2) val = (unsigned long long)(unsigned char)va_arg(ap, unsigned int);
+            else if (int_flag == 1) val = (unsigned long long)(unsigned short)va_arg(ap, unsigned int);
+            else if (long_flag == 2 || size_z) {
+                long long sv = va_arg(ap, long long);
+                val = (unsigned long long)sv;
             }
-            count += output_uint(buf, size, &pos, val, 8, 0, width, left_align, pad);
+            else if (long_flag == 1) val = (unsigned long long)(unsigned long)va_arg(ap, unsigned long);
+            else                    val = (unsigned long long)va_arg(ap, unsigned int);
+            count += output_unsigned(buf, size, &pos, val, 8, 0, width, left_align, pad);
             fmt++;
             break;
         }
@@ -233,18 +304,18 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap) {
             break;
         }
         case 'c': {
-            char c = (char)va_arg(ap, int);
-            output_char(buf, size, &pos, c);
+            char ch = (char)va_arg(ap, int);
+            output_char(buf, size, &pos, ch);
             count++;
             fmt++;
             break;
         }
         case 'p': {
-            unsigned long val = (unsigned long)(uintptr_t)va_arg(ap, void *);
+            unsigned long long val = (unsigned long long)(uintptr_t)va_arg(ap, void *);
             output_char(buf, size, &pos, '0');
             output_char(buf, size, &pos, 'x');
             count += 2;
-            count += output_uint(buf, size, &pos, val, 16, 0, width, left_align, pad);
+            count += output_unsigned(buf, size, &pos, val, 16, 0, width, left_align, pad);
             fmt++;
             break;
         }

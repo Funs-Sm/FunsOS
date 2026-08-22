@@ -549,7 +549,7 @@ static void rtx_clear(tcp_socket_t *sock) {
     sock->rtx_head = sock->rtx_tail = NULL;
 }
 
-static void rtx_partial_advance(tcp_socket_t *sock, uint32_t ack, sack_range_t *blk, uint8_t n) {
+void rtx_partial_advance(tcp_socket_t *sock, uint32_t ack, sack_range_t *blk, uint8_t n) {
     /* Trim SACK-acked bytes from head segment */
     while (sock->rtx_head) {
         tcp_segment_t *s = sock->rtx_head;

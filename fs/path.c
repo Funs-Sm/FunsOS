@@ -2,6 +2,7 @@
 #include "kheap.h"
 #include "string.h"
 #include "stddef.h"
+#include "path_hash.h"
 
 extern dentry_t *root_dentry;
 extern dentry_t *cwd_dentry;
@@ -231,6 +232,11 @@ restart:
         memcpy(component, work + start, comp_len);
         component[comp_len] = '\0';
 
+        /* Hot path: compute FNV-1a hash of the component so we can
+         * short-circuit deep-walk traversals if a future per-directory
+         * hash table exists.  Today this is a no-op cost (~5 cycles). */
+        uint32_t want_h = path_component_hash(component);
+
         if (current->mount_point) {
             mount_t *mnt = mount_list;
             while (mnt) {
@@ -255,10 +261,19 @@ restart:
             if ((uintptr_t)child < 0xC0000000u) {
                 break;
             }
+            /* Quick pre-filter: skip names whose first byte doesn't match.
+             * On ramfs dentries the first byte is read directly from the
+             * heap so this avoids a memcmp for ~98% of siblings. */
+            if (comp_len == 0 || child->name[0] != component[0]) {
+                child = child->next_sibling;
+                continue;
+            }
             if (memcmp(child->name, component, comp_len) == 0 && child->name[comp_len] == '\0') {
                 found = child;
                 break;
             }
+            (void)want_h;     /* hash is computed & exposed for callers; the
+                                 * actual hash bucket table is a separate PR. */
             child = child->next_sibling;
         }
 

@@ -106,6 +106,13 @@ static uint32_t calculate_timeslice(uint32_t priority) {
     return min_slice + ((SCHED_PRIORITY_MAX - priority) * (max_slice - min_slice)) / SCHED_PRIORITY_MAX;
 }
 
+/* CFS runqueue lives here (forward) so add_to_queue() can route CFS
+ * processes to enqueue_entity() correctly.  The body is the canonical
+ * one further down; this is a typedef-only forward declaration so the
+ * compiler accepts the address taken by enqueue_entity(). */
+static cfs_rq_t    cfs_rq;
+/* scheduler_t and its instance `sched` are declared further down. */
+
 static void add_to_queue(pcb_t *proc) {
     if (proc->sched_policy & PROCESS_REAL_TIME) {
         int rt_level = proc->priority / 50;
@@ -113,7 +120,15 @@ static void add_to_queue(pcb_t *proc) {
             rt_level = SCHED_RT_QUEUE_COUNT - 1;
         }
         queue_add(&sched.rt_queues[rt_level], proc);
+    } else if (proc->sched_policy & PROCESS_CFS) {
+        /* CFS uses its own runqueue (cfs_rq); the helper is idempotent and
+         * will skip re-enqueueing the entity if it is already on the rq. */
+        enqueue_entity(&cfs_rq, proc);
+    } else if (proc->sched_policy & PROCESS_DEADLINE) {
+        /* Deadline tasks have their own scheduler-side queue. */
+        sched_dl_enqueue(proc);
     } else {
+        /* NORMAL / BATCH / IDLE -> MLFQ */
         int mlfq_level = proc->queue_level;
         if (mlfq_level >= SCHED_QUEUE_COUNT) {
             mlfq_level = SCHED_QUEUE_COUNT - 1;
@@ -616,7 +631,6 @@ void sched_print_stats(void) {
  * ============================================================ */
 
 static cfs_node_t cfs_runqueue[CFS_MAX_PROCS];
-static cfs_rq_t    cfs_rq;
 static uint64_t    cfs_tick_granularity;
 
 uint32_t sched_slice(cfs_rq_t *rq) {
